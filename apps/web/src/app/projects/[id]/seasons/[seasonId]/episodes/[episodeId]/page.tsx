@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { assembleContext } from "@/lib/context/assemble";
+import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,10 +22,7 @@ export default async function EpisodePage({
     prisma.scene.findMany({
       where: { episodeId },
       orderBy: { order: "asc" },
-      include: {
-        characters: { select: { id: true, name: true } },
-        locations: { select: { id: true, name: true } },
-      },
+      include: SCENE_INCLUDE,
     }),
     prisma.character.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
     prisma.location.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
@@ -79,7 +77,7 @@ export default async function EpisodePage({
           <SceneManager
             parentType="episode"
             parentId={episode.id}
-            initialScenes={scenes}
+            initialScenes={mapScenesImages(scenes)}
             characters={characters}
             locations={locations}
           />

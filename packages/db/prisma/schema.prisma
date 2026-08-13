@@ -156,8 +156,27 @@ model Scene {
   visualMode       SceneVisualMode @default(ILLUSTRATION)
   visualModeReason String?         @db.Text
 
-  characters Character[]
-  locations  Location[]
+  // Phase 4 — the narrator's spoken script for this scene, manually written
+  // (mirrors Episode.summary: no AI-drafting step, only text-to-speech).
+  narration String? @db.Text
+
+  characters    Character[]
+  locations     Location[]
+  // Phase 3's generated scene images. Named (not just typed) Asset[] because
+  // Phase 4 adds a second, separate Asset relation below (narrationAudio) —
+  // Prisma requires explicit @relation names once two relations connect the
+  // same two models, so it can't stay unnamed. Deliberately NOT reused for
+  // narration audio: every consumer of this relation (SCENE_INCLUDE,
+  // mapSceneImages, the scene-manager.tsx image gallery) treats every row
+  // here as a displayable image with no type filter — mixing audio in would
+  // render broken <img> tags and get swept into image select/delete calls.
+  images Asset[] @relation("SceneImages")
+
+  // Phase 4 — narration audio takes, kept on its own FK/relation rather than
+  // reusing images' sceneId (see comment above).
+  narrationAudio Asset[] @relation("SceneNarrationAudio")
+
+  dialogueLines DialogueLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -185,8 +204,16 @@ model Character {
   characterArc   String? @db.Text
   isLocked       Boolean @default(false)
 
+  // Phase 4 — free-text TTS voice name/id (e.g. "alloy"), not a fixed enum:
+  // the set of valid voices is provider/model-specific and changes over
+  // time, so this is user-entered rather than hardcoded, same reasoning as
+  // AiModelOption not hardcoding model ids. Null falls back to whatever
+  // voice the user picks at generation time.
+  voiceName String?
+
   referenceImages Asset[]
   scenes          Scene[]
+  dialogueLines   DialogueLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -220,8 +247,41 @@ model Location {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Asset library (Phase 0+1 only stores reference images; more types land
-// in later phases once generation pipelines exist)
+// Voice pipeline (Phase 4) — dialogue lines are the per-Character spoken
+// content within a Scene, distinct from Scene.narration (the narrator's
+// script). Ordered like Scene itself; each line gets its own audio takes via
+// Asset.dialogueLineId, so takes for one line never collide with another
+// line's takes in the same scene the way a single shared column would.
+// ─────────────────────────────────────────────────────────────────────────
+
+model DialogueLine {
+  id String @id @default(cuid())
+
+  sceneId String
+  scene   Scene  @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+
+  characterId String
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  order Int
+  text  String @db.Text
+
+  audio Asset[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sceneId, order])
+  @@map("dialogue_lines")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Asset library. Phase 0+1 only stored reference images; Phase 3 adds
+// GENERATED_IMAGE (scene images produced by the Image pipeline, via sceneId);
+// Phase 4 adds AUDIO_NARRATION (via its own narrationSceneId FK, kept
+// separate from sceneId so narration takes never show up in the image
+// gallery) and AUDIO_DIALOGUE (via dialogueLineId). Remaining types land once
+// their generation pipelines exist (video, etc).
 // ─────────────────────────────────────────────────────────────────────────
 
 enum AssetType {
@@ -249,6 +309,34 @@ model Asset {
 
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  sceneId String?
+  scene   Scene?  @relation("SceneImages", fields: [sceneId], references: [id], onDelete: Cascade)
+
+  narrationSceneId String?
+  narrationScene   Scene? @relation("SceneNarrationAudio", fields: [narrationSceneId], references: [id], onDelete: Cascade)
+
+  dialogueLineId String?
+  dialogueLine   DialogueLine? @relation(fields: [dialogueLineId], references: [id], onDelete: Cascade)
+
+  // Generation metadata — meaningful for AI-produced assets (GENERATED_IMAGE,
+  // AUDIO_NARRATION, AUDIO_DIALOGUE). isSelected mirrors Version.isSelected:
+  // newest generation always becomes selected, older attempts stay browsable,
+  // scoped to whichever FK (sceneId+type, narrationSceneId, or
+  // dialogueLineId) identifies the "slot" being regenerated. createdBy
+  // defaults to USER so existing REFERENCE_IMAGE upload routes don't need
+  // changes.
+  isSelected Boolean   @default(false)
+  prompt     String?   @db.Text
+  modelId    String?
+  createdBy  CreatedBy @default(USER)
+
+  // Advisory-only consistency check against locked character/location
+  // reference images. null = not validated (e.g. no reference image existed
+  // to compare against) — never treated as a failure.
+  validationPassed  Boolean?
+  validationNotes   String?  @db.Text
+  validationModelId String?
 
   createdAt DateTime @default(now())
 

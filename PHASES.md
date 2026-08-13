@@ -5,8 +5,8 @@ tool where AI drafts content on request, but the human always writes, edits,
 locks, and selects the final version. No step auto-runs the next step.
 
 This document tracks what each phase built, grounded in the code and commit
-history in this repo. **Phase 0, Phase 1, and Phase 2 are complete and
-describe what exists today.** Everything from Phase 3 onward is a **proposed
+history in this repo. **Phase 0 through Phase 3 are complete and describe
+what exists today.** Everything from Phase 4 onward is a **proposed
 roadmap**, inferred from schema/enum scaffolding and code comments already in
 the repo (see "Evidence" under each phase) — it has not been built and has
 not been confirmed by the project owner as the committed plan. Treat it as a
@@ -195,23 +195,71 @@ generation) has something to attach generated images to.
 
 ---
 
-## Proposed roadmap (Phase 3+) — 🚧 not built, not confirmed
+## Phase 3 — Image Pipeline ✅ Complete
+
+**Goal:** generate an image per scene (both `visualMode`s need a base image —
+`IMAGE_TO_VIDEO` scenes will feed theirs into video generation in a later
+phase), check it against locked character/location reference images, and let
+the user pick which attempt is the scene's image. Same "AI prepares, user
+approves" pattern as Story versions and Scene planning.
+
+### Data model (`packages/db/prisma/schema.prisma`)
+
+- `Asset` extended (previously only used for `REFERENCE_IMAGE`) rather than a
+  parallel table: `sceneId` (dual-optional-FK pattern continues), `isSelected`
+  (mirrors `Version.isSelected` — newest generation always becomes selected,
+  older attempts stay browsable/selectable), `prompt`/`modelId` (what was
+  actually sent to the image model), `createdBy` (defaults `USER` so existing
+  reference-image uploads are unaffected), and advisory-only
+  `validationPassed`/`validationNotes`/`validationModelId` (`null` = not
+  validated, never treated as a failure).
+
+### Features
+
+- **Three-step generation pipeline** (`apps/web/src/lib/scene-images.ts`):
+  `IMAGE_PROMPTS` turns the scene description plus its own tagged
+  characters'/locations' visual fields into a polished image prompt (scoped to
+  the scene's tagged roster, not `assembleContext()` — same reasoning as Scene
+  planning); `IMAGE_GENERATION` calls OpenRouter's dedicated Image API
+  (`POST /api/v1/images`, separate from chat completions) and stores the
+  result via the existing `StorageProvider`; `IMAGE_VALIDATION` sends the
+  generated image plus each tagged **locked** character's/tagged location's
+  first reference image to a vision-capable model for an advisory
+  pass/fail + reasoning (locations have no lock concept, so all tagged
+  locations participate; characters must be locked, mirroring
+  `assemble.ts`'s rule). A missing reference image never blocks
+  generation — it's surfaced in the UI instead.
+- **AI primitives** (`apps/web/src/lib/ai/openrouter.ts`): `generateImage()`
+  (the Image API primitive) and an `images?: string[]` param added to
+  `callChatModel()` (data-URI attachments as `image_url` content parts, for
+  the validation step's vision call).
+- **Manual image management** (`scene-manager.tsx`): an "Image Generation"
+  settings card (Image Prompt / Image Generation / Validation model pickers +
+  shared instructions, applied to whichever scene's button is clicked) above
+  the scene list; each scene gets a thumbnail strip of every attempt
+  (click to select, hover to delete), a validation badge per thumbnail, and a
+  "Generate Image" / "Generate Another" button.
+- **New API routes**: `POST /api/scenes/[id]/images/generate`,
+  `POST /api/scenes/[id]/images/[assetId]/select`,
+  `DELETE /api/scenes/[id]/images/[assetId]`.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`Asset` fields, `Scene.images`),
+[`apps/web/src/lib/scene-images.ts`](apps/web/src/lib/scene-images.ts),
+[`apps/web/src/lib/ai/openrouter.ts`](apps/web/src/lib/ai/openrouter.ts),
+[`apps/web/src/components/scene-manager.tsx`](apps/web/src/components/scene-manager.tsx).
+
+---
+
+## Proposed roadmap (Phase 4+) — 🚧 not built, not confirmed
 
 Everything below is **inferred**, not decided. The evidence is real (an enum
 value, a seed row, a code comment) but none of it is a commitment — no phase
-past Phase 2 has a written scope. Numbering follows the order `AiJobType` is
+past Phase 3 has a written scope. Numbering follows the order `AiJobType` is
 declared in the schema and seeded in `seed.ts`, which reads like a
 production pipeline: write the story → plan scenes → prompt for images →
 generate images → validate images → voice → video. Treat the numbering as a
 reading order, not a promise — the actual next phase is whatever the project
 owner decides next.
-
-### Phase 3 — Image pipeline (proposed)
-
-Two more `AiJobType`s already exist with seeded defaults: `IMAGE_PROMPTS`
-and `IMAGE_GENERATION`, plus `IMAGE_VALIDATION` for checking generated
-images against locked character/location references before accepting them.
-The `AssetType.GENERATED_IMAGE` enum value is already reserved.
 
 ### Phase 4 — Voice (proposed)
 

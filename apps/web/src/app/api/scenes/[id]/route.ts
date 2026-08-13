@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { SCENE_INCLUDE, resequenceScenes } from "@/lib/scenes";
+import { SCENE_INCLUDE, resequenceScenes, mapSceneImages } from "@/lib/scenes";
 
 const patchSchema = z.object({
   title: z.string().optional().nullable(),
@@ -27,7 +27,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     include: SCENE_INCLUDE,
   });
 
-  return NextResponse.json(scene);
+  return NextResponse.json(mapSceneImages(scene));
 }
 
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

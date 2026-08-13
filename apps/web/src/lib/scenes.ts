@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { prisma, type Prisma, type SceneVisualMode } from "@/lib/db";
 import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
+import { storage } from "@/lib/storage";
 
 export type ScenesParentType = "story" | "episode";
 
@@ -17,9 +18,42 @@ export function parentWhere(parentType: ScenesParentType, parentId: string) {
 const SCENE_INCLUDE = {
   characters: { select: { id: true, name: true } },
   locations: { select: { id: true, name: true } },
+  images: {
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      storageKey: true,
+      isSelected: true,
+      validationPassed: true,
+      validationNotes: true,
+      createdAt: true,
+    },
+  },
 } satisfies Prisma.SceneInclude;
 
 export type SceneWithTags = Prisma.SceneGetPayload<{ include: typeof SCENE_INCLUDE }>;
+
+// storageKey is a server-side detail — replace each image with a
+// client-facing url before a scene ever gets sent in a response. Applied at
+// every route that returns a scene (or list of scenes) built from
+// SCENE_INCLUDE, since Prisma's `include` alone can't add derived fields.
+export function mapSceneImages<T extends SceneWithTags>(scene: T) {
+  return {
+    ...scene,
+    images: scene.images.map((img) => ({
+      id: img.id,
+      url: storage.url(img.storageKey),
+      isSelected: img.isSelected,
+      validationPassed: img.validationPassed,
+      validationNotes: img.validationNotes,
+      createdAt: img.createdAt,
+    })),
+  };
+}
+
+export function mapScenesImages<T extends SceneWithTags>(scenes: T[]) {
+  return scenes.map(mapSceneImages);
+}
 
 const aiScenesResponseSchema = z.object({
   scenes: z
@@ -67,8 +101,10 @@ interface GenerateScenesParams {
   regenerateAll: boolean;
 }
 
+export type SceneWithImages = ReturnType<typeof mapSceneImages>;
+
 interface GenerateScenesResult {
-  scenes: SceneWithTags[];
+  scenes: SceneWithImages[];
   unmatchedNames: string[];
 }
 
@@ -182,7 +218,7 @@ export async function generateScenes({
     include: SCENE_INCLUDE,
   });
 
-  return { scenes, unmatchedNames: Array.from(unmatchedNames) };
+  return { scenes: mapScenesImages(scenes), unmatchedNames: Array.from(unmatchedNames) };
 }
 
 export async function resequenceScenes(tx: Prisma.TransactionClient, where: { storyId: string } | { episodeId: string }) {

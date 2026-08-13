@@ -1,5 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
 import { SceneManager } from "@/components/scene-manager";
 
 export default async function StoryScenesPage({ params }: { params: Promise<{ id: string }> }) {
@@ -12,10 +13,7 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
     prisma.scene.findMany({
       where: { storyId: project.story.id },
       orderBy: { order: "asc" },
-      include: {
-        characters: { select: { id: true, name: true } },
-        locations: { select: { id: true, name: true } },
-      },
+      include: SCENE_INCLUDE,
     }),
     prisma.character.findMany({ where: { projectId: id }, orderBy: { name: "asc" } }),
     prisma.location.findMany({ where: { projectId: id }, orderBy: { name: "asc" } }),
@@ -25,7 +23,7 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
     <SceneManager
       parentType="story"
       parentId={project.story.id}
-      initialScenes={scenes}
+      initialScenes={mapScenesImages(scenes)}
       characters={characters}
       locations={locations}
     />

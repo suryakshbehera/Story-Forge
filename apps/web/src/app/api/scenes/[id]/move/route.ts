@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { SCENE_INCLUDE, parentWhere } from "@/lib/scenes";
+import { SCENE_INCLUDE, parentWhere, mapScenesImages } from "@/lib/scenes";
 
 const bodySchema = z.object({
   direction: z.enum(["up", "down"]),
@@ -18,7 +18,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const neighbor = await tx.scene.findFirst({ where: { ...where, order: neighborOrder } });
 
     if (!neighbor) {
-      return { scenes: [scene] };
+      const full = await tx.scene.findUniqueOrThrow({ where: { id: scene.id }, include: SCENE_INCLUDE });
+      return { scenes: [full] };
     }
 
     // Per-statement unique constraint isn't deferred — swap through a
@@ -35,5 +36,5 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return { scenes: [updatedScene, updatedNeighbor] };
   });
 
-  return NextResponse.json(result);
+  return NextResponse.json({ scenes: mapScenesImages(result.scenes) });
 }

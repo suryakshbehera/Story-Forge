@@ -18,13 +18,34 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelSelect } from "@/components/model-select";
-import { Sparkles, Plus, Save, Trash2, ChevronUp, ChevronDown, AlertTriangle } from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  Sparkles,
+  Plus,
+  Save,
+  Trash2,
+  ChevronUp,
+  ChevronDown,
+  AlertTriangle,
+  ImagePlus,
+  CheckCircle2,
+  XCircle,
+  HelpCircle,
+} from "lucide-react";
 
 export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO";
 
 export interface TagOption {
   id: string;
   name: string;
+}
+
+export interface SceneImageItem {
+  id: string;
+  url: string;
+  isSelected: boolean;
+  validationPassed: boolean | null;
+  validationNotes: string | null;
 }
 
 export interface SceneItem {
@@ -36,6 +57,7 @@ export interface SceneItem {
   visualModeReason: string | null;
   characters: TagOption[];
   locations: TagOption[];
+  images: SceneImageItem[];
 }
 
 const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
@@ -61,6 +83,11 @@ export function SceneManager({
   const [instructions, setInstructions] = useState("");
   const [generating, setGenerating] = useState(false);
   const [unmatchedNames, setUnmatchedNames] = useState<string[] | null>(null);
+
+  const [promptModelId, setPromptModelId] = useState("");
+  const [imageModelId, setImageModelId] = useState("");
+  const [validationModelId, setValidationModelId] = useState("");
+  const [imageInstructions, setImageInstructions] = useState("");
 
   const baseUrl = parentType === "story" ? `/api/stories/${parentId}/scenes` : `/api/episodes/${parentId}/scenes`;
 
@@ -143,6 +170,71 @@ export function SceneManager({
     toast.success("Scene added.");
   }
 
+  async function generateImageForScene(sceneId: string) {
+    if (!promptModelId || !imageModelId) {
+      toast.error("Pick an Image Prompt and Image Generation model first.");
+      return;
+    }
+    const res = await fetch(`/api/scenes/${sceneId}/images/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        promptModelId,
+        imageModelId,
+        validationModelId: validationModelId || undefined,
+        instructions: imageInstructions,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      toast.error(body.error ?? "Image generation failed.");
+      return;
+    }
+    const data: { image: SceneImageItem; missingReferenceFor: string[] } = await res.json();
+    setScenes((prev) =>
+      prev.map((s) =>
+        s.id === sceneId
+          ? { ...s, images: [data.image, ...s.images.map((img) => ({ ...img, isSelected: false }))] }
+          : s
+      )
+    );
+    if (data.missingReferenceFor.length > 0) {
+      toast.warning(
+        `No reference image for: ${data.missingReferenceFor.join(", ")} — consistency wasn't checked.`
+      );
+    } else {
+      toast.success("Image generated.");
+    }
+  }
+
+  async function selectSceneImage(sceneId: string, assetId: string) {
+    const res = await fetch(`/api/scenes/${sceneId}/images/${assetId}/select`, { method: "POST" });
+    if (!res.ok) {
+      toast.error("Couldn't select image.");
+      return;
+    }
+    const updated: SceneImageItem = await res.json();
+    setScenes((prev) =>
+      prev.map((s) =>
+        s.id === sceneId
+          ? { ...s, images: s.images.map((img) => (img.id === assetId ? updated : { ...img, isSelected: false })) }
+          : s
+      )
+    );
+  }
+
+  async function deleteSceneImage(sceneId: string, assetId: string) {
+    if (!confirm("Delete this generated image? This can't be undone.")) return;
+    const res = await fetch(`/api/scenes/${sceneId}/images/${assetId}`, { method: "DELETE" });
+    if (!res.ok) {
+      toast.error("Couldn't delete image.");
+      return;
+    }
+    setScenes((prev) =>
+      prev.map((s) => (s.id === sceneId ? { ...s, images: s.images.filter((img) => img.id !== assetId) } : s))
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Card>
@@ -165,6 +257,36 @@ export function SceneManager({
             <Sparkles className="size-4" />
             {generating ? "Generating…" : scenes.length === 0 ? "Generate Scenes" : "Regenerate All Scenes"}
           </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Image Generation</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field label="Image Prompt Model">
+              <ModelSelect jobType="IMAGE_PROMPTS" value={promptModelId} onChange={setPromptModelId} />
+            </Field>
+            <Field label="Image Generation Model">
+              <ModelSelect jobType="IMAGE_GENERATION" value={imageModelId} onChange={setImageModelId} />
+            </Field>
+            <Field label="Validation Model">
+              <ModelSelect jobType="IMAGE_VALIDATION" value={validationModelId} onChange={setValidationModelId} />
+            </Field>
+          </div>
+          <Field label="Instructions (applies whenever you generate a scene image)">
+            <Textarea
+              rows={2}
+              placeholder='e.g. "cinematic lighting, wide shot"'
+              value={imageInstructions}
+              onChange={(e) => setImageInstructions(e.target.value)}
+            />
+          </Field>
+          <p className="text-xs text-muted-foreground">
+            Click &quot;Generate Image&quot; on any scene below — these settings apply each time.
+          </p>
         </CardContent>
       </Card>
 
@@ -212,6 +334,9 @@ export function SceneManager({
               onUpdate={updateScene}
               onMove={mergeScenes}
               onDelete={removeScene}
+              onGenerateImage={() => generateImageForScene(scene.id)}
+              onSelectImage={(assetId) => selectSceneImage(scene.id, assetId)}
+              onDeleteImage={(assetId) => deleteSceneImage(scene.id, assetId)}
             />
           ))}
         </div>
@@ -285,6 +410,9 @@ function SceneRow({
   onUpdate,
   onMove,
   onDelete,
+  onGenerateImage,
+  onSelectImage,
+  onDeleteImage,
 }: {
   scene: SceneItem;
   isFirst: boolean;
@@ -294,11 +422,15 @@ function SceneRow({
   onUpdate: (scene: SceneItem) => void;
   onMove: (scenes: SceneItem[]) => void;
   onDelete: (id: string, order: number) => void;
+  onGenerateImage: () => Promise<void>;
+  onSelectImage: (assetId: string) => void;
+  onDeleteImage: (assetId: string) => void;
 }) {
   const [title, setTitle] = useState(scene.title ?? "");
   const [description, setDescription] = useState(scene.description);
   const [visualMode, setVisualMode] = useState<SceneVisualMode>(scene.visualMode);
   const [visualModeReason, setVisualModeReason] = useState(scene.visualModeReason ?? "");
+  const [imageGenerating, setImageGenerating] = useState(false);
   const [characterIds, setCharacterIds] = useState(new Set(scene.characters.map((c) => c.id)));
   const [locationIds, setLocationIds] = useState(new Set(scene.locations.map((l) => l.id)));
   const [saving, setSaving] = useState(false);
@@ -447,6 +579,59 @@ function SceneRow({
               ))}
             </div>
           )}
+        </Field>
+
+        <Field label="Image">
+          {scene.images.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No image generated yet.</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {scene.images.map((img) => (
+                <div key={img.id} className="group relative">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onSelectImage(img.id)}
+                    onKeyDown={(e) => e.key === "Enter" && onSelectImage(img.id)}
+                    title={img.validationNotes ?? undefined}
+                    className={cn(
+                      "cursor-pointer overflow-hidden rounded-md border-2",
+                      img.isSelected ? "border-foreground" : "border-transparent"
+                    )}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={img.url} alt="" className="h-24 w-40 object-cover" />
+                  </div>
+                  <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-background/80 p-0.5">
+                    {img.validationPassed === true && <CheckCircle2 className="size-3.5 text-green-600" />}
+                    {img.validationPassed === false && <XCircle className="size-3.5 text-amber-600" />}
+                    {img.validationPassed === null && <HelpCircle className="size-3.5 text-muted-foreground" />}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteImage(img.id)}
+                    className="absolute left-1 top-1 hidden rounded-full bg-background/80 p-0.5 group-hover:block"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={imageGenerating}
+            className="mt-2 self-start"
+            onClick={async () => {
+              setImageGenerating(true);
+              await onGenerateImage();
+              setImageGenerating(false);
+            }}
+          >
+            <ImagePlus className="size-4" />
+            {imageGenerating ? "Generating…" : scene.images.length === 0 ? "Generate Image" : "Generate Another"}
+          </Button>
         </Field>
 
         <Button onClick={save} disabled={!dirty || saving} className="self-start">

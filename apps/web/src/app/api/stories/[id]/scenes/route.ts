@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { SCENE_INCLUDE } from "@/lib/scenes";
+import { SCENE_INCLUDE, mapSceneImages } from "@/lib/scenes";
 
 const createSchema = z.object({
   order: z.number().int().positive(),
@@ -31,5 +31,5 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     include: SCENE_INCLUDE,
   });
 
-  return NextResponse.json(scene, { status: 201 });
+  return NextResponse.json(mapSceneImages(scene), { status: 201 });
 }

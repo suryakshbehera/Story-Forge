@@ -46,7 +46,7 @@ export function VersionsPanel({
             {v.modelId && <span className="truncate text-xs text-muted-foreground">{v.modelId}</span>}
           </span>
           <span className="shrink-0 text-xs text-muted-foreground">
-            {new Date(v.createdAt).toLocaleString()}
+            {new Date(v.createdAt).toLocaleString("en-US")}
           </span>
         </button>
       ))}

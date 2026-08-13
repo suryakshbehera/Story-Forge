@@ -54,6 +54,8 @@ model Story {
   // Currently-selected content — denormalized copy of the selected Version's payload.
   content String? @db.Text
 
+  scenes Scene[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -116,11 +118,53 @@ model Episode {
   title   String?
   summary String? @db.Text
 
+  scenes Scene[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([seasonId, number])
   @@map("episodes")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Scene Engine (Phase 2) — breaks a Story (single video) or Episode (series)
+// into ordered scenes. Plain-CRUD, not versioned: restoring a Version would
+// mean deleting/recreating rows, which would orphan Assets that Phase 3
+// later attaches via sceneId. Dual-optional FK mirrors Asset's
+// characterId/locationId pattern — enforced at the API layer, not the DB.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum SceneVisualMode {
+  ILLUSTRATION
+  IMAGE_TO_VIDEO
+}
+
+model Scene {
+  id String @id @default(cuid())
+
+  storyId String?
+  story   Story?  @relation(fields: [storyId], references: [id], onDelete: Cascade)
+
+  episodeId String?
+  episode   Episode? @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  order       Int
+  title       String?
+  description String @db.Text
+
+  visualMode       SceneVisualMode @default(ILLUSTRATION)
+  visualModeReason String?         @db.Text
+
+  characters Character[]
+  locations  Location[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([storyId, order])
+  @@unique([episodeId, order])
+  @@map("scenes")
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -142,6 +186,7 @@ model Character {
   isLocked       Boolean @default(false)
 
   referenceImages Asset[]
+  scenes          Scene[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -166,6 +211,7 @@ model Location {
   visualStyle String? @db.Text
 
   referenceImages Asset[]
+  scenes          Scene[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

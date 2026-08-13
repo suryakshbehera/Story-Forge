@@ -3,6 +3,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { assembleContext } from "@/lib/context/assemble";
 import { EpisodeEditor } from "@/components/episode-editor";
+import { SceneManager } from "@/components/scene-manager";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft } from "lucide-react";
 
@@ -15,7 +16,19 @@ export default async function EpisodePage({
   const episode = await prisma.episode.findUnique({ where: { id: episodeId } });
   if (!episode || episode.seasonId !== seasonId) notFound();
 
-  const context = await assembleContext({ projectId, episodeId });
+  const [context, scenes, characters, locations] = await Promise.all([
+    assembleContext({ projectId, episodeId }),
+    prisma.scene.findMany({
+      where: { episodeId },
+      orderBy: { order: "asc" },
+      include: {
+        characters: { select: { id: true, name: true } },
+        locations: { select: { id: true, name: true } },
+      },
+    }),
+    prisma.character.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
+    prisma.location.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
+  ]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -57,6 +70,21 @@ export default async function EpisodePage({
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Scenes</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SceneManager
+            parentType="episode"
+            parentId={episode.id}
+            initialScenes={scenes}
+            characters={characters}
+            locations={locations}
+          />
+        </CardContent>
+      </Card>
     </div>
   );
 }

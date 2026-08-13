@@ -16,7 +16,10 @@ export function ProjectNav({
   const base = `/projects/${projectId}`;
   const tabs =
     type === "SINGLE"
-      ? [{ href: `${base}/story`, label: "Story" }]
+      ? [
+          { href: `${base}/story`, label: "Story" },
+          { href: `${base}/story/scenes`, label: "Scenes" },
+        ]
       : [
           { href: `${base}/bible`, label: "Story Bible" },
           { href: `${base}/seasons`, label: "Seasons" },

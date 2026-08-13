@@ -5,7 +5,7 @@ interface AssembleContextParams {
   episodeId?: string;
 }
 
-const MAX_CHARS = 24000;
+const MAX_CHARS = 60000;
 
 function section(title: string, lines: Array<string | null | undefined | false>): string | null {
   const body = lines.filter((line): line is string => Boolean(line)).join("\n");
@@ -138,6 +138,19 @@ export async function assembleContext({ projectId, episodeId }: AssembleContextP
       ]);
       if (currentSection) sections.push(currentSection);
     }
+  }
+
+  // Full written content is appended last, after all short structural
+  // metadata (characters, locations, episode summaries) — so if MAX_CHARS
+  // truncation kicks in, the compact context survives and only the
+  // long-form prose gets cut. Story writing itself doesn't need this (it's
+  // generating content, not consuming it), but Scene Engine does — it
+  // breaks the actual prose into scenes.
+  if (project.story?.content) {
+    sections.push(`## Full Story Content\n${project.story.content}`);
+  }
+  if (project.storyBible?.content) {
+    sections.push(`## Full Story Bible Content\n${project.storyBible.content}`);
   }
 
   const fullContext = sections.join("\n\n");

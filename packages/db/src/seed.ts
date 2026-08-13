@@ -16,9 +16,9 @@ const defaultModels: Array<{
   { jobType: "STORY_WRITING", provider: "openrouter", modelId: "anthropic/claude-sonnet-5", displayName: "Claude Sonnet 5" },
   { jobType: "SCENE_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "IMAGE_PROMPTS", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
-  { jobType: "IMAGE_GENERATION", provider: "openrouter", modelId: "openai/gpt-image-2", displayName: "GPT Image 2" },
+  { jobType: "IMAGE_GENERATION", provider: "openrouter", modelId: "openai/gpt-5.4-image-2", displayName: "GPT-5.4 Image 2" },
   { jobType: "IMAGE_VALIDATION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
-  { jobType: "VOICE", provider: "openrouter", modelId: "openai/gpt-4o-mini-tts", displayName: "GPT-4o Mini TTS" },
+  { jobType: "VOICE", provider: "openrouter", modelId: "openai/gpt-audio-mini", displayName: "GPT Audio Mini" },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
 ];
 

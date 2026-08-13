@@ -55,7 +55,7 @@ export default async function HomePage() {
                       {project._count.locations} location{project._count.locations === 1 ? "" : "s"}
                     </p>
                   )}
-                  <p className="mt-1">Updated {project.updatedAt.toLocaleDateString()}</p>
+                  <p className="mt-1">Updated {project.updatedAt.toLocaleDateString("en-US")}</p>
                 </CardContent>
               </Card>
             </Link>

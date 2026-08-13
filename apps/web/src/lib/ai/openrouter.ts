@@ -3,6 +3,10 @@ export interface ChatModelParams {
   systemPrompt: string;
   userPrompt: string;
   temperature?: number;
+  // Requests OpenAI-compatible JSON mode. The word "JSON" must appear
+  // somewhere in the prompt content or the provider rejects the request —
+  // callers must ensure their system/user prompt satisfies this.
+  jsonMode?: boolean;
 }
 
 export class OpenRouterError extends Error {}
@@ -16,6 +20,7 @@ export async function callChatModel({
   systemPrompt,
   userPrompt,
   temperature = 0.8,
+  jsonMode = false,
 }: ChatModelParams): Promise<string> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
@@ -33,6 +38,7 @@ export async function callChatModel({
     body: JSON.stringify({
       model: modelId,
       temperature,
+      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },

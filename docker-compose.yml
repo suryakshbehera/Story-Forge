@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: narrata-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: narrata
+      POSTGRES_PASSWORD: narrata
+      POSTGRES_DB: narrata
+      # Local-dev-only DB bound to loopback — trust avoids fighting password
+      # auth for a database with no real security boundary to protect.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5555:5432"
+    volumes:
+      - narrata-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  narrata-postgres-data:

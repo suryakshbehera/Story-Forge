@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# build output
+dist/
+.next/
+out/
+build/
+
+# prisma
+packages/db/prisma/migrations/**/migration_lock.toml.bak
+
+# local asset storage (reference images, generated media)
+storage/*
+!storage/.gitkeep
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# editor/OS
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+
+# typescript
+*.tsbuildinfo

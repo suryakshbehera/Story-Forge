@@ -1,0 +1,17 @@
+{
+  "name": "narrata",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "db:migrate": "pnpm --filter db exec prisma migrate dev",
+    "db:generate": "pnpm --filter db exec prisma generate",
+    "db:seed": "pnpm --filter db run seed",
+    "db:studio": "pnpm --filter db exec prisma studio"
+  }
+}

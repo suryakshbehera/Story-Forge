@@ -1,0 +1,279 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Project system
+// ─────────────────────────────────────────────────────────────────────────
+
+enum ProjectType {
+  SINGLE
+  SERIES
+}
+
+model Project {
+  id        String      @id @default(cuid())
+  name      String
+  type      ProjectType
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  story      Story?
+  storyBible StoryBible?
+  seasons    Season[]
+  characters Character[]
+  locations  Location[]
+
+  @@map("projects")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Story engine (Single Video)
+// ─────────────────────────────────────────────────────────────────────────
+
+model Story {
+  id        String   @id @default(cuid())
+  projectId String   @unique
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  topic           String?
+  premise         String?  @db.Text
+  genre           String?
+  tone            String?
+  language        String?
+  duration        String?
+  narrationStyle  String?
+  openingStyle    String?
+  closingStyle    String?
+
+  // Currently-selected content — denormalized copy of the selected Version's payload.
+  content String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("stories")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Story Bible (Series)
+// ─────────────────────────────────────────────────────────────────────────
+
+model StoryBible {
+  id        String  @id @default(cuid())
+  projectId String  @unique
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  premise       String? @db.Text
+  genre         String?
+  tone          String?
+  language      String?
+  worldRules    String? @db.Text
+  visualStyle   String? @db.Text
+  timelineNotes String? @db.Text
+
+  // Currently-selected content — denormalized copy of the selected Version's payload.
+  content String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("story_bibles")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Series structure: Seasons → Episodes
+// ─────────────────────────────────────────────────────────────────────────
+
+model Season {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  number    Int
+  title     String?
+
+  episodes  Episode[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, number])
+  @@map("seasons")
+}
+
+model Episode {
+  id       String @id @default(cuid())
+  seasonId String
+  season   Season @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+
+  number  Int
+  title   String?
+  summary String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([seasonId, number])
+  @@map("episodes")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Character reference system
+// ─────────────────────────────────────────────────────────────────────────
+
+model Character {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name           String
+  identity       String? @db.Text
+  appearance     String? @db.Text
+  personality    String? @db.Text
+  clothing       String? @db.Text
+  background     String? @db.Text
+  characterArc   String? @db.Text
+  isLocked       Boolean @default(false)
+
+  referenceImages Asset[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("characters")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Location reference system
+// ─────────────────────────────────────────────────────────────────────────
+
+model Location {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String? @db.Text
+  architecture String? @db.Text
+  environment String? @db.Text
+  timeWeather String?
+  visualStyle String? @db.Text
+
+  referenceImages Asset[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("locations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Asset library (Phase 0+1 only stores reference images; more types land
+// in later phases once generation pipelines exist)
+// ─────────────────────────────────────────────────────────────────────────
+
+enum AssetType {
+  REFERENCE_IMAGE
+  GENERATED_IMAGE
+  VIDEO_CLIP
+  AUDIO_NARRATION
+  AUDIO_DIALOGUE
+  SFX
+  MUSIC
+}
+
+model Asset {
+  id   String    @id @default(cuid())
+  type AssetType
+
+  storageKey String
+  fileName   String?
+  mimeType   String?
+  sizeBytes  Int?
+  metadata   Json?
+
+  characterId String?
+  character   Character? @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@map("assets")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Generic versioning — reused across Story, StoryBible, and (later) Scene,
+// Character, Image, etc. entityType + entityId instead of a table per kind.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum VersionEntityType {
+  STORY
+  STORY_BIBLE
+}
+
+enum CreatedBy {
+  USER
+  AI
+}
+
+model Version {
+  id         String            @id @default(cuid())
+  entityType VersionEntityType
+  entityId   String
+
+  versionNumber Int
+  payload       Json
+  isSelected    Boolean @default(false)
+
+  prompt             String?  @db.Text
+  modelId            String?
+  generationSettings Json?
+  createdBy          CreatedBy
+
+  createdAt DateTime @default(now())
+
+  @@unique([entityType, entityId, versionNumber])
+  @@index([entityType, entityId])
+  @@map("versions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// AI Model Registry — every dropdown in the app reads from this table.
+// Nothing in application code should hardcode a model id.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum AiJobType {
+  MASTER_AI
+  STORY_WRITING
+  SCENE_PLANNING
+  IMAGE_PROMPTS
+  IMAGE_GENERATION
+  IMAGE_VALIDATION
+  VOICE
+  VIDEO
+}
+
+model AiModelOption {
+  id      String    @id @default(cuid())
+  jobType AiJobType
+
+  provider    String
+  modelId     String
+  displayName String
+  isDefault   Boolean @default(false)
+  isEnabled   Boolean @default(true)
+  config      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("ai_model_options")
+}

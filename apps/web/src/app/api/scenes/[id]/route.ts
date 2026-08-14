@@ -8,6 +8,9 @@ const patchSchema = z.object({
   description: z.string().min(1).optional(),
   visualMode: z.enum(["ILLUSTRATION", "IMAGE_TO_VIDEO", "TEXT_TO_VIDEO"]).optional(),
   visualModeReason: z.string().optional().nullable(),
+  cameraMovement: z
+    .enum(["STATIC", "ZOOM_IN", "ZOOM_OUT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN"])
+    .optional(),
   narration: z.string().optional().nullable(),
   motionPrompt: z.string().optional().nullable(),
   videoPrompt: z.string().optional().nullable(),

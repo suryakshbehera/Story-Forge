@@ -159,6 +159,20 @@ enum SceneVisualMode {
   TEXT_TO_VIDEO
 }
 
+// Phase 6 — a deterministic Ken Burns-style pan/zoom applied to ILLUSTRATION
+// scenes at assembly time (plain ffmpeg, no AI call), not a prompt: the set
+// of movements is small and enumerable, unlike motionPrompt/videoPrompt
+// below which describe AI-generated motion for IMAGE_TO_VIDEO/TEXT_TO_VIDEO.
+enum SceneCameraMovement {
+  STATIC
+  ZOOM_IN
+  ZOOM_OUT
+  PAN_LEFT
+  PAN_RIGHT
+  PAN_UP
+  PAN_DOWN
+}
+
 model Scene {
   id String @id @default(cuid())
 
@@ -174,6 +188,10 @@ model Scene {
 
   visualMode       SceneVisualMode @default(ILLUSTRATION)
   visualModeReason String?         @db.Text
+
+  // Phase 6 — see SceneCameraMovement above. Only meaningful when
+  // visualMode is ILLUSTRATION; ignored by assembly otherwise.
+  cameraMovement SceneCameraMovement @default(STATIC)
 
   // Phase 4 — the narrator's spoken script for this scene, manually written
   // (mirrors Episode.summary: no AI-drafting step, only text-to-speech).

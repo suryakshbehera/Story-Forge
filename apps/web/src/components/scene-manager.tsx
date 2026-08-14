@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 
 export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
+export type SceneCameraMovement = "STATIC" | "ZOOM_IN" | "ZOOM_OUT" | "PAN_LEFT" | "PAN_RIGHT" | "PAN_UP" | "PAN_DOWN";
 
 export interface TagOption {
   id: string;
@@ -61,6 +62,7 @@ export interface SceneItem {
   description: string;
   visualMode: SceneVisualMode;
   visualModeReason: string | null;
+  cameraMovement: SceneCameraMovement;
   characters: TagOption[];
   locations: TagOption[];
   images: SceneImageItem[];
@@ -77,6 +79,16 @@ const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
   ILLUSTRATION: "Illustration",
   IMAGE_TO_VIDEO: "Image → Video",
   TEXT_TO_VIDEO: "Text → Video",
+};
+
+const CAMERA_MOVEMENT_LABELS: Record<SceneCameraMovement, string> = {
+  STATIC: "None (static)",
+  ZOOM_IN: "Zoom in",
+  ZOOM_OUT: "Zoom out",
+  PAN_LEFT: "Pan left",
+  PAN_RIGHT: "Pan right",
+  PAN_UP: "Pan up",
+  PAN_DOWN: "Pan down",
 };
 
 // For scenes that are genuinely new or just replaced everything (addScene,
@@ -574,6 +586,7 @@ function SceneRow({
   const [description, setDescription] = useState(scene.description);
   const [visualMode, setVisualMode] = useState<SceneVisualMode>(scene.visualMode);
   const [visualModeReason, setVisualModeReason] = useState(scene.visualModeReason ?? "");
+  const [cameraMovement, setCameraMovement] = useState<SceneCameraMovement>(scene.cameraMovement);
   const [imageGenerating, setImageGenerating] = useState(false);
   const [imageUploading, setImageUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -588,6 +601,7 @@ function SceneRow({
     description !== scene.description ||
     visualMode !== scene.visualMode ||
     visualModeReason !== (scene.visualModeReason ?? "") ||
+    cameraMovement !== scene.cameraMovement ||
     !sameSet(characterIds, new Set(scene.characters.map((c) => c.id))) ||
     !sameSet(locationIds, new Set(scene.locations.map((l) => l.id)));
 
@@ -609,6 +623,7 @@ function SceneRow({
           description,
           visualMode,
           visualModeReason: visualModeReason || null,
+          cameraMovement,
           characterIds: Array.from(characterIds),
           locationIds: Array.from(locationIds),
         }),
@@ -694,6 +709,12 @@ function SceneRow({
             <Textarea rows={1} value={visualModeReason} onChange={(e) => setVisualModeReason(e.target.value)} />
           </Field>
         </div>
+
+        {visualMode === "ILLUSTRATION" && (
+          <Field label="Camera Movement (simple pan/zoom applied to the still image, no AI generation)">
+            <CameraMovementSelect value={cameraMovement} onChange={setCameraMovement} />
+          </Field>
+        )}
 
         <Field label="Characters">
           {characters.length === 0 ? (
@@ -850,6 +871,29 @@ function VisualModeSelect({ value, onChange }: { value: SceneVisualMode; onChang
         {(Object.keys(VISUAL_MODE_LABELS) as SceneVisualMode[]).map((mode) => (
           <SelectItem key={mode} value={mode}>
             {VISUAL_MODE_LABELS[mode]}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function CameraMovementSelect({
+  value,
+  onChange,
+}: {
+  value: SceneCameraMovement;
+  onChange: (v: SceneCameraMovement) => void;
+}) {
+  return (
+    <Select value={value} onValueChange={(v) => v && onChange(v as SceneCameraMovement)} items={CAMERA_MOVEMENT_LABELS}>
+      <SelectTrigger className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {(Object.keys(CAMERA_MOVEMENT_LABELS) as SceneCameraMovement[]).map((movement) => (
+          <SelectItem key={movement} value={movement}>
+            {CAMERA_MOVEMENT_LABELS[movement]}
           </SelectItem>
         ))}
       </SelectContent>

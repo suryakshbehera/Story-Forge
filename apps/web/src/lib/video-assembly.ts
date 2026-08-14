@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
-import { prisma, type Asset, type Prisma } from "@/lib/db";
+import { prisma, type Asset, type Prisma, type SceneCameraMovement } from "@/lib/db";
 import { parentWhere, type ScenesParentType } from "@/lib/scenes";
 import { runFfmpeg, probeDuration } from "@/lib/ffmpeg";
 import { storage, buildStorageKey } from "@/lib/storage";
@@ -17,6 +17,42 @@ const DEFAULT_ILLUSTRATION_SECONDS = 5;
 const DURATION_TOLERANCE_SECONDS = 0.15;
 
 const SCALE_PAD_FILTER = `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${FPS}`;
+
+// Ken Burns pan/zoom for ILLUSTRATION scenes — a deterministic ffmpeg
+// zoompan, not an AI call. zoompan crops into the source rather than
+// letterboxing it, so it prescales/crops to 2x target size first (zoompan
+// is jittery fed a source close to its own output size) and deliberately
+// doesn't reuse SCALE_PAD_FILTER's pad-to-fit behavior.
+const CAMERA_PRESCALE_FILTER = `scale=${WIDTH * 2}:${HEIGHT * 2}:force_original_aspect_ratio=increase,crop=${WIDTH * 2}:${HEIGHT * 2}`;
+const ZOOM_STEP_PER_FRAME = 0.0015;
+const ZOOM_MAX = 1.5;
+const PAN_ZOOM = 1.15; // constant zoom while panning, so panning never exposes the source's edge
+
+function buildCameraFilter(movement: SceneCameraMovement, frames: number): string {
+  if (movement === "STATIC") return SCALE_PAD_FILTER;
+
+  const lastFrame = Math.max(frames - 1, 1);
+  const centerX = "iw/2-(iw/zoom/2)";
+  const centerY = "ih/2-(ih/zoom/2)";
+  const zoompanTail = `d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS}`;
+
+  switch (movement) {
+    case "ZOOM_IN":
+      return `${CAMERA_PRESCALE_FILTER},zoompan=z='min(zoom+${ZOOM_STEP_PER_FRAME},${ZOOM_MAX})':x='${centerX}':y='${centerY}':${zoompanTail}`;
+    case "ZOOM_OUT":
+      return `${CAMERA_PRESCALE_FILTER},zoompan=z='if(eq(on,0),${ZOOM_MAX},max(zoom-${ZOOM_STEP_PER_FRAME},1))':x='${centerX}':y='${centerY}':${zoompanTail}`;
+    case "PAN_LEFT":
+      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(1-on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+    case "PAN_RIGHT":
+      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+    case "PAN_UP":
+      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(1-on/${lastFrame})':${zoompanTail}`;
+    case "PAN_DOWN":
+      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(on/${lastFrame})':${zoompanTail}`;
+    default:
+      return SCALE_PAD_FILTER;
+  }
+}
 
 export interface SerializedFinalVideo {
   id: string;
@@ -127,11 +163,12 @@ async function buildVisualSegment(
   if (!needsClip) {
     const imagePath = await writeAssetToTemp(scene.images[0], workDir, `scene${index}-image`);
     const duration = targetDuration ?? DEFAULT_ILLUSTRATION_SECONDS;
+    const frames = Math.max(Math.round(duration * FPS), 1);
     await runFfmpeg([
       "-loop", "1",
       "-i", imagePath,
       "-t", duration.toFixed(3),
-      "-vf", SCALE_PAD_FILTER,
+      "-vf", buildCameraFilter(scene.cameraMovement, frames),
       "-pix_fmt", "yuv420p",
       "-an",
       outPath,

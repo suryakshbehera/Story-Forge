@@ -20,6 +20,15 @@ model Project {
   id        String      @id @default(cuid())
   name      String
   type      ProjectType
+
+  // Phase 4 — the one narrator voice for this whole project, same reasoning
+  // as Character.voiceName (free text, provider-specific catalog). Kept at
+  // Project rather than Scene so narration sounds like the same narrator in
+  // every scene/episode instead of drifting take to take — the project owner
+  // asked for character/narrator voices to stay consistent across an entire
+  // story, not vary per scene.
+  narratorVoiceName String?
+
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
 

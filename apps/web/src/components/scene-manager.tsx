@@ -18,6 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelSelect } from "@/components/model-select";
+import { SceneVoicePanel, type AudioTake, type DialogueLineItem } from "@/components/scene-voice-panel";
 import { cn } from "@/lib/utils";
 import {
   Sparkles,
@@ -38,6 +39,9 @@ export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO";
 export interface TagOption {
   id: string;
   name: string;
+  // Only meaningful for characters (Phase 4) — absent/undefined for
+  // locations, which have no voice concept.
+  voiceName?: string | null;
 }
 
 export interface SceneImageItem {
@@ -58,6 +62,9 @@ export interface SceneItem {
   characters: TagOption[];
   locations: TagOption[];
   images: SceneImageItem[];
+  narration: string | null;
+  narrationAudio: AudioTake[];
+  dialogueLines: DialogueLineItem[];
 }
 
 const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
@@ -65,18 +72,38 @@ const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
   IMAGE_TO_VIDEO: "Image → Video",
 };
 
+// For scenes that are genuinely new or just replaced everything (addScene,
+// generate's regenerateAll) — SCENE_INCLUDE doesn't fetch Phase 4's
+// narrationAudio/dialogueLines, so the response has them as `undefined`, and
+// there's no prior client state to fall back to (it's a fresh scene, or the
+// old one was just deleted server-side). Empty arrays are the correct value
+// here. Contrast with updateScene()/mergeScenes() below, which preserve
+// prior values instead — see their comment for why those are different.
+function withVoiceDefaults(scene: SceneItem): SceneItem {
+  return {
+    ...scene,
+    narration: scene.narration ?? null,
+    narrationAudio: scene.narrationAudio ?? [],
+    dialogueLines: scene.dialogueLines ?? [],
+  };
+}
+
 export function SceneManager({
   parentType,
   parentId,
+  projectId,
   initialScenes,
   characters,
   locations,
+  initialNarratorVoiceName,
 }: {
   parentType: "story" | "episode";
   parentId: string;
+  projectId: string;
   initialScenes: SceneItem[];
   characters: TagOption[];
   locations: TagOption[];
+  initialNarratorVoiceName: string | null;
 }) {
   const [scenes, setScenes] = useState(initialScenes);
   const [modelId, setModelId] = useState("");
@@ -89,16 +116,62 @@ export function SceneManager({
   const [validationModelId, setValidationModelId] = useState("");
   const [imageInstructions, setImageInstructions] = useState("");
 
+  // Project-wide, not per-scene — Character/narrator voices are asked to
+  // stay consistent across an entire story, not vary scene to scene. See
+  // Project.narratorVoiceName in schema.prisma and scene-voice-panel.tsx.
+  const [narratorVoiceName, setNarratorVoiceName] = useState(initialNarratorVoiceName ?? "");
+  const [savedNarratorVoiceName, setSavedNarratorVoiceName] = useState(initialNarratorVoiceName ?? "");
+  const [savingNarratorVoice, setSavingNarratorVoice] = useState(false);
+
+  async function saveNarratorVoice() {
+    setSavingNarratorVoice(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ narratorVoiceName: narratorVoiceName || null }),
+      });
+      if (!res.ok) throw new Error();
+      setSavedNarratorVoiceName(narratorVoiceName);
+      toast.success("Narrator voice saved.");
+    } catch {
+      toast.error("Couldn't save narrator voice.");
+    } finally {
+      setSavingNarratorVoice(false);
+    }
+  }
+
   const baseUrl = parentType === "story" ? `/api/stories/${parentId}/scenes` : `/api/episodes/${parentId}/scenes`;
 
+  // /api/scenes/[id] (PATCH) and .../move both return scenes via
+  // SCENE_INCLUDE, which doesn't fetch Phase 4's narrationAudio/dialogueLines
+  // — those aren't actually gone server-side, the endpoint just doesn't
+  // report them, so merges here must carry the previous values forward
+  // rather than defaulting to empty (that's only correct for a genuinely new
+  // or AI-regenerated scene — see generate()/addScene() below).
   function updateScene(scene: SceneItem) {
-    setScenes((prev) => prev.map((s) => (s.id === scene.id ? scene : s)).sort((a, b) => a.order - b.order));
+    setScenes((prev) =>
+      prev
+        .map((s) =>
+          s.id === scene.id
+            ? { ...scene, narrationAudio: scene.narrationAudio ?? s.narrationAudio, dialogueLines: scene.dialogueLines ?? s.dialogueLines }
+            : s
+        )
+        .sort((a, b) => a.order - b.order)
+    );
   }
 
   function mergeScenes(updated: SceneItem[]) {
     setScenes((prev) => {
       const byId = new Map(prev.map((s) => [s.id, s]));
-      for (const u of updated) byId.set(u.id, u);
+      for (const u of updated) {
+        const existing = byId.get(u.id);
+        byId.set(u.id, {
+          ...u,
+          narrationAudio: u.narrationAudio ?? existing?.narrationAudio ?? [],
+          dialogueLines: u.dialogueLines ?? existing?.dialogueLines ?? [],
+        });
+      }
       return Array.from(byId.values()).sort((a, b) => a.order - b.order);
     });
   }
@@ -137,7 +210,7 @@ export function SceneManager({
         throw new Error(body.error ?? "Generation failed");
       }
       const data = await res.json();
-      setScenes(data.scenes);
+      setScenes(data.scenes.map(withVoiceDefaults));
       if (data.unmatchedNames?.length > 0) {
         setUnmatchedNames(data.unmatchedNames);
         toast.warning(`AI mentioned ${data.unmatchedNames.length} name(s) that don't exist yet.`);
@@ -165,7 +238,7 @@ export function SceneManager({
       toast.error("Couldn't add scene.");
       return;
     }
-    const scene: SceneItem = await res.json();
+    const scene: SceneItem = withVoiceDefaults(await res.json());
     setScenes((prev) => [...prev, scene].sort((a, b) => a.order - b.order));
     toast.success("Scene added.");
   }
@@ -290,6 +363,37 @@ export function SceneManager({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Voice Settings</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <Field label="Narrator voice (used for every scene's narration in this project)">
+            <div className="flex gap-2">
+              <Input
+                className="max-w-xs"
+                placeholder='e.g. "alloy"'
+                value={narratorVoiceName}
+                onChange={(e) => setNarratorVoiceName(e.target.value)}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={saveNarratorVoice}
+                disabled={savingNarratorVoice || narratorVoiceName === savedNarratorVoiceName}
+              >
+                <Save className="size-3.5" />
+                {savingNarratorVoice ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </Field>
+          <p className="text-xs text-muted-foreground">
+            Character voices are set per-character in their Character profile, so each character
+            stays consistent across every scene too.
+          </p>
+        </CardContent>
+      </Card>
+
       {unmatchedNames && unmatchedNames.length > 0 && (
         <Card className="border-amber-500/40">
           <CardContent className="flex items-start gap-2 py-4 text-sm">
@@ -337,6 +441,7 @@ export function SceneManager({
               onGenerateImage={() => generateImageForScene(scene.id)}
               onSelectImage={(assetId) => selectSceneImage(scene.id, assetId)}
               onDeleteImage={(assetId) => deleteSceneImage(scene.id, assetId)}
+              narratorVoiceName={savedNarratorVoiceName || null}
             />
           ))}
         </div>
@@ -413,6 +518,7 @@ function SceneRow({
   onGenerateImage,
   onSelectImage,
   onDeleteImage,
+  narratorVoiceName,
 }: {
   scene: SceneItem;
   isFirst: boolean;
@@ -425,6 +531,7 @@ function SceneRow({
   onGenerateImage: () => Promise<void>;
   onSelectImage: (assetId: string) => void;
   onDeleteImage: (assetId: string) => void;
+  narratorVoiceName: string | null;
 }) {
   const [title, setTitle] = useState(scene.title ?? "");
   const [description, setDescription] = useState(scene.description);
@@ -468,6 +575,10 @@ function SceneRow({
         }),
       });
       if (!res.ok) throw new Error();
+      // Deliberately not defaulted here — updateScene() (the onUpdate
+      // handler) needs to see a real `undefined` on narrationAudio/
+      // dialogueLines to know it should carry the previous values forward
+      // instead of treating them as wiped. See its comment.
       const updated: SceneItem = await res.json();
       onUpdate(updated);
       toast.success("Scene saved.");
@@ -638,6 +749,15 @@ function SceneRow({
           <Save className="size-4" />
           {saving ? "Saving…" : "Save Scene"}
         </Button>
+
+        <SceneVoicePanel
+          sceneId={scene.id}
+          characters={characters.map((c) => ({ id: c.id, name: c.name, voiceName: c.voiceName ?? null }))}
+          narratorVoiceName={narratorVoiceName}
+          initialNarration={scene.narration ?? ""}
+          initialNarrationAudio={scene.narrationAudio}
+          initialDialogueLines={scene.dialogueLines}
+        />
       </CardContent>
     </Card>
   );

@@ -19,6 +19,7 @@ interface CharacterFields {
   background: string;
   characterArc: string;
   isLocked: boolean;
+  voiceName: string;
 }
 
 export function CharacterDetailForm({
@@ -121,6 +122,13 @@ export function CharacterDetailForm({
           onChange={(e) => update("characterArc", e.target.value)}
         />
       </Field>
+      <Field label={`Voice (TTS voice name, e.g. "alloy")`}>
+        <Input value={fields.voiceName} onChange={(e) => update("voiceName", e.target.value)} />
+      </Field>
+      <p className="-mt-2 text-xs text-muted-foreground">
+        Used for every dialogue line this character speaks, in every scene — set it once here so the
+        character sounds consistent across the whole story.
+      </p>
 
       <div className="flex items-center gap-2">
         <Button onClick={save} disabled={saving}>

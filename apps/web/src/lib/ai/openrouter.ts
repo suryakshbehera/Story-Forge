@@ -125,3 +125,60 @@ export async function generateImage({
 
   return { base64: image.b64_json, mimeType: image.media_type ?? "image/png" };
 }
+
+export interface GenerateSpeechParams {
+  modelId: string;
+  text: string;
+  // Provider-specific voice name (e.g. "alloy") — not a fixed enum here for
+  // the same reason Character.voiceName isn't one; see schema.prisma.
+  voice?: string;
+}
+
+export interface GeneratedSpeech {
+  base64: string;
+  mimeType: string;
+  transcript?: string;
+}
+
+// VOICE routes through chat completions' audio-output modality (the
+// OpenAI-compatible "gpt-audio" family the seeded VOICE default uses) rather
+// than a dedicated TTS endpoint — OpenRouter has no separate /audio/speech
+// route for these models. Since the underlying model is conversational, not
+// a pure TTS engine, the system prompt has to explicitly pin it to reading
+// the input verbatim or it may paraphrase/respond instead of narrating it.
+const SPEECH_SYSTEM_PROMPT =
+  "You are a text-to-speech narrator. Speak the user's message verbatim, word-for-word, exactly as written. Do not add, remove, paraphrase, or comment on any part of it, and do not respond conversationally.";
+
+export async function generateSpeech({ modelId, text, voice = "alloy" }: GenerateSpeechParams): Promise<GeneratedSpeech> {
+  const apiKey = requireApiKey();
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      modalities: ["text", "audio"],
+      audio: { voice, format: "wav" },
+      messages: [
+        { role: "system", content: SPEECH_SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${body}`);
+  }
+
+  const data = await response.json();
+  const audio = data?.choices?.[0]?.message?.audio;
+  if (!audio?.data) {
+    throw new OpenRouterError("OpenRouter returned no audio data.");
+  }
+
+  return { base64: audio.data, mimeType: "audio/wav", transcript: audio.transcript };
+}

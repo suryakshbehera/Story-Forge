@@ -23,7 +23,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 }
 
 const patchSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().min(1).optional(),
+  narratorVoiceName: z.string().optional().nullable(),
 });
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -32,7 +33,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   const project = await prisma.project.update({
     where: { id },
-    data: { name: body.name },
+    data: body,
   });
 
   return NextResponse.json(project);

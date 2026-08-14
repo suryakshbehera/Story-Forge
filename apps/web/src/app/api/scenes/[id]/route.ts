@@ -8,6 +8,7 @@ const patchSchema = z.object({
   description: z.string().min(1).optional(),
   visualMode: z.enum(["ILLUSTRATION", "IMAGE_TO_VIDEO"]).optional(),
   visualModeReason: z.string().optional().nullable(),
+  narration: z.string().optional().nullable(),
   characterIds: z.array(z.string()).optional(),
   locationIds: z.array(z.string()).optional(),
 });

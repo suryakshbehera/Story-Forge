@@ -3,10 +3,22 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { assembleContext } from "@/lib/context/assemble";
 import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
+import { mapSceneVoiceData } from "@/lib/voice";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft } from "lucide-react";
+
+const VOICE_INCLUDE = {
+  narrationAudio: { orderBy: { createdAt: "desc" as const } },
+  dialogueLines: {
+    orderBy: { order: "asc" as const },
+    include: {
+      character: { select: { id: true, name: true, voiceName: true } },
+      audio: { orderBy: { createdAt: "desc" as const } },
+    },
+  },
+};
 
 export default async function EpisodePage({
   params,
@@ -17,12 +29,13 @@ export default async function EpisodePage({
   const episode = await prisma.episode.findUnique({ where: { id: episodeId } });
   if (!episode || episode.seasonId !== seasonId) notFound();
 
-  const [context, scenes, characters, locations] = await Promise.all([
+  const [project, context, scenes, characters, locations] = await Promise.all([
+    prisma.project.findUniqueOrThrow({ where: { id: projectId } }),
     assembleContext({ projectId, episodeId }),
     prisma.scene.findMany({
       where: { episodeId },
       orderBy: { order: "asc" },
-      include: SCENE_INCLUDE,
+      include: { ...SCENE_INCLUDE, ...VOICE_INCLUDE },
     }),
     prisma.character.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
     prisma.location.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
@@ -77,9 +90,11 @@ export default async function EpisodePage({
           <SceneManager
             parentType="episode"
             parentId={episode.id}
-            initialScenes={mapScenesImages(scenes)}
+            projectId={projectId}
+            initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData)}
             characters={characters}
             locations={locations}
+            initialNarratorVoiceName={project.narratorVoiceName}
           />
         </CardContent>
       </Card>

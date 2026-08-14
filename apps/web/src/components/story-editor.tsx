@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ModelSelect } from "@/components/model-select";
+import { LanguageSelect } from "@/components/language-select";
 import { VersionsPanel, type VersionItem } from "@/components/versions-panel";
 import { Sparkles, Save } from "lucide-react";
 
@@ -164,7 +165,7 @@ export function StoryEditor({
                 <Input value={fields.tone} onChange={(e) => updateField("tone", e.target.value)} />
               </Field>
               <Field label="Language">
-                <Input value={fields.language} onChange={(e) => updateField("language", e.target.value)} />
+                <LanguageSelect value={fields.language} onChange={(v) => updateField("language", v)} />
               </Field>
               <Field label="Duration">
                 <Input

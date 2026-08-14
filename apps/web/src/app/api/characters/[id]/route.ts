@@ -23,6 +23,7 @@ const patchSchema = z.object({
   background: z.string().optional().nullable(),
   characterArc: z.string().optional().nullable(),
   isLocked: z.boolean().optional(),
+  voiceName: z.string().optional().nullable(),
 });
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

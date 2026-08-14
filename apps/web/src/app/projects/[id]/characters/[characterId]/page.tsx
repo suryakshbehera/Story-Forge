@@ -45,6 +45,7 @@ export default async function CharacterDetailPage({
                 background: character.background ?? "",
                 characterArc: character.characterArc ?? "",
                 isLocked: character.isLocked,
+                voiceName: character.voiceName ?? "",
               }}
             />
           </CardContent>

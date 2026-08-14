@@ -5,8 +5,8 @@ tool where AI drafts content on request, but the human always writes, edits,
 locks, and selects the final version. No step auto-runs the next step.
 
 This document tracks what each phase built, grounded in the code and commit
-history in this repo. **Phase 0 through Phase 3 are complete and describe
-what exists today.** Everything from Phase 4 onward is a **proposed
+history in this repo. **Phase 0 through Phase 6 are complete and describe
+what exists today.** Everything from Phase 7 onward is a **proposed
 roadmap**, inferred from schema/enum scaffolding and code comments already in
 the repo (see "Evidence" under each phase) — it has not been built and has
 not been confirmed by the project owner as the committed plan. Treat it as a
@@ -250,30 +250,167 @@ approves" pattern as Story versions and Scene planning.
 
 ---
 
-## Proposed roadmap (Phase 4+) — 🚧 not built, not confirmed
+## Phase 4 — Voice ✅ Complete
+
+**Goal:** per-scene narration and per-character dialogue audio, with voice
+identity resolved server-side (never per-call) so a narrator/character
+sounds the same across an entire story.
+
+### Data model (`packages/db/prisma/schema.prisma`)
+
+- `Scene.narration` — the narrator's spoken script, manually written (no
+  AI-drafting step, only text-to-speech)
+- `Character.voiceName` — free-text TTS voice id, user-entered (the set of
+  valid voices is provider/model-specific, same reasoning as `AiModelOption`
+  not hardcoding model ids)
+- `Project.narratorVoiceName` — one narrator voice per project, read
+  server-side by the generation route rather than accepted from the client
+- `DialogueLine` — ordered, per-Character spoken lines within a Scene
+- `Asset` extended: `narrationSceneId` and `dialogueLineId` FKs, kept
+  separate from `sceneId` so audio never shows up in the image gallery
+
+### Features
+
+- **Narration audio** (`apps/web/src/lib/voice.ts`, `AiJobType.VOICE`) —
+  generates from `Scene.narration` using `Project.narratorVoiceName`
+- **Dialogue audio** — per-`DialogueLine`, using `Character.voiceName`; no
+  fallback voice, so two unassigned characters never silently share one
+- **`generateSpeech()`** (`apps/web/src/lib/ai/openrouter.ts`) — OpenRouter's
+  TTS endpoint (`POST /api/v1/audio/speech`), always requests `pcm` (the
+  lowest-common-denominator format every provider on this endpoint accepts),
+  wrapped in a WAV header before storage
+- **UI** (`scene-voice-panel.tsx`) — narration script + take management,
+  dialogue line CRUD/reorder + take management, both with select/delete per
+  take (same pattern as Phase 3's image gallery)
+
+**Evidence:** commits `7846f4c`, `459cc54`, `3a6b9a0`,
+[`apps/web/src/lib/voice.ts`](apps/web/src/lib/voice.ts),
+[`apps/web/src/components/scene-voice-panel.tsx`](apps/web/src/components/scene-voice-panel.tsx).
+
+---
+
+## Phase 5 — Image→Video Generation ✅ Complete
+
+**Goal:** for scenes with `visualMode: IMAGE_TO_VIDEO`, turn the scene's
+selected image into an actual AI-generated video clip. Distinct from
+Phase 6 (local ffmpeg assembly of the final output from all clips/audio) —
+this phase produces the individual `VIDEO_CLIP` assets that Phase 6 later
+stitches together.
+
+### Data model (`packages/db/prisma/schema.prisma`)
+
+- `Scene.motionPrompt` — user-written camera/motion direction, same
+  manual-only pattern as `narration` (no AI-drafting step); falls back to
+  `Scene.description` at generation time when unset
+- `Scene.videoDurationSeconds` — desired clip length, user-set
+- `Scene.videoClips` / `Asset.videoSceneId` — generated clips, kept on their
+  own relation for the same reason `narrationAudio` is (mixing into `images`
+  would break the image gallery's `<img>`-only assumption)
+- `Asset.sourceImageId` — self-relation recording which selected
+  `GENERATED_IMAGE` a clip was generated from, for traceability if the
+  scene's image is later regenerated/reselected
+- `AiJobType.VIDEO_GENERATION` — kept distinct from `AiJobType.VIDEO`, which
+  stays reserved for Phase 6's local ffmpeg assembly
+
+### Features
+
+- **`generateVideo()`** (`apps/web/src/lib/ai/openrouter.ts`) — OpenRouter's
+  video generation endpoint (`POST /api/v1/videos`, launched April 2026),
+  a third dedicated-endpoint primitive alongside `generateImage()`/
+  `generateSpeech()`. Unlike those two, generation is asynchronous: submit
+  returns a job id, and the primitive polls `GET /api/v1/videos/{id}` (5s
+  interval, 5 min timeout) until the job completes, then downloads the clip.
+  The scene's selected image is sent as `frame_images[0]` — a base64 data
+  URI, not a public URL, since OpenRouter passes image inputs through
+  verbatim the same way its image/vision endpoints do
+- **`generateSceneVideo()`** (`apps/web/src/lib/scene-video.ts`) — requires
+  `visualMode === IMAGE_TO_VIDEO` and an existing selected scene image
+  (errors clearly otherwise); builds the prompt from `motionPrompt` (falling
+  back to `description`); stores the result via the existing
+  `StorageProvider`; select-newest pattern mirrors Phase 3's image attempts
+- **New API routes**: `POST /api/scenes/[id]/video/generate`,
+  `POST /api/scenes/[id]/video/[assetId]/select`,
+  `DELETE /api/scenes/[id]/video/[assetId]`
+- **UI** (`scene-video-panel.tsx`) — motion prompt + duration fields, a clip
+  attempt strip (`<video>` previews, select/delete), shown only for
+  `IMAGE_TO_VIDEO` scenes and disabled until the scene has a selected image
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`Scene.motionPrompt`,
+`Scene.videoDurationSeconds`, `Scene.videoClips`, `Asset.videoSceneId`,
+`Asset.sourceImageId`, `AiJobType.VIDEO_GENERATION`),
+[`apps/web/src/lib/scene-video.ts`](apps/web/src/lib/scene-video.ts),
+[`apps/web/src/lib/ai/openrouter.ts`](apps/web/src/lib/ai/openrouter.ts),
+[`apps/web/src/components/scene-video-panel.tsx`](apps/web/src/components/scene-video-panel.tsx).
+
+---
+
+## Phase 6 — Video Assembly ✅ Complete
+
+**Goal:** for a Story (single video) or Episode (series), stitch every
+scene's selected visual (image or Phase 5 clip) and audio (narration +
+dialogue) into one ordered, final rendered video — locally, via ffmpeg,
+matching the seeded `AiJobType.VIDEO` (`provider: "local"`, `modelId:
+"ffmpeg"`) rather than a hosted API. No music/SFX bed track this phase —
+`AssetType.SFX`/`MUSIC` stay reserved.
+
+### Data model (`packages/db/prisma/schema.prisma`)
+
+- `AssetType.FINAL_VIDEO` — a fully assembled render.
+- `Story.finalVideos` / `Asset.storyVideoId` and `Episode.finalVideos` /
+  `Asset.episodeVideoId` — own relation/FK pair each, same reasoning as
+  `Scene.videoClips`/`Asset.videoSceneId`; dual-optional like `Scene`'s
+  `storyId`/`episodeId`, enforced at the API layer. Reuses `isSelected` for
+  the same take-selection pattern as every prior generation pipeline.
+
+### Features
+
+- **`apps/web/src/lib/ffmpeg.ts`** — thin `child_process.execFile` wrapper
+  (`runFfmpeg`, `probeDuration`) with no shell interpolation; `FfmpegError`
+  gives a clear message when the binary is missing from PATH, mirroring
+  `OpenRouterError`'s role for the hosted primitives.
+- **`assembleVideo()`** (`apps/web/src/lib/video-assembly.ts`) — reuses
+  `scenes.ts`'s `parentWhere`/`ScenesParentType` to load a Story's or
+  Episode's ordered scenes. Validates every scene has a selected visual first
+  (missing audio is fine — a silent scene), reporting *all* unready scenes at
+  once rather than stopping at the first. Per scene: concatenates selected
+  narration + dialogue-line takes into one audio track, then builds a silent
+  visual segment normalized to a canonical 1920×1080/30fps/yuv420p format —
+  a static image held for the audio's duration (falls back to a 5s default
+  if the scene has no audio at all), or the scene's video clip **reconciled**
+  to that duration (freeze-pad via `tpad` if short, trimmed if long) — muxes
+  visual+audio per scene, then concatenates every scene via ffmpeg's concat
+  demuxer into the final file. All work happens in an `os.tmpdir()` scratch
+  dir, never `STORAGE_ROOT`.
+- **New API routes**: `POST /api/stories/[id]/video/generate`,
+  `POST /api/stories/[id]/video/[assetId]/select`,
+  `DELETE /api/stories/[id]/video/[assetId]`, and the same trio under
+  `/api/episodes/[id]/video/...`. Validation failures (unready scenes) return
+  400; `FfmpegError` (missing binary, encode failure) returns 500.
+- **UI** (`video-assembly-panel.tsx`) — a "Final Assembly" card below the
+  Scenes card on both the single-video Scenes page and the Episode page:
+  `VIDEO`-job model picker, "Assemble Final Video" button, and a take list
+  (`<video>` previews, select/delete) identical in shape to
+  `SceneVideoPanel`'s clip list.
+
+### Setup
+
+Requires `ffmpeg`/`ffprobe` on PATH — a new local prerequisite, same tier as
+Postgres-via-Docker (see `.env.example`), not a hosted API key.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`AssetType.FINAL_VIDEO`,
+`Story.finalVideos`, `Episode.finalVideos`, `Asset.storyVideoId`,
+`Asset.episodeVideoId`), [`apps/web/src/lib/ffmpeg.ts`](apps/web/src/lib/ffmpeg.ts),
+[`apps/web/src/lib/video-assembly.ts`](apps/web/src/lib/video-assembly.ts),
+[`apps/web/src/components/video-assembly-panel.tsx`](apps/web/src/components/video-assembly-panel.tsx).
+
+---
+
+## Proposed roadmap (Phase 7+) — 🚧 not built, not confirmed
 
 Everything below is **inferred**, not decided. The evidence is real (an enum
 value, a seed row, a code comment) but none of it is a commitment — no phase
-past Phase 3 has a written scope. Numbering follows the order `AiJobType` is
-declared in the schema and seeded in `seed.ts`, which reads like a
-production pipeline: write the story → plan scenes → prompt for images →
-generate images → validate images → voice → video. Treat the numbering as a
-reading order, not a promise — the actual next phase is whatever the project
-owner decides next.
-
-### Phase 4 — Voice (proposed)
-
-`AiJobType.VOICE` and `AssetType.AUDIO_NARRATION` /
-`AssetType.AUDIO_DIALOGUE` are reserved; seed data defaults it to an
-OpenRouter TTS model.
-
-### Phase 5 — Video assembly (proposed)
-
-`AiJobType.VIDEO` is seeded with `provider: "local"`, `modelId: "ffmpeg"` —
-the only non-OpenRouter entry in the registry, suggesting local rendering
-(stitching generated images/voice/music into `AssetType.VIDEO_CLIP`) rather
-than a hosted video-generation API. `AssetType.SFX` and `AssetType.MUSIC`
-are also reserved but not yet tied to any job type.
+past Phase 6 has a written scope. Treat this as a reading order, not
+a promise — the actual next phase is whatever the project owner decides next.
 
 ### Unplaced — Master AI orchestrator (proposed)
 

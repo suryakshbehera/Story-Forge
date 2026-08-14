@@ -19,6 +19,7 @@ const defaultModels: Array<{
   { jobType: "IMAGE_GENERATION", provider: "openrouter", modelId: "openai/gpt-5.4-image-2", displayName: "GPT-5.4 Image 2" },
   { jobType: "IMAGE_VALIDATION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "VOICE", provider: "openrouter", modelId: "mistralai/voxtral-mini-tts-2603", displayName: "Voxtral Mini TTS" },
+  { jobType: "VIDEO_GENERATION", provider: "openrouter", modelId: "google/veo-3.1", displayName: "Veo 3.1" },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
 ];
 

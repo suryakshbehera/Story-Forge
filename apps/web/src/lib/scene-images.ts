@@ -233,6 +233,40 @@ export async function generateSceneImage({
   return { image: serializeSceneImage(asset), missingReferenceFor };
 }
 
+// User-uploaded scene image — same "slot" and isSelected takeover behavior
+// as an AI-generated one (see generateSceneImage above), just skipping the
+// prompt/generation/validation steps. type stays GENERATED_IMAGE since that's
+// what marks an Asset as belonging to the scene's image gallery (see
+// Scene.images comment in schema.prisma); createdBy is what actually
+// distinguishes it as user-supplied, same idiom as REFERENCE_IMAGE uploads.
+export async function uploadSceneImage(
+  sceneId: string,
+  buffer: Buffer,
+  fileName: string,
+  mimeType: string
+): Promise<SerializedSceneImage> {
+  const key = buildStorageKey("scenes", sceneId, fileName);
+  await storage.put(key, buffer);
+
+  const asset = await prisma.$transaction(async (tx) => {
+    await tx.asset.updateMany({ where: { sceneId, isSelected: true }, data: { isSelected: false } });
+    return tx.asset.create({
+      data: {
+        type: "GENERATED_IMAGE",
+        storageKey: key,
+        fileName,
+        mimeType,
+        sizeBytes: buffer.byteLength,
+        sceneId,
+        isSelected: true,
+        createdBy: "USER",
+      },
+    });
+  });
+
+  return serializeSceneImage(asset);
+}
+
 export async function selectSceneImage(sceneId: string, assetId: string): Promise<SerializedSceneImage> {
   return prisma.$transaction(async (tx) => {
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: assetId } });

@@ -33,6 +33,7 @@ const JOB_TYPES = [
   "IMAGE_GENERATION",
   "IMAGE_VALIDATION",
   "VOICE",
+  "VIDEO_GENERATION",
   "VIDEO",
 ] as const;
 
@@ -46,6 +47,7 @@ const JOB_LABELS: Record<JobType, string> = {
   IMAGE_GENERATION: "Image Generation",
   IMAGE_VALIDATION: "Image Validation",
   VOICE: "Voice",
+  VIDEO_GENERATION: "Video Generation",
   VIDEO: "Video",
 };
 

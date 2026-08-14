@@ -65,6 +65,12 @@ model Story {
 
   scenes Scene[]
 
+  // Phase 6 — rendered final-video attempts (ffmpeg assembly of every scene's
+  // selected visual + audio, in order). Own relation/FK, same reasoning as
+  // Scene.videoClips/Asset.videoSceneId: a separate concern from any other
+  // Asset relation on this model.
+  finalVideos Asset[] @relation("StoryFinalVideo")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -129,6 +135,9 @@ model Episode {
 
   scenes Scene[]
 
+  // Phase 6 — same reasoning as Story.finalVideos above.
+  finalVideos Asset[] @relation("EpisodeFinalVideo")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -147,6 +156,7 @@ model Episode {
 enum SceneVisualMode {
   ILLUSTRATION
   IMAGE_TO_VIDEO
+  TEXT_TO_VIDEO
 }
 
 model Scene {
@@ -169,6 +179,21 @@ model Scene {
   // (mirrors Episode.summary: no AI-drafting step, only text-to-speech).
   narration String? @db.Text
 
+  // Phase 5 — user-written camera/motion direction for IMAGE_TO_VIDEO scenes,
+  // same manual-only pattern as narration (no AI-drafting step). Falls back
+  // to `description` at generation time when unset.
+  motionPrompt String? @db.Text
+  // Desired clip length in seconds, user-set. Provider-specific bounds are
+  // enforced at generation time, not in the schema.
+  videoDurationSeconds Int?
+
+  // Phase 5 — user-written prompt for TEXT_TO_VIDEO scenes, generated with no
+  // source image at all. Kept separate from motionPrompt (which describes
+  // motion layered on top of an existing image for IMAGE_TO_VIDEO) since a
+  // text-to-video prompt has to carry the whole shot on its own. Falls back
+  // to `description` at generation time when unset, same as motionPrompt.
+  videoPrompt String? @db.Text
+
   characters    Character[]
   locations     Location[]
   // Phase 3's generated scene images. Named (not just typed) Asset[] because
@@ -186,6 +211,11 @@ model Scene {
   narrationAudio Asset[] @relation("SceneNarrationAudio")
 
   dialogueLines DialogueLine[]
+
+  // Phase 5 — generated video clips (IMAGE_TO_VIDEO scenes only), same
+  // separate-relation reasoning as narrationAudio: mixing clips into `images`
+  // would break the image gallery's <img>-only assumption.
+  videoClips Asset[] @relation("SceneVideoClips")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -301,6 +331,8 @@ enum AssetType {
   AUDIO_DIALOGUE
   SFX
   MUSIC
+  // Phase 6 — a fully assembled Story/Episode render (ffmpeg-stitched scenes).
+  FINAL_VIDEO
 }
 
 model Asset {
@@ -327,6 +359,30 @@ model Asset {
 
   dialogueLineId String?
   dialogueLine   DialogueLine? @relation(fields: [dialogueLineId], references: [id], onDelete: Cascade)
+
+  // Phase 5 — generated video clips, kept on their own FK/relation for the
+  // same reason narrationAudio is (see Scene.videoClips comment).
+  videoSceneId String?
+  videoScene   Scene? @relation("SceneVideoClips", fields: [videoSceneId], references: [id], onDelete: Cascade)
+
+  // Phase 5 — which selected GENERATED_IMAGE this clip was generated from,
+  // for traceability when a scene's image is later regenerated/reselected.
+  // Self-relation, so it needs its own name and no onDelete cascade action
+  // conflict with the other Asset relations above.
+  sourceImageId String?
+  sourceImage   Asset?  @relation("VideoSourceImage", fields: [sourceImageId], references: [id], onDelete: SetNull)
+  clipsFromThisImage Asset[] @relation("VideoSourceImage")
+
+  // Phase 6 — assembled final-video attempts, kept on their own FK/relation
+  // for the same reason videoSceneId is (see Scene.videoClips comment).
+  // Dual-optional, mirroring Scene's storyId/episodeId pattern: a FINAL_VIDEO
+  // asset belongs to exactly one of Story or Episode, enforced at the API
+  // layer, not the DB.
+  storyVideoId String?
+  storyVideo   Story? @relation("StoryFinalVideo", fields: [storyVideoId], references: [id], onDelete: Cascade)
+
+  episodeVideoId String?
+  episodeVideo   Episode? @relation("EpisodeFinalVideo", fields: [episodeVideoId], references: [id], onDelete: Cascade)
 
   // Generation metadata — meaningful for AI-produced assets (GENERATED_IMAGE,
   // AUDIO_NARRATION, AUDIO_DIALOGUE). isSelected mirrors Version.isSelected:
@@ -401,6 +457,10 @@ enum AiJobType {
   IMAGE_GENERATION
   IMAGE_VALIDATION
   VOICE
+  // Phase 5 — image-to-video clip generation via a hosted AI video model.
+  // Kept distinct from VIDEO below, which is reserved for local ffmpeg
+  // assembly of the final output (a later, separate phase).
+  VIDEO_GENERATION
   VIDEO
 }
 

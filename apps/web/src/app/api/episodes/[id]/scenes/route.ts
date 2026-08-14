@@ -7,7 +7,7 @@ const createSchema = z.object({
   order: z.number().int().positive(),
   title: z.string().optional().nullable(),
   description: z.string().min(1),
-  visualMode: z.enum(["ILLUSTRATION", "IMAGE_TO_VIDEO"]).default("ILLUSTRATION"),
+  visualMode: z.enum(["ILLUSTRATION", "IMAGE_TO_VIDEO", "TEXT_TO_VIDEO"]).default("ILLUSTRATION"),
   visualModeReason: z.string().optional().nullable(),
   characterIds: z.array(z.string()).default([]),
   locationIds: z.array(z.string()).default([]),

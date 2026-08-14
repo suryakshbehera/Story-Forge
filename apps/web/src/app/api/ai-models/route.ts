@@ -10,6 +10,7 @@ const JOB_TYPES = [
   "IMAGE_GENERATION",
   "IMAGE_VALIDATION",
   "VOICE",
+  "VIDEO_GENERATION",
   "VIDEO",
 ] as const satisfies readonly AiJobType[];
 

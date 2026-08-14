@@ -4,8 +4,11 @@ import { prisma } from "@/lib/db";
 import { assembleContext } from "@/lib/context/assemble";
 import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
 import { mapSceneVoiceData } from "@/lib/voice";
+import { mapSceneVideoData } from "@/lib/scene-video";
+import { mapFinalVideos } from "@/lib/video-assembly";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
+import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft } from "lucide-react";
 
@@ -20,6 +23,10 @@ const VOICE_INCLUDE = {
   },
 };
 
+const VIDEO_INCLUDE = {
+  videoClips: { orderBy: { createdAt: "desc" as const } },
+};
+
 export default async function EpisodePage({
   params,
 }: {
@@ -29,16 +36,20 @@ export default async function EpisodePage({
   const episode = await prisma.episode.findUnique({ where: { id: episodeId } });
   if (!episode || episode.seasonId !== seasonId) notFound();
 
-  const [project, context, scenes, characters, locations] = await Promise.all([
+  const [project, context, scenes, characters, locations, episodeVideo] = await Promise.all([
     prisma.project.findUniqueOrThrow({ where: { id: projectId } }),
     assembleContext({ projectId, episodeId }),
     prisma.scene.findMany({
       where: { episodeId },
       orderBy: { order: "asc" },
-      include: { ...SCENE_INCLUDE, ...VOICE_INCLUDE },
+      include: { ...SCENE_INCLUDE, ...VOICE_INCLUDE, ...VIDEO_INCLUDE },
     }),
     prisma.character.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
     prisma.location.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
+    prisma.episode.findUniqueOrThrow({
+      where: { id: episodeId },
+      include: { finalVideos: { orderBy: { createdAt: "desc" } } },
+    }),
   ]);
 
   return (
@@ -91,10 +102,23 @@ export default async function EpisodePage({
             parentType="episode"
             parentId={episode.id}
             projectId={projectId}
-            initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData)}
+            initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData).map(mapSceneVideoData)}
             characters={characters}
             locations={locations}
             initialNarratorVoiceName={project.narratorVoiceName}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Final Assembly</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <VideoAssemblyPanel
+            parentType="episode"
+            parentId={episodeId}
+            initialFinalVideos={mapFinalVideos(episodeVideo).finalVideos}
           />
         </CardContent>
       </Card>

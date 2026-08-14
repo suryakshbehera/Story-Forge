@@ -180,6 +180,98 @@ export async function generateSpeech({ modelId, text, voice = "alloy" }: Generat
   return { base64: wrapPcmAsWav(buffer).toString("base64"), mimeType: "audio/wav" };
 }
 
+export interface GenerateVideoParams {
+  modelId: string;
+  prompt: string;
+  // Data URI ("data:image/png;base64,...") of the starting frame — OpenRouter
+  // passes image inputs through verbatim as data URIs for this endpoint too
+  // (same policy as the image adapter), no server-side fetching of a
+  // publicly reachable URL required. Omitted entirely for TEXT_TO_VIDEO
+  // scenes, which have no source image to seed the first frame with.
+  imageDataUri?: string;
+  durationSeconds?: number;
+}
+
+export interface GeneratedVideo {
+  base64: string;
+  mimeType: string;
+}
+
+// VIDEO_GENERATION goes through OpenRouter's dedicated video API
+// (POST /api/v1/videos) — a third separate endpoint alongside generateImage
+// and generateSpeech above. Unlike those two, video generation is
+// asynchronous: submitting returns a job id/status immediately, and the
+// actual clip is retrieved by polling GET /api/v1/videos/{id} until the job
+// reaches a terminal status, then downloading from the returned URL.
+async function pollVideoJob(jobId: string, apiKey: string): Promise<string> {
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`https://openrouter.ai/api/v1/videos/${jobId}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new OpenRouterError(`OpenRouter video status check failed (${response.status}): ${body}`);
+    }
+    const data = await response.json();
+    if (data.status === "completed") {
+      const url = data.unsigned_urls?.[0];
+      if (!url) throw new OpenRouterError("OpenRouter reported the video job complete but returned no download URL.");
+      return url;
+    }
+    if (data.status === "failed") {
+      throw new OpenRouterError("OpenRouter video generation job failed.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw new OpenRouterError("Timed out waiting for OpenRouter video generation to finish.");
+}
+
+export async function generateVideo({
+  modelId,
+  prompt,
+  imageDataUri,
+  durationSeconds,
+}: GenerateVideoParams): Promise<GeneratedVideo> {
+  const apiKey = requireApiKey();
+
+  const submitResponse = await fetch("https://openrouter.ai/api/v1/videos", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      prompt,
+      ...(durationSeconds ? { duration: durationSeconds } : {}),
+      ...(imageDataUri
+        ? { frame_images: [{ type: "image_url", image_url: { url: imageDataUri }, frame_type: "first_frame" }] }
+        : {}),
+    }),
+  });
+
+  if (!submitResponse.ok) {
+    const body = await submitResponse.text();
+    throw new OpenRouterError(`OpenRouter video request failed (${submitResponse.status}): ${body}`);
+  }
+
+  const submitted = await submitResponse.json();
+  const downloadUrl = await pollVideoJob(submitted.id, apiKey);
+
+  const contentResponse = await fetch(downloadUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+  if (!contentResponse.ok) {
+    throw new OpenRouterError(`OpenRouter video download failed (${contentResponse.status}).`);
+  }
+  const buffer = Buffer.from(await contentResponse.arrayBuffer());
+  if (buffer.byteLength === 0) {
+    throw new OpenRouterError("OpenRouter returned an empty video file.");
+  }
+  const mimeType = contentResponse.headers.get("content-type") ?? "video/mp4";
+
+  return { base64: buffer.toString("base64"), mimeType };
+}
+
 // Headerless 16-bit signed little-endian PCM at 24kHz mono — confirmed for
 // Gemini TTS and the de facto standard most speech-only PCM APIs (OpenAI's
 // realtime audio included) use for this endpoint's "pcm" format. Wraps it in

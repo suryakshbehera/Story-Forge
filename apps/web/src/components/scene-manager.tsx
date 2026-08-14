@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelSelect } from "@/components/model-select";
 import { SceneVoicePanel, type AudioTake, type DialogueLineItem } from "@/components/scene-voice-panel";
+import { SceneVideoPanel, type SceneVideoClipItem } from "@/components/scene-video-panel";
 import { cn } from "@/lib/utils";
 import {
   Sparkles,
@@ -29,12 +30,13 @@ import {
   ChevronDown,
   AlertTriangle,
   ImagePlus,
+  Upload,
   CheckCircle2,
   XCircle,
   HelpCircle,
 } from "lucide-react";
 
-export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO";
+export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
 
 export interface TagOption {
   id: string;
@@ -65,11 +67,16 @@ export interface SceneItem {
   narration: string | null;
   narrationAudio: AudioTake[];
   dialogueLines: DialogueLineItem[];
+  motionPrompt: string | null;
+  videoPrompt: string | null;
+  videoDurationSeconds: number | null;
+  videoClips: SceneVideoClipItem[];
 }
 
 const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
   ILLUSTRATION: "Illustration",
   IMAGE_TO_VIDEO: "Image → Video",
+  TEXT_TO_VIDEO: "Text → Video",
 };
 
 // For scenes that are genuinely new or just replaced everything (addScene,
@@ -85,6 +92,7 @@ function withVoiceDefaults(scene: SceneItem): SceneItem {
     narration: scene.narration ?? null,
     narrationAudio: scene.narrationAudio ?? [],
     dialogueLines: scene.dialogueLines ?? [],
+    videoClips: scene.videoClips ?? [],
   };
 }
 
@@ -154,7 +162,12 @@ export function SceneManager({
       prev
         .map((s) =>
           s.id === scene.id
-            ? { ...scene, narrationAudio: scene.narrationAudio ?? s.narrationAudio, dialogueLines: scene.dialogueLines ?? s.dialogueLines }
+            ? {
+                ...scene,
+                narrationAudio: scene.narrationAudio ?? s.narrationAudio,
+                dialogueLines: scene.dialogueLines ?? s.dialogueLines,
+                videoClips: scene.videoClips ?? s.videoClips,
+              }
             : s
         )
         .sort((a, b) => a.order - b.order)
@@ -170,6 +183,7 @@ export function SceneManager({
           ...u,
           narrationAudio: u.narrationAudio ?? existing?.narrationAudio ?? [],
           dialogueLines: u.dialogueLines ?? existing?.dialogueLines ?? [],
+          videoClips: u.videoClips ?? existing?.videoClips ?? [],
         });
       }
       return Array.from(byId.values()).sort((a, b) => a.order - b.order);
@@ -278,6 +292,26 @@ export function SceneManager({
     } else {
       toast.success("Image generated.");
     }
+  }
+
+  async function uploadImageForScene(sceneId: string, file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`/api/scenes/${sceneId}/images/upload`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      toast.error(body.error ?? "Upload failed.");
+      return;
+    }
+    const image: SceneImageItem = await res.json();
+    setScenes((prev) =>
+      prev.map((s) =>
+        s.id === sceneId
+          ? { ...s, images: [image, ...s.images.map((img) => ({ ...img, isSelected: false }))] }
+          : s
+      )
+    );
+    toast.success("Image uploaded.");
   }
 
   async function selectSceneImage(sceneId: string, assetId: string) {
@@ -439,6 +473,7 @@ export function SceneManager({
               onMove={mergeScenes}
               onDelete={removeScene}
               onGenerateImage={() => generateImageForScene(scene.id)}
+              onUploadImage={(file) => uploadImageForScene(scene.id, file)}
               onSelectImage={(assetId) => selectSceneImage(scene.id, assetId)}
               onDeleteImage={(assetId) => deleteSceneImage(scene.id, assetId)}
               narratorVoiceName={savedNarratorVoiceName || null}
@@ -516,6 +551,7 @@ function SceneRow({
   onMove,
   onDelete,
   onGenerateImage,
+  onUploadImage,
   onSelectImage,
   onDeleteImage,
   narratorVoiceName,
@@ -529,6 +565,7 @@ function SceneRow({
   onMove: (scenes: SceneItem[]) => void;
   onDelete: (id: string, order: number) => void;
   onGenerateImage: () => Promise<void>;
+  onUploadImage: (file: File) => Promise<void>;
   onSelectImage: (assetId: string) => void;
   onDeleteImage: (assetId: string) => void;
   narratorVoiceName: string | null;
@@ -538,6 +575,8 @@ function SceneRow({
   const [visualMode, setVisualMode] = useState<SceneVisualMode>(scene.visualMode);
   const [visualModeReason, setVisualModeReason] = useState(scene.visualModeReason ?? "");
   const [imageGenerating, setImageGenerating] = useState(false);
+  const [imageUploading, setImageUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [characterIds, setCharacterIds] = useState(new Set(scene.characters.map((c) => c.id)));
   const [locationIds, setLocationIds] = useState(new Set(scene.locations.map((l) => l.id)));
   const [saving, setSaving] = useState(false);
@@ -692,63 +731,101 @@ function SceneRow({
           )}
         </Field>
 
-        <Field label="Image">
-          {scene.images.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No image generated yet.</p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {scene.images.map((img) => (
-                <div key={img.id} className="group relative">
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => onSelectImage(img.id)}
-                    onKeyDown={(e) => e.key === "Enter" && onSelectImage(img.id)}
-                    title={img.validationNotes ?? undefined}
-                    className={cn(
-                      "cursor-pointer overflow-hidden rounded-md border-2",
-                      img.isSelected ? "border-foreground" : "border-transparent"
-                    )}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={img.url} alt="" className="h-24 w-40 object-cover" />
+        {scene.visualMode !== "TEXT_TO_VIDEO" && (
+          <Field label="Image">
+            {scene.images.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No image generated yet.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {scene.images.map((img) => (
+                  <div key={img.id} className="group relative">
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => onSelectImage(img.id)}
+                      onKeyDown={(e) => e.key === "Enter" && onSelectImage(img.id)}
+                      title={img.validationNotes ?? undefined}
+                      className={cn(
+                        "cursor-pointer overflow-hidden rounded-md border-2",
+                        img.isSelected ? "border-foreground" : "border-transparent"
+                      )}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={img.url} alt="" className="h-24 w-40 object-cover" />
+                    </div>
+                    <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-background/80 p-0.5">
+                      {img.validationPassed === true && <CheckCircle2 className="size-3.5 text-green-600" />}
+                      {img.validationPassed === false && <XCircle className="size-3.5 text-amber-600" />}
+                      {img.validationPassed === null && <HelpCircle className="size-3.5 text-muted-foreground" />}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onDeleteImage(img.id)}
+                      className="absolute left-1 top-1 hidden rounded-full bg-background/80 p-0.5 group-hover:block"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
                   </div>
-                  <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-background/80 p-0.5">
-                    {img.validationPassed === true && <CheckCircle2 className="size-3.5 text-green-600" />}
-                    {img.validationPassed === false && <XCircle className="size-3.5 text-amber-600" />}
-                    {img.validationPassed === null && <HelpCircle className="size-3.5 text-muted-foreground" />}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onDeleteImage(img.id)}
-                    className="absolute left-1 top-1 hidden rounded-full bg-background/80 p-0.5 group-hover:block"
-                  >
-                    <Trash2 className="size-3.5" />
-                  </button>
-                </div>
-              ))}
+                ))}
+              </div>
+            )}
+            <div className="mt-2 flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={imageGenerating}
+                onClick={async () => {
+                  setImageGenerating(true);
+                  await onGenerateImage();
+                  setImageGenerating(false);
+                }}
+              >
+                <ImagePlus className="size-4" />
+                {imageGenerating ? "Generating…" : scene.images.length === 0 ? "Generate Image" : "Generate Another"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={imageUploading}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload className="size-4" />
+                {imageUploading ? "Uploading…" : "Upload Image"}
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setImageUploading(true);
+                  await onUploadImage(file);
+                  setImageUploading(false);
+                  e.target.value = "";
+                }}
+              />
             </div>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={imageGenerating}
-            className="mt-2 self-start"
-            onClick={async () => {
-              setImageGenerating(true);
-              await onGenerateImage();
-              setImageGenerating(false);
-            }}
-          >
-            <ImagePlus className="size-4" />
-            {imageGenerating ? "Generating…" : scene.images.length === 0 ? "Generate Image" : "Generate Another"}
-          </Button>
-        </Field>
+          </Field>
+        )}
 
         <Button onClick={save} disabled={!dirty || saving} className="self-start">
           <Save className="size-4" />
           {saving ? "Saving…" : "Save Scene"}
         </Button>
+
+        {(scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO") && (
+          <SceneVideoPanel
+            sceneId={scene.id}
+            mode={scene.visualMode}
+            hasSelectedImage={scene.images.some((img) => img.isSelected)}
+            initialMotionPrompt={scene.motionPrompt ?? ""}
+            initialVideoPrompt={scene.videoPrompt ?? ""}
+            initialVideoDurationSeconds={scene.videoDurationSeconds}
+            initialVideoClips={scene.videoClips}
+          />
+        )}
 
         <SceneVoicePanel
           sceneId={scene.id}

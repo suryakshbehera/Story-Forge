@@ -6,9 +6,12 @@ import { SCENE_INCLUDE, resequenceScenes, mapSceneImages } from "@/lib/scenes";
 const patchSchema = z.object({
   title: z.string().optional().nullable(),
   description: z.string().min(1).optional(),
-  visualMode: z.enum(["ILLUSTRATION", "IMAGE_TO_VIDEO"]).optional(),
+  visualMode: z.enum(["ILLUSTRATION", "IMAGE_TO_VIDEO", "TEXT_TO_VIDEO"]).optional(),
   visualModeReason: z.string().optional().nullable(),
   narration: z.string().optional().nullable(),
+  motionPrompt: z.string().optional().nullable(),
+  videoPrompt: z.string().optional().nullable(),
+  videoDurationSeconds: z.number().int().positive().optional().nullable(),
   characterIds: z.array(z.string()).optional(),
   locationIds: z.array(z.string()).optional(),
 });

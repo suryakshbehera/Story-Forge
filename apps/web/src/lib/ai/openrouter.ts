@@ -137,22 +137,23 @@ export interface GenerateSpeechParams {
 export interface GeneratedSpeech {
   base64: string;
   mimeType: string;
-  transcript?: string;
 }
 
-// VOICE routes through chat completions' audio-output modality (the
-// OpenAI-compatible "gpt-audio" family the seeded VOICE default uses) rather
-// than a dedicated TTS endpoint — OpenRouter has no separate /audio/speech
-// route for these models. Since the underlying model is conversational, not
-// a pure TTS engine, the system prompt has to explicitly pin it to reading
-// the input verbatim or it may paraphrase/respond instead of narrating it.
-const SPEECH_SYSTEM_PROMPT =
-  "You are a text-to-speech narrator. Speak the user's message verbatim, word-for-word, exactly as written. Do not add, remove, paraphrase, or comment on any part of it, and do not respond conversationally.";
-
+// VOICE goes through OpenRouter's dedicated TTS API (POST /api/v1/audio/speech,
+// OpenAI Audio Speech-compatible) rather than chat completions — same reasoning
+// as generateImage() above: a separate endpoint, not a "modalities" flag on
+// callChatModel. Returns raw audio bytes directly (not JSON) on success.
+//
+// Always requests response_format="pcm" rather than "mp3" — OpenRouter's docs
+// list "pcm" as this endpoint's own default, and in practice some providers
+// (confirmed: Gemini TTS) reject "mp3" outright with a 400. "pcm" is the
+// lowest-common-denominator format every provider on this endpoint accepts.
+// The tradeoff is that PCM comes back headerless, so it's wrapped in a
+// standard WAV header before storage/playback — see wrapPcmAsWav().
 export async function generateSpeech({ modelId, text, voice = "alloy" }: GenerateSpeechParams): Promise<GeneratedSpeech> {
   const apiKey = requireApiKey();
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const response = await fetch("https://openrouter.ai/api/v1/audio/speech", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -160,12 +161,9 @@ export async function generateSpeech({ modelId, text, voice = "alloy" }: Generat
     },
     body: JSON.stringify({
       model: modelId,
-      modalities: ["text", "audio"],
-      audio: { voice, format: "wav" },
-      messages: [
-        { role: "system", content: SPEECH_SYSTEM_PROMPT },
-        { role: "user", content: text },
-      ],
+      input: text,
+      voice,
+      response_format: "pcm",
     }),
   });
 
@@ -174,11 +172,34 @@ export async function generateSpeech({ modelId, text, voice = "alloy" }: Generat
     throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${body}`);
   }
 
-  const data = await response.json();
-  const audio = data?.choices?.[0]?.message?.audio;
-  if (!audio?.data) {
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.byteLength === 0) {
     throw new OpenRouterError("OpenRouter returned no audio data.");
   }
 
-  return { base64: audio.data, mimeType: "audio/wav", transcript: audio.transcript };
+  return { base64: wrapPcmAsWav(buffer).toString("base64"), mimeType: "audio/wav" };
+}
+
+// Headerless 16-bit signed little-endian PCM at 24kHz mono — confirmed for
+// Gemini TTS and the de facto standard most speech-only PCM APIs (OpenAI's
+// realtime audio included) use for this endpoint's "pcm" format. Wraps it in
+// a standard 44-byte WAV header so browsers can play it via <audio>.
+function wrapPcmAsWav(pcm: Buffer, sampleRate = 24000, bitsPerSample = 16, channels = 1): Buffer {
+  const blockAlign = channels * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
 }

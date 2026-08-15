@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelSelect } from "@/components/model-select";
-import { Mic, Plus, Save, Trash2, ChevronUp, ChevronDown } from "lucide-react";
+import { Mic, Plus, Save, Trash2, ChevronUp, ChevronDown, Wand2 } from "lucide-react";
 
 export interface AudioTake {
   id: string;
@@ -27,6 +27,10 @@ export interface DialogueLineItem {
   id: string;
   order: number;
   text: string;
+  // Phase 8 — "direction": AI-drafted (via DIALOGUE_DIRECTION, one call per
+  // scene), then user-editable, passed through to TTS as instructions/speed.
+  deliveryNotes: string | null;
+  speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: AudioTake[];
 }
@@ -65,6 +69,8 @@ export function SceneVoicePanel({
   const [generatingNarration, setGeneratingNarration] = useState(false);
 
   const [dialogueLines, setDialogueLines] = useState(initialDialogueLines);
+  const [directionModelId, setDirectionModelId] = useState("");
+  const [directing, setDirecting] = useState(false);
 
   async function saveNarration() {
     setSavingNarration(true);
@@ -167,6 +173,32 @@ export function SceneVoicePanel({
     );
   }
 
+  async function directDialogue() {
+    if (!directionModelId) {
+      toast.error("Pick a Dialogue Direction model first.");
+      return;
+    }
+    setDirecting(true);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/dialogue-direction/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId: directionModelId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Direction failed");
+      }
+      const data: { lines: DialogueLineItem[] } = await res.json();
+      mergeLinesLocal(data.lines);
+      toast.success("Dialogue directed — review each line's delivery below.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Direction failed.");
+    } finally {
+      setDirecting(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4 border-t pt-3">
       <div>
@@ -216,9 +248,16 @@ export function SceneVoicePanel({
       </div>
 
       <div>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <Label className="text-xs text-muted-foreground">Dialogue</Label>
-          <AddDialogueLineDialog characters={characters} onAdd={addDialogueLine} />
+          <div className="flex items-center gap-2">
+            <ModelSelect jobType="DIALOGUE_DIRECTION" value={directionModelId} onChange={setDirectionModelId} />
+            <Button size="sm" variant="outline" disabled={directing || dialogueLines.length === 0} onClick={directDialogue}>
+              <Wand2 className="size-3.5" />
+              {directing ? "Directing…" : "Direct Dialogue"}
+            </Button>
+            <AddDialogueLineDialog characters={characters} onAdd={addDialogueLine} />
+          </div>
         </div>
         {dialogueLines.length === 0 ? (
           <p className="mt-1.5 text-xs text-muted-foreground">No dialogue lines yet.</p>
@@ -347,6 +386,8 @@ function DialogueLineRow({
 }) {
   const [text, setText] = useState(line.text);
   const [characterId, setCharacterId] = useState(line.character.id);
+  const [deliveryNotes, setDeliveryNotes] = useState(line.deliveryNotes ?? "");
+  const [speed, setSpeed] = useState(line.speed?.toString() ?? "");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
@@ -354,7 +395,11 @@ function DialogueLineRow({
   const [generating, setGenerating] = useState(false);
   const [audio, setAudio] = useState(line.audio);
 
-  const dirty = text !== line.text || characterId !== line.character.id;
+  const dirty =
+    text !== line.text ||
+    characterId !== line.character.id ||
+    deliveryNotes !== (line.deliveryNotes ?? "") ||
+    speed !== (line.speed?.toString() ?? "");
   const selectedCharacter = characters.find((c) => c.id === characterId);
   const voiceName = characterId === line.character.id ? line.character.voiceName : selectedCharacter?.voiceName ?? null;
 
@@ -364,7 +409,12 @@ function DialogueLineRow({
       const res = await fetch(`/api/dialogue-lines/${line.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, characterId }),
+        body: JSON.stringify({
+          text,
+          characterId,
+          deliveryNotes: deliveryNotes || null,
+          speed: speed ? Number(speed) : null,
+        }),
       });
       if (!res.ok) throw new Error();
       const updated: DialogueLineItem = await res.json();
@@ -493,6 +543,29 @@ function DialogueLineRow({
       <p className="mt-1 text-xs text-muted-foreground">
         Voice: {voiceName ? <span className="font-medium">{voiceName}</span> : `not set — edit ${selectedCharacter?.name ?? line.character.name}'s Character profile`}
       </p>
+
+      <div className="mt-1.5 grid gap-1.5">
+        <Label className="text-xs text-muted-foreground">Style / delivery (emotion, tone, emphasis — from Direct Dialogue above, or written by hand)</Label>
+        <Textarea
+          rows={1}
+          placeholder="e.g. anxious, quiet, hesitant pauses between phrases"
+          value={deliveryNotes}
+          onChange={(e) => setDeliveryNotes(e.target.value)}
+        />
+      </div>
+      <div className="mt-1.5 flex items-center gap-2">
+        <Label className="whitespace-nowrap text-xs text-muted-foreground">Rhythm / pace (0.25–4, blank = default)</Label>
+        <input
+          type="number"
+          min={0.25}
+          max={4}
+          step={0.05}
+          className="w-20 rounded-md border border-input bg-transparent px-2 py-1 text-sm"
+          value={speed}
+          onChange={(e) => setSpeed(e.target.value)}
+        />
+      </div>
+
       <div className="mt-1.5 flex flex-wrap items-end gap-2">
         <Button size="sm" variant="outline" onClick={save} disabled={!dirty || saving}>
           {saving ? "Saving…" : "Save"}

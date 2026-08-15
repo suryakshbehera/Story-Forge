@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
+import { SCENE_INCLUDE, mapScenesShots } from "@/lib/scenes";
 import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
@@ -55,7 +55,7 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
         parentType="story"
         parentId={project.story.id}
         projectId={id}
-        initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
+        initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
         characters={characters}
         locations={locations}
         initialNarratorVoiceName={project.narratorVoiceName}

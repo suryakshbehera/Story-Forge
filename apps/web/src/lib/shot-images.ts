@@ -3,7 +3,7 @@ import { prisma, type Asset } from "@/lib/db";
 import { callChatModel, generateImage, OpenRouterError } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
 
-export interface SerializedSceneImage {
+export interface SerializedShotImage {
   id: string;
   url: string;
   isSelected: boolean;
@@ -12,7 +12,7 @@ export interface SerializedSceneImage {
   createdAt: Date;
 }
 
-export function serializeSceneImage(asset: Asset): SerializedSceneImage {
+export function serializeShotImage(asset: Asset): SerializedShotImage {
   return {
     id: asset.id,
     url: storage.url(asset.storageKey),
@@ -23,26 +23,30 @@ export function serializeSceneImage(asset: Asset): SerializedSceneImage {
   };
 }
 
-const SCENE_CONTEXT_INCLUDE = {
-  characters: { include: { referenceImages: true } },
-  locations: { include: { referenceImages: true } },
-  story: true,
-  episode: { include: { season: { include: { project: { include: { storyBible: true } } } } } },
+const SHOT_CONTEXT_INCLUDE = {
+  scene: {
+    include: {
+      characters: { include: { referenceImages: true } },
+      locations: { include: { referenceImages: true } },
+      story: true,
+      episode: { include: { season: { include: { project: { include: { storyBible: true } } } } } },
+    },
+  },
 } as const;
 
-async function loadSceneContext(sceneId: string) {
-  return prisma.scene.findUniqueOrThrow({
-    where: { id: sceneId },
-    include: SCENE_CONTEXT_INCLUDE,
+async function loadShotContext(shotId: string) {
+  return prisma.shot.findUniqueOrThrow({
+    where: { id: shotId },
+    include: SHOT_CONTEXT_INCLUDE,
   });
 }
 
-type SceneContext = Awaited<ReturnType<typeof loadSceneContext>>;
+type ShotContext = Awaited<ReturnType<typeof loadShotContext>>;
 
 // Loose visual-style hint pulled from whichever parent exists — Story (Single
 // Video) has no dedicated visualStyle field, only StoryBible (Series) does,
 // so this falls back to genre/tone for Single Video projects.
-function buildStyleContext(scene: SceneContext): string | null {
+function buildStyleContext(scene: ShotContext["scene"]): string | null {
   if (scene.story) {
     const parts = [scene.story.genre && `Genre: ${scene.story.genre}`, scene.story.tone && `Tone: ${scene.story.tone}`].filter(
       Boolean
@@ -59,16 +63,17 @@ function buildStyleContext(scene: SceneContext): string | null {
   return parts.length > 0 ? parts.join("\n") : null;
 }
 
-const IMAGE_PROMPT_SYSTEM_PROMPT = `You are the Image Prompt step of Narrata's Image pipeline. Turn the scene description and tagged character/location details below into a single polished, concrete image-generation prompt for a text-to-image model.
+const IMAGE_PROMPT_SYSTEM_PROMPT = `You are the Image Prompt step of Narrata's Image pipeline. Turn the shot description below — plus the broader scene it belongs to and any tagged character/location details — into a single polished, concrete image-generation prompt for a text-to-image model.
 
-Describe composition, subjects, setting, lighting, and mood in one paragraph. Output only the prompt text itself — no meta-commentary, no markdown, no explanations.`;
+The shot description is the primary framing (what's actually on screen); the scene description is context for continuity, not the subject to draw literally. Describe composition, subjects, setting, lighting, and mood in one paragraph. Output only the prompt text itself — no meta-commentary, no markdown, no explanations.`;
 
 async function buildImagePrompt(
-  scene: SceneContext,
+  shot: ShotContext,
   styleContext: string | null,
   instructions: string | undefined,
   modelId: string
 ): Promise<string> {
+  const scene = shot.scene;
   const characterBlocks = scene.characters
     .map((c) => [`${c.name}:`, c.appearance, c.clothing].filter(Boolean).join(" "))
     .join("\n");
@@ -77,8 +82,9 @@ async function buildImagePrompt(
     .join("\n");
 
   const userPrompt = [
-    `# Scene\n${scene.description}`,
-    scene.visualMode === "IMAGE_TO_VIDEO" && "This image will be the starting frame of a video clip.",
+    `# Shot\n${shot.description}`,
+    `# Scene context\n${scene.description}`,
+    scene.visualMode === "IMAGE_TO_VIDEO" && "This image will feed a video generation call as a continuity frame.",
     characterBlocks && `# Characters in this scene\n${characterBlocks}`,
     locationBlocks && `# Locations in this scene\n${locationBlocks}`,
     styleContext && `# Style\n${styleContext}`,
@@ -104,7 +110,7 @@ const validationResponseSchema = z.object({
 
 // Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
 // appears below to satisfy the provider's json_object requirement.
-const IMAGE_VALIDATION_SYSTEM_PROMPT = `You are the Image Validation step of Narrata's Image pipeline. The first image provided is a newly generated scene image. The remaining images are locked reference images for named characters/locations, given in the order listed in the user prompt.
+const IMAGE_VALIDATION_SYSTEM_PROMPT = `You are the Image Validation step of Narrata's Image pipeline. The first image provided is a newly generated shot image. The remaining images are locked reference images for named characters/locations, given in the order listed in the user prompt.
 
 Judge whether the newly generated image stays visually consistent with those references (character appearance/clothing, location architecture/environment) — minor stylistic differences are fine, but a different-looking character or place is not.
 
@@ -130,7 +136,7 @@ async function runValidation(
     })
   );
 
-  const userPrompt = `Reference images, in order: ${entities.map((e) => e.name).join(", ")}.\n\nDoes the generated scene image stay consistent with these references? Respond with the required JSON.`;
+  const userPrompt = `Reference images, in order: ${entities.map((e) => e.name).join(", ")}.\n\nDoes the generated shot image stay consistent with these references? Respond with the required JSON.`;
 
   const raw = await callChatModel({
     modelId,
@@ -153,8 +159,8 @@ function extFromMime(mimeType: string): string {
   return "png";
 }
 
-interface GenerateSceneImageParams {
-  sceneId: string;
+interface GenerateShotImageParams {
+  shotId: string;
   promptModelId: string;
   imageModelId: string;
   // null when no IMAGE_VALIDATION model is configured — validation is
@@ -163,36 +169,36 @@ interface GenerateSceneImageParams {
   instructions?: string;
 }
 
-interface GenerateSceneImageResult {
-  image: SerializedSceneImage;
+interface GenerateShotImageResult {
+  image: SerializedShotImage;
   missingReferenceFor: string[];
 }
 
-export async function generateSceneImage({
-  sceneId,
+export async function generateShotImage({
+  shotId,
   promptModelId,
   imageModelId,
   validationModelId,
   instructions,
-}: GenerateSceneImageParams): Promise<GenerateSceneImageResult> {
-  const scene = await loadSceneContext(sceneId);
-  const styleContext = buildStyleContext(scene);
+}: GenerateShotImageParams): Promise<GenerateShotImageResult> {
+  const shot = await loadShotContext(shotId);
+  const styleContext = buildStyleContext(shot.scene);
 
-  const prompt = await buildImagePrompt(scene, styleContext, instructions, promptModelId);
+  const prompt = await buildImagePrompt(shot, styleContext, instructions, promptModelId);
   const generated = await generateImage({ modelId: imageModelId, prompt });
 
   const buffer = Buffer.from(generated.base64, "base64");
   const ext = extFromMime(generated.mimeType);
-  const fileName = `scene-image.${ext}`;
-  const key = buildStorageKey("scenes", sceneId, fileName);
+  const fileName = `shot-image.${ext}`;
+  const key = buildStorageKey("shots", shotId, fileName);
   await storage.put(key, buffer);
 
   // Validation only applies to locked characters (mirrors assemble.ts's
   // locked-only rule) and all tagged locations (no lock concept for
-  // locations — see Location model comment in schema.prisma).
+  // locations) — tags stay scene-level, shots share their scene's roster.
   const validationTargets: ValidationEntity[] = [
-    ...scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
-    ...scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
+    ...shot.scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
+    ...shot.scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
   ];
   const missingReferenceFor = validationTargets.filter((t) => t.referenceImages.length === 0).map((t) => t.name);
   const validatable = validationTargets.filter((t) => t.referenceImages.length > 0);
@@ -210,7 +216,7 @@ export async function generateSceneImage({
   }
 
   const asset = await prisma.$transaction(async (tx) => {
-    await tx.asset.updateMany({ where: { sceneId, isSelected: true }, data: { isSelected: false } });
+    await tx.asset.updateMany({ where: { shotId, isSelected: true }, data: { isSelected: false } });
     return tx.asset.create({
       data: {
         type: "GENERATED_IMAGE",
@@ -218,7 +224,7 @@ export async function generateSceneImage({
         fileName,
         mimeType: generated.mimeType,
         sizeBytes: buffer.byteLength,
-        sceneId,
+        shotId,
         isSelected: true,
         prompt,
         modelId: imageModelId,
@@ -230,26 +236,23 @@ export async function generateSceneImage({
     });
   });
 
-  return { image: serializeSceneImage(asset), missingReferenceFor };
+  return { image: serializeShotImage(asset), missingReferenceFor };
 }
 
-// User-uploaded scene image — same "slot" and isSelected takeover behavior
-// as an AI-generated one (see generateSceneImage above), just skipping the
-// prompt/generation/validation steps. type stays GENERATED_IMAGE since that's
-// what marks an Asset as belonging to the scene's image gallery (see
-// Scene.images comment in schema.prisma); createdBy is what actually
-// distinguishes it as user-supplied, same idiom as REFERENCE_IMAGE uploads.
-export async function uploadSceneImage(
-  sceneId: string,
+// User-uploaded shot image — same "slot" and isSelected takeover behavior
+// as an AI-generated one (see generateShotImage above), just skipping the
+// prompt/generation/validation steps.
+export async function uploadShotImage(
+  shotId: string,
   buffer: Buffer,
   fileName: string,
   mimeType: string
-): Promise<SerializedSceneImage> {
-  const key = buildStorageKey("scenes", sceneId, fileName);
+): Promise<SerializedShotImage> {
+  const key = buildStorageKey("shots", shotId, fileName);
   await storage.put(key, buffer);
 
   const asset = await prisma.$transaction(async (tx) => {
-    await tx.asset.updateMany({ where: { sceneId, isSelected: true }, data: { isSelected: false } });
+    await tx.asset.updateMany({ where: { shotId, isSelected: true }, data: { isSelected: false } });
     return tx.asset.create({
       data: {
         type: "GENERATED_IMAGE",
@@ -257,32 +260,32 @@ export async function uploadSceneImage(
         fileName,
         mimeType,
         sizeBytes: buffer.byteLength,
-        sceneId,
+        shotId,
         isSelected: true,
         createdBy: "USER",
       },
     });
   });
 
-  return serializeSceneImage(asset);
+  return serializeShotImage(asset);
 }
 
-export async function selectSceneImage(sceneId: string, assetId: string): Promise<SerializedSceneImage> {
+export async function selectShotImage(shotId: string, assetId: string): Promise<SerializedShotImage> {
   return prisma.$transaction(async (tx) => {
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: assetId } });
-    if (asset.sceneId !== sceneId) {
-      throw new Error("Asset does not belong to this scene.");
+    if (asset.shotId !== shotId) {
+      throw new Error("Asset does not belong to this shot.");
     }
-    await tx.asset.updateMany({ where: { sceneId, isSelected: true }, data: { isSelected: false } });
+    await tx.asset.updateMany({ where: { shotId, isSelected: true }, data: { isSelected: false } });
     const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
-    return serializeSceneImage(updated);
+    return serializeShotImage(updated);
   });
 }
 
-export async function deleteSceneImage(sceneId: string, assetId: string): Promise<void> {
+export async function deleteShotImage(shotId: string, assetId: string): Promise<void> {
   const asset = await prisma.asset.findUniqueOrThrow({ where: { id: assetId } });
-  if (asset.sceneId !== sceneId) {
-    throw new Error("Asset does not belong to this scene.");
+  if (asset.shotId !== shotId) {
+    throw new Error("Asset does not belong to this shot.");
   }
   await storage.remove(asset.storageKey);
   await prisma.asset.delete({ where: { id: assetId } });

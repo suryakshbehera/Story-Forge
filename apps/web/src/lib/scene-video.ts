@@ -31,7 +31,9 @@ interface GenerateSceneVideoParams {
 export async function generateSceneVideo({ sceneId, modelId }: GenerateSceneVideoParams): Promise<SerializedSceneVideoClip> {
   const scene = await prisma.scene.findUniqueOrThrow({
     where: { id: sceneId },
-    include: { images: { where: { isSelected: true }, take: 1 } },
+    include: {
+      shots: { orderBy: { order: "asc" }, include: { images: { where: { isSelected: true }, take: 1 } } },
+    },
   });
 
   if (scene.visualMode !== "IMAGE_TO_VIDEO" && scene.visualMode !== "TEXT_TO_VIDEO") {
@@ -39,20 +41,42 @@ export async function generateSceneVideo({ sceneId, modelId }: GenerateSceneVide
   }
 
   let imageDataUri: string | undefined;
+  let lastFrameDataUri: string | undefined;
   let sourceImage: Asset | undefined;
   let prompt: string;
 
   if (scene.visualMode === "IMAGE_TO_VIDEO") {
-    sourceImage = scene.images[0];
+    // Phase 8 — shots are continuity input for ONE scene-level video, not
+    // individual clips: the first shot's image anchors the start, and (when
+    // the scene has more than one shot) the last shot's image anchors the
+    // end, so the generated clip transitions through the shots in between
+    // rather than each shot generating its own separate clip.
+    const firstShot = scene.shots[0];
+    sourceImage = firstShot?.images[0];
     if (!sourceImage) {
-      throw new OpenRouterError("Generate and select a scene image before generating a video clip.");
+      throw new OpenRouterError("Generate and select a first-shot image before generating a video clip.");
     }
     const imageBytes = await storage.get(sourceImage.storageKey);
     if (!imageBytes) {
-      throw new OpenRouterError("The scene's selected image is missing from storage.");
+      throw new OpenRouterError("The first shot's selected image is missing from storage.");
     }
     imageDataUri = `data:${sourceImage.mimeType ?? "image/png"};base64,${imageBytes.toString("base64")}`;
-    prompt = scene.motionPrompt?.trim() || scene.description;
+
+    if (scene.shots.length > 1) {
+      const lastShot = scene.shots[scene.shots.length - 1];
+      const lastImage = lastShot.images[0];
+      if (lastImage) {
+        const lastBytes = await storage.get(lastImage.storageKey);
+        if (lastBytes) {
+          lastFrameDataUri = `data:${lastImage.mimeType ?? "image/png"};base64,${lastBytes.toString("base64")}`;
+        }
+      }
+    }
+
+    const shotDescriptions = scene.shots.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
+    prompt =
+      scene.motionPrompt?.trim() ||
+      (shotDescriptions ? `${scene.description}\n\nShot progression:\n${shotDescriptions}` : scene.description);
   } else {
     prompt = scene.videoPrompt?.trim() || scene.description;
   }
@@ -61,6 +85,7 @@ export async function generateSceneVideo({ sceneId, modelId }: GenerateSceneVide
     modelId,
     prompt,
     imageDataUri,
+    lastFrameDataUri,
     durationSeconds: scene.videoDurationSeconds ?? undefined,
   });
 

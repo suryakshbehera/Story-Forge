@@ -18,41 +18,51 @@ export function parentWhere(parentType: ScenesParentType, parentId: string) {
 const SCENE_INCLUDE = {
   characters: { select: { id: true, name: true } },
   locations: { select: { id: true, name: true } },
-  images: {
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      storageKey: true,
-      isSelected: true,
-      validationPassed: true,
-      validationNotes: true,
-      createdAt: true,
+  // Phase 8 — a scene's ordered shots, each with its own image gallery.
+  // Scene stopped being the image unit; see Shot in schema.prisma.
+  shots: {
+    orderBy: { order: "asc" },
+    include: {
+      images: {
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          storageKey: true,
+          isSelected: true,
+          validationPassed: true,
+          validationNotes: true,
+          createdAt: true,
+        },
+      },
     },
   },
 } satisfies Prisma.SceneInclude;
 
 export type SceneWithTags = Prisma.SceneGetPayload<{ include: typeof SCENE_INCLUDE }>;
 
-// storageKey is a server-side detail — replace each image with a
-// client-facing url before a scene ever gets sent in a response. Applied at
+// storageKey is a server-side detail — replace each shot's images with
+// client-facing urls before a scene ever gets sent in a response. Applied at
 // every route that returns a scene (or list of scenes) built from
 // SCENE_INCLUDE, since Prisma's `include` alone can't add derived fields.
-export function mapSceneImages<T extends SceneWithTags>(scene: T) {
+export function mapSceneShots<T extends SceneWithTags>(scene: T) {
   return {
     ...scene,
-    images: scene.images.map((img) => ({
-      id: img.id,
-      url: storage.url(img.storageKey),
-      isSelected: img.isSelected,
-      validationPassed: img.validationPassed,
-      validationNotes: img.validationNotes,
-      createdAt: img.createdAt,
+    shots: scene.shots.map((shot) => ({
+      ...shot,
+      images: shot.images.map((img) => ({
+        id: img.id,
+        url: storage.url(img.storageKey),
+        isSelected: img.isSelected,
+        validationPassed: img.validationPassed,
+        validationNotes: img.validationNotes,
+        createdAt: img.createdAt,
+      })),
     })),
   };
 }
 
-export function mapScenesImages<T extends SceneWithTags>(scenes: T[]) {
-  return scenes.map(mapSceneImages);
+export function mapScenesShots<T extends SceneWithTags>(scenes: T[]) {
+  return scenes.map(mapSceneShots);
 }
 
 const aiScenesResponseSchema = z.object({
@@ -101,10 +111,10 @@ interface GenerateScenesParams {
   regenerateAll: boolean;
 }
 
-export type SceneWithImages = ReturnType<typeof mapSceneImages>;
+export type SceneWithShots = ReturnType<typeof mapSceneShots>;
 
 interface GenerateScenesResult {
-  scenes: SceneWithImages[];
+  scenes: SceneWithShots[];
   unmatchedNames: string[];
 }
 
@@ -218,7 +228,7 @@ export async function generateScenes({
     include: SCENE_INCLUDE,
   });
 
-  return { scenes: mapScenesImages(scenes), unmatchedNames: Array.from(unmatchedNames) };
+  return { scenes: mapScenesShots(scenes), unmatchedNames: Array.from(unmatchedNames) };
 }
 
 export async function resequenceScenes(tx: Prisma.TransactionClient, where: { storyId: string } | { episodeId: string }) {

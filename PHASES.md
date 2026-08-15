@@ -481,7 +481,112 @@ unaffected — the single-layer and no-layer paths skip the mix step entirely.
 
 ---
 
-## Proposed roadmap (Phase 8+) — 🚧 not built, not confirmed
+## Phase 8 — Shot Engine & Dialogue Direction ✅ Complete
+
+**Goal:** replace "one image per Scene" with an ordered sequence of Shots
+(distinct continuity frames, not alternate takes) so illustration scenes get
+visual variety instead of one static image held for the whole scene, and
+Image→Video scenes get first/last-frame continuity input instead of a single
+starting frame. Alongside it, per-`DialogueLine` delivery direction (style +
+pace) so a scene's conversation doesn't all sound the same.
+
+### Data model (`packages/db/prisma/schema.prisma`)
+
+- `Shot` — new model, child of `Scene`: `order`, `description` (the specific
+  framing/action for that shot — AI-drafted or hand-written), `cameraMovement`
+  (moved off `Scene`; the `SceneCameraMovement` enum was renamed to
+  `CameraMovement` since it's no longer scene-scoped), `durationSeconds`
+  (optional override — shots left unset evenly split whatever remains of the
+  scene's audio duration), and its own `images: Asset[]` gallery via
+  `Asset.shotId` (same take-history/`isSelected` pattern `Scene.images` had).
+  Plain-CRUD, not versioned — same reasoning as `Scene`.
+- `Scene.images`/`Asset.sceneId` (the old `SceneImages` relation) and
+  `Scene.cameraMovement` were **removed** — this is the first data-migrating
+  change in the repo, not just an additive one. Sequence: an additive
+  migration added `Shot`/`Asset.shotId` alongside the old fields; a one-time
+  script (`packages/db/src/backfill-shots.ts`, deleted after running)
+  created a "Shot 1" per existing Scene carrying its current
+  description/cameraMovement and reassigned every existing image `Asset`
+  from `sceneId` to that Shot's `shotId`; a verification query confirmed
+  zero orphaned images before a second, destructive migration dropped the
+  old columns. On this repo's dev data: 37 scenes → 37 shots, 23 images
+  moved, 0 orphans.
+- `DialogueLine.deliveryNotes`/`speed` — AI-drafted (via `DIALOGUE_DIRECTION`)
+  then user-editable, same pattern as `visualModeReason`. Both map to real,
+  documented OpenAI-compatible TTS params (`instructions`, `speed` on
+  `/audio/speech`) — lower-risk than Phase 7's `generateAudio()`, which has
+  no equivalent dedicated-endpoint documentation to point at.
+- `AiJobType.SHOT_PLANNING` (chat, mirrors `SCENE_PLANNING` one level down)
+  and `AiJobType.DIALOGUE_DIRECTION` (chat, one call per scene directs every
+  line at once so a conversation's emotional arc stays coherent).
+
+### Features
+
+- **Shot planning** (`generateShots` in
+  [`apps/web/src/lib/shots.ts`](apps/web/src/lib/shots.ts)) — one
+  `SHOT_PLANNING` call per scene (never a whole-episode pass) proposes an
+  ordered shot list with a stated count/reasoning, strict JSON output.
+  Existing `regenerateAll`-requires-confirmation pattern from Scene Planning
+  reused for re-running it against a scene that already has shots.
+- **Shot images** (`apps/web/src/lib/shot-images.ts`, replacing the deleted
+  `scene-images.ts`) — the same three-step `IMAGE_PROMPTS` →
+  `IMAGE_GENERATION` → `IMAGE_VALIDATION` pipeline from Phase 3, retargeted:
+  the prompt is now built from `Shot.description` (primary framing) plus the
+  parent Scene's description/characters/locations/style as context.
+  Validation still checks against the scene's tagged locked
+  characters/locations (tags stay scene-level — shots share their scene's
+  roster). Manual upload available too, same dual path as before.
+- **Image→Video continuity** (`generateSceneVideo` in
+  `apps/web/src/lib/scene-video.ts`) — for `IMAGE_TO_VIDEO` scenes, shots are
+  continuity input for **one** scene-level video generation, not one clip
+  per shot: the first shot's image is sent as `frame_images[].frame_type:
+  "first_frame"` and (when the scene has more than one shot) the last shot's
+  image as `"last_frame"`, confirmed real via OpenRouter's video-generation
+  docs (`google/veo-3.1`, the seeded default, supports both). `generateVideo()`
+  in `openrouter.ts` gained a `lastFrameDataUri` param for this. Assembly
+  itself (`video-assembly.ts`) is unchanged for `IMAGE_TO_VIDEO`/
+  `TEXT_TO_VIDEO` scenes — still one clip per scene either way.
+- **Per-shot assembly for `ILLUSTRATION` scenes** (`video-assembly.ts`) — the
+  scene's visual segment is now built as one Ken Burns clip per shot (each
+  shot's own `cameraMovement`), concatenated in order. Duration splits: a
+  shot with an explicit `durationSeconds` keeps it, the rest evenly divide
+  whatever remains of the scene's total audio duration (floored at 0.5s so a
+  pathological over-committed config can't produce a zero-length segment).
+  Scenes with a single shot (everything pre-Phase-8) produce byte-for-byte
+  equivalent output to before.
+- **Dialogue direction** (`generateDialogueDirection` in `lib/voice.ts`) —
+  one `DIALOGUE_DIRECTION` call per scene drafts `deliveryNotes`/`speed` for
+  every line at once; `generateDialogueAudio()` passes them through to
+  `generateSpeech()`'s new `instructions`/`speed` params. Editable per-line
+  regardless of source (AI-drafted or hand-written), same as text/character.
+- **UI**: `shot-manager.tsx` (new) — per-scene shot list, each with its own
+  description/camera-movement/duration fields and image gallery, reusing the
+  scene editor's existing shared Image Generation settings card (now
+  labelled "Shots & Image Generation", with an added Shot Planning model
+  picker) rather than per-shot model pickers, to keep the UI from getting
+  more cluttered than the one it replaced. `scene-voice-panel.tsx` gained a
+  "Direct Dialogue" button and, per line, a delivery-notes textarea and pace
+  number input.
+- **New API routes**: `POST /api/scenes/[id]/shots(/generate)`,
+  `PATCH|DELETE /api/shots/[id]`, `POST /api/shots/[id]/move`, the same
+  `generate`/`upload`/`[assetId]/select`/`DELETE [assetId]` quartet under
+  `/api/shots/[id]/images/...` that scene images used to have, and
+  `POST /api/scenes/[id]/dialogue-direction/generate`.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`Shot`, `CameraMovement`,
+`DialogueLine.deliveryNotes`/`speed`, `AiJobType.SHOT_PLANNING`/
+`DIALOGUE_DIRECTION`), migrations `20260815043933_phase8_shots_add` and
+`20260815050250_phase8_shots_cleanup`,
+[`apps/web/src/lib/shots.ts`](apps/web/src/lib/shots.ts),
+[`apps/web/src/lib/shot-images.ts`](apps/web/src/lib/shot-images.ts),
+[`apps/web/src/lib/scene-video.ts`](apps/web/src/lib/scene-video.ts),
+[`apps/web/src/lib/video-assembly.ts`](apps/web/src/lib/video-assembly.ts),
+[`apps/web/src/lib/voice.ts`](apps/web/src/lib/voice.ts),
+[`apps/web/src/components/shot-manager.tsx`](apps/web/src/components/shot-manager.tsx).
+
+---
+
+## Proposed roadmap (Phase 9+) — 🚧 not built, not confirmed
 
 Everything below is **inferred**, not decided. The evidence is real (an enum
 value, a seed row, a code comment) but none of it is a commitment — no phase
@@ -500,28 +605,12 @@ own — but that's a guess, not something the code states.
 
 The items below have no trace in the schema/code yet. They came out of a
 design discussion with the project owner, not from reading the codebase —
-recorded here as candidate scope for Phase 8+, not a commitment.
-
-**Shot-level visuals.** Replace "one image per Scene" with an ordered
-`Shot` sub-entity under `Scene` (numbered, each with its own generated
-image, user can add/remove/reorder/regenerate) — Scene becomes a container
-rather than the image unit. Master AI would propose a shot count/split
-per scene (heuristic: one shot per dialogue-speaker-change or ~2-3 lines,
-plus one per major action beat, floor set by minimum shot duration), user
-can always override. This changes where image generation attaches
-(Shot, not Scene) — a real schema/pipeline change, not a small tweak.
-
-**Dialogue delivery / voice rhythm.** Extend `DialogueLine` with delivery
-metadata (emotion, pace, emphasis/pause markers) that Master AI fills in
-during dialogue generation and that feeds into the TTS call params
-alongside the existing per-character `voiceName` — see
-`apps/web/src/lib/voice.ts` (Phase 4). Style/rhythm should be informed by
-Story Bible tone + character profile via the existing Context Engine path.
+recorded here as candidate scope for Phase 9+, not a commitment.
 
 **Character/visual style consistency.** Two candidate fixes, not yet
 confirmed as implemented: (a) verify every image-generation call
 conditions on the tagged character's locked reference image, not just a
-text description — check `apps/web/src/lib/scene-images.ts`'s
+text description — check `apps/web/src/lib/shot-images.ts`'s
 `IMAGE_PROMPTS` step; (b) add a project-level style prompt/seed anchor so
 every image call shares one style reference instead of drifting per
 generation.

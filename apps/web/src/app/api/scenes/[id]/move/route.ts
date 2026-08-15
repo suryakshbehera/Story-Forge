@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { SCENE_INCLUDE, parentWhere, mapScenesImages } from "@/lib/scenes";
+import { SCENE_INCLUDE, parentWhere, mapScenesShots } from "@/lib/scenes";
 
 const bodySchema = z.object({
   direction: z.enum(["up", "down"]),
@@ -36,5 +36,5 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return { scenes: [updatedScene, updatedNeighbor] };
   });
 
-  return NextResponse.json({ scenes: mapScenesImages(result.scenes) });
+  return NextResponse.json({ scenes: mapScenesShots(result.scenes) });
 }

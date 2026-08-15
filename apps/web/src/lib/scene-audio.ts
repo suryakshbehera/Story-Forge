@@ -27,7 +27,7 @@ function extFromMime(mimeType: string): string {
 
 // ── Audio Plan — the AUDIO_PLANNING step. Drafts Scene.musicPrompt/sfxPrompt
 // from the scene's own description plus a light genre/tone/visualStyle hint
-// (same style-context idea as scene-images.ts's buildStyleContext, kept as
+// (same style-context idea as shot-images.ts's buildStyleContext, kept as
 // its own small copy here rather than importing — audio planning doesn't
 // need the character/location reference-image joins that file's context
 // query pulls in). One deliberately-scoped-to-this-scene call, never a

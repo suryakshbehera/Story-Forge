@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,7 +21,7 @@ import { ModelSelect } from "@/components/model-select";
 import { SceneVoicePanel, type AudioTake, type DialogueLineItem } from "@/components/scene-voice-panel";
 import { SceneVideoPanel, type SceneVideoClipItem } from "@/components/scene-video-panel";
 import { SceneAudioPanel } from "@/components/scene-audio-panel";
-import { cn } from "@/lib/utils";
+import { ShotManager, type ShotItem } from "@/components/shot-manager";
 import {
   Sparkles,
   Plus,
@@ -30,15 +30,9 @@ import {
   ChevronUp,
   ChevronDown,
   AlertTriangle,
-  ImagePlus,
-  Upload,
-  CheckCircle2,
-  XCircle,
-  HelpCircle,
 } from "lucide-react";
 
 export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
-export type SceneCameraMovement = "STATIC" | "ZOOM_IN" | "ZOOM_OUT" | "PAN_LEFT" | "PAN_RIGHT" | "PAN_UP" | "PAN_DOWN";
 
 export interface TagOption {
   id: string;
@@ -48,14 +42,6 @@ export interface TagOption {
   voiceName?: string | null;
 }
 
-export interface SceneImageItem {
-  id: string;
-  url: string;
-  isSelected: boolean;
-  validationPassed: boolean | null;
-  validationNotes: string | null;
-}
-
 export interface SceneItem {
   id: string;
   order: number;
@@ -63,10 +49,10 @@ export interface SceneItem {
   description: string;
   visualMode: SceneVisualMode;
   visualModeReason: string | null;
-  cameraMovement: SceneCameraMovement;
   characters: TagOption[];
   locations: TagOption[];
-  images: SceneImageItem[];
+  // Phase 8 — Scene stopped being the image unit; shots carry the visuals.
+  shots: ShotItem[];
   narration: string | null;
   narrationAudio: AudioTake[];
   dialogueLines: DialogueLineItem[];
@@ -86,16 +72,6 @@ const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
   ILLUSTRATION: "Illustration",
   IMAGE_TO_VIDEO: "Image → Video",
   TEXT_TO_VIDEO: "Text → Video",
-};
-
-const CAMERA_MOVEMENT_LABELS: Record<SceneCameraMovement, string> = {
-  STATIC: "None (static)",
-  ZOOM_IN: "Zoom in",
-  ZOOM_OUT: "Zoom out",
-  PAN_LEFT: "Pan left",
-  PAN_RIGHT: "Pan right",
-  PAN_UP: "Pan up",
-  PAN_DOWN: "Pan down",
 };
 
 // For scenes that are genuinely new or just replaced everything (addScene,
@@ -144,6 +120,10 @@ export function SceneManager({
   const [imageModelId, setImageModelId] = useState("");
   const [validationModelId, setValidationModelId] = useState("");
   const [imageInstructions, setImageInstructions] = useState("");
+  // Phase 8 — shared across every shot's "Generate Shots" button, same
+  // "one settings card, click applies to whichever row you're on" pattern
+  // the Image Generation settings above already use.
+  const [shotPlanningModelId, setShotPlanningModelId] = useState("");
 
   // Project-wide, not per-scene — Character/narrator voices are asked to
   // stay consistent across an entire story, not vary scene to scene. See
@@ -282,91 +262,6 @@ export function SceneManager({
     toast.success("Scene added.");
   }
 
-  async function generateImageForScene(sceneId: string) {
-    if (!promptModelId || !imageModelId) {
-      toast.error("Pick an Image Prompt and Image Generation model first.");
-      return;
-    }
-    const res = await fetch(`/api/scenes/${sceneId}/images/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        promptModelId,
-        imageModelId,
-        validationModelId: validationModelId || undefined,
-        instructions: imageInstructions,
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      toast.error(body.error ?? "Image generation failed.");
-      return;
-    }
-    const data: { image: SceneImageItem; missingReferenceFor: string[] } = await res.json();
-    setScenes((prev) =>
-      prev.map((s) =>
-        s.id === sceneId
-          ? { ...s, images: [data.image, ...s.images.map((img) => ({ ...img, isSelected: false }))] }
-          : s
-      )
-    );
-    if (data.missingReferenceFor.length > 0) {
-      toast.warning(
-        `No reference image for: ${data.missingReferenceFor.join(", ")} — consistency wasn't checked.`
-      );
-    } else {
-      toast.success("Image generated.");
-    }
-  }
-
-  async function uploadImageForScene(sceneId: string, file: File) {
-    const formData = new FormData();
-    formData.append("file", file);
-    const res = await fetch(`/api/scenes/${sceneId}/images/upload`, { method: "POST", body: formData });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      toast.error(body.error ?? "Upload failed.");
-      return;
-    }
-    const image: SceneImageItem = await res.json();
-    setScenes((prev) =>
-      prev.map((s) =>
-        s.id === sceneId
-          ? { ...s, images: [image, ...s.images.map((img) => ({ ...img, isSelected: false }))] }
-          : s
-      )
-    );
-    toast.success("Image uploaded.");
-  }
-
-  async function selectSceneImage(sceneId: string, assetId: string) {
-    const res = await fetch(`/api/scenes/${sceneId}/images/${assetId}/select`, { method: "POST" });
-    if (!res.ok) {
-      toast.error("Couldn't select image.");
-      return;
-    }
-    const updated: SceneImageItem = await res.json();
-    setScenes((prev) =>
-      prev.map((s) =>
-        s.id === sceneId
-          ? { ...s, images: s.images.map((img) => (img.id === assetId ? updated : { ...img, isSelected: false })) }
-          : s
-      )
-    );
-  }
-
-  async function deleteSceneImage(sceneId: string, assetId: string) {
-    if (!confirm("Delete this generated image? This can't be undone.")) return;
-    const res = await fetch(`/api/scenes/${sceneId}/images/${assetId}`, { method: "DELETE" });
-    if (!res.ok) {
-      toast.error("Couldn't delete image.");
-      return;
-    }
-    setScenes((prev) =>
-      prev.map((s) => (s.id === sceneId ? { ...s, images: s.images.filter((img) => img.id !== assetId) } : s))
-    );
-  }
-
   return (
     <div className="flex flex-col gap-4">
       <Card>
@@ -394,10 +289,13 @@ export function SceneManager({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Image Generation</CardTitle>
+          <CardTitle className="text-base">Shots &amp; Image Generation</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <Field label="Shot Planning Model">
+              <ModelSelect jobType="SHOT_PLANNING" value={shotPlanningModelId} onChange={setShotPlanningModelId} />
+            </Field>
             <Field label="Image Prompt Model">
               <ModelSelect jobType="IMAGE_PROMPTS" value={promptModelId} onChange={setPromptModelId} />
             </Field>
@@ -408,7 +306,7 @@ export function SceneManager({
               <ModelSelect jobType="IMAGE_VALIDATION" value={validationModelId} onChange={setValidationModelId} />
             </Field>
           </div>
-          <Field label="Instructions (applies whenever you generate a scene image)">
+          <Field label="Instructions (applies whenever you generate a shot image)">
             <Textarea
               rows={2}
               placeholder='e.g. "cinematic lighting, wide shot"'
@@ -417,7 +315,7 @@ export function SceneManager({
             />
           </Field>
           <p className="text-xs text-muted-foreground">
-            Click &quot;Generate Image&quot; on any scene below — these settings apply each time.
+            Click &quot;Generate Shots&quot; or &quot;Generate Image&quot; on any scene/shot below — these settings apply each time.
           </p>
         </CardContent>
       </Card>
@@ -497,10 +395,11 @@ export function SceneManager({
               onUpdate={updateScene}
               onMove={mergeScenes}
               onDelete={removeScene}
-              onGenerateImage={() => generateImageForScene(scene.id)}
-              onUploadImage={(file) => uploadImageForScene(scene.id, file)}
-              onSelectImage={(assetId) => selectSceneImage(scene.id, assetId)}
-              onDeleteImage={(assetId) => deleteSceneImage(scene.id, assetId)}
+              promptModelId={promptModelId}
+              imageModelId={imageModelId}
+              validationModelId={validationModelId}
+              imageInstructions={imageInstructions}
+              shotPlanningModelId={shotPlanningModelId}
               narratorVoiceName={savedNarratorVoiceName || null}
             />
           ))}
@@ -575,10 +474,11 @@ function SceneRow({
   onUpdate,
   onMove,
   onDelete,
-  onGenerateImage,
-  onUploadImage,
-  onSelectImage,
-  onDeleteImage,
+  promptModelId,
+  imageModelId,
+  validationModelId,
+  imageInstructions,
+  shotPlanningModelId,
   narratorVoiceName,
 }: {
   scene: SceneItem;
@@ -589,20 +489,17 @@ function SceneRow({
   onUpdate: (scene: SceneItem) => void;
   onMove: (scenes: SceneItem[]) => void;
   onDelete: (id: string, order: number) => void;
-  onGenerateImage: () => Promise<void>;
-  onUploadImage: (file: File) => Promise<void>;
-  onSelectImage: (assetId: string) => void;
-  onDeleteImage: (assetId: string) => void;
+  promptModelId: string;
+  imageModelId: string;
+  validationModelId: string;
+  imageInstructions: string;
+  shotPlanningModelId: string;
   narratorVoiceName: string | null;
 }) {
   const [title, setTitle] = useState(scene.title ?? "");
   const [description, setDescription] = useState(scene.description);
   const [visualMode, setVisualMode] = useState<SceneVisualMode>(scene.visualMode);
   const [visualModeReason, setVisualModeReason] = useState(scene.visualModeReason ?? "");
-  const [cameraMovement, setCameraMovement] = useState<SceneCameraMovement>(scene.cameraMovement);
-  const [imageGenerating, setImageGenerating] = useState(false);
-  const [imageUploading, setImageUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [characterIds, setCharacterIds] = useState(new Set(scene.characters.map((c) => c.id)));
   const [locationIds, setLocationIds] = useState(new Set(scene.locations.map((l) => l.id)));
   const [saving, setSaving] = useState(false);
@@ -614,7 +511,6 @@ function SceneRow({
     description !== scene.description ||
     visualMode !== scene.visualMode ||
     visualModeReason !== (scene.visualModeReason ?? "") ||
-    cameraMovement !== scene.cameraMovement ||
     !sameSet(characterIds, new Set(scene.characters.map((c) => c.id))) ||
     !sameSet(locationIds, new Set(scene.locations.map((l) => l.id)));
 
@@ -636,7 +532,6 @@ function SceneRow({
           description,
           visualMode,
           visualModeReason: visualModeReason || null,
-          cameraMovement,
           characterIds: Array.from(characterIds),
           locationIds: Array.from(locationIds),
         }),
@@ -723,12 +618,6 @@ function SceneRow({
           </Field>
         </div>
 
-        {visualMode === "ILLUSTRATION" && (
-          <Field label="Camera Movement (simple pan/zoom applied to the still image, no AI generation)">
-            <CameraMovementSelect value={cameraMovement} onChange={setCameraMovement} />
-          </Field>
-        )}
-
         <Field label="Characters">
           {characters.length === 0 ? (
             <p className="text-xs text-muted-foreground">No characters yet — add some in the Characters tab.</p>
@@ -765,95 +654,29 @@ function SceneRow({
           )}
         </Field>
 
-        {scene.visualMode !== "TEXT_TO_VIDEO" && (
-          <Field label="Image">
-            {scene.images.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No image generated yet.</p>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {scene.images.map((img) => (
-                  <div key={img.id} className="group relative">
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => onSelectImage(img.id)}
-                      onKeyDown={(e) => e.key === "Enter" && onSelectImage(img.id)}
-                      title={img.validationNotes ?? undefined}
-                      className={cn(
-                        "cursor-pointer overflow-hidden rounded-md border-2",
-                        img.isSelected ? "border-foreground" : "border-transparent"
-                      )}
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={img.url} alt="" className="h-24 w-40 object-cover" />
-                    </div>
-                    <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-background/80 p-0.5">
-                      {img.validationPassed === true && <CheckCircle2 className="size-3.5 text-green-600" />}
-                      {img.validationPassed === false && <XCircle className="size-3.5 text-amber-600" />}
-                      {img.validationPassed === null && <HelpCircle className="size-3.5 text-muted-foreground" />}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => onDeleteImage(img.id)}
-                      className="absolute left-1 top-1 hidden rounded-full bg-background/80 p-0.5 group-hover:block"
-                    >
-                      <Trash2 className="size-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="mt-2 flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={imageGenerating}
-                onClick={async () => {
-                  setImageGenerating(true);
-                  await onGenerateImage();
-                  setImageGenerating(false);
-                }}
-              >
-                <ImagePlus className="size-4" />
-                {imageGenerating ? "Generating…" : scene.images.length === 0 ? "Generate Image" : "Generate Another"}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={imageUploading}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Upload className="size-4" />
-                {imageUploading ? "Uploading…" : "Upload Image"}
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  setImageUploading(true);
-                  await onUploadImage(file);
-                  setImageUploading(false);
-                  e.target.value = "";
-                }}
-              />
-            </div>
-          </Field>
-        )}
-
         <Button onClick={save} disabled={!dirty || saving} className="self-start">
           <Save className="size-4" />
           {saving ? "Saving…" : "Save Scene"}
         </Button>
 
+        {scene.visualMode !== "TEXT_TO_VIDEO" && (
+          <ShotManager
+            sceneId={scene.id}
+            sceneVisualMode={scene.visualMode}
+            initialShots={scene.shots}
+            promptModelId={promptModelId}
+            imageModelId={imageModelId}
+            validationModelId={validationModelId}
+            imageInstructions={imageInstructions}
+            shotPlanningModelId={shotPlanningModelId}
+          />
+        )}
+
         {(scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO") && (
           <SceneVideoPanel
             sceneId={scene.id}
             mode={scene.visualMode}
-            hasSelectedImage={scene.images.some((img) => img.isSelected)}
+            hasSelectedImage={scene.shots[0]?.images.some((img) => img.isSelected) ?? false}
             initialMotionPrompt={scene.motionPrompt ?? ""}
             initialVideoPrompt={scene.videoPrompt ?? ""}
             initialVideoDurationSeconds={scene.videoDurationSeconds}
@@ -894,29 +717,6 @@ function VisualModeSelect({ value, onChange }: { value: SceneVisualMode; onChang
         {(Object.keys(VISUAL_MODE_LABELS) as SceneVisualMode[]).map((mode) => (
           <SelectItem key={mode} value={mode}>
             {VISUAL_MODE_LABELS[mode]}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
-
-function CameraMovementSelect({
-  value,
-  onChange,
-}: {
-  value: SceneCameraMovement;
-  onChange: (v: SceneCameraMovement) => void;
-}) {
-  return (
-    <Select value={value} onValueChange={(v) => v && onChange(v as SceneCameraMovement)} items={CAMERA_MOVEMENT_LABELS}>
-      <SelectTrigger className="w-full">
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {(Object.keys(CAMERA_MOVEMENT_LABELS) as SceneCameraMovement[]).map((movement) => (
-          <SelectItem key={movement} value={movement}>
-            {CAMERA_MOVEMENT_LABELS[movement]}
           </SelectItem>
         ))}
       </SelectContent>

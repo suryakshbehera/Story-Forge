@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { assembleContext } from "@/lib/context/assemble";
-import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
+import { SCENE_INCLUDE, mapScenesShots } from "@/lib/scenes";
 import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
@@ -108,7 +108,7 @@ export default async function EpisodePage({
             parentType="episode"
             parentId={episode.id}
             projectId={projectId}
-            initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
+            initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
             characters={characters}
             locations={locations}
             initialNarratorVoiceName={project.narratorVoiceName}

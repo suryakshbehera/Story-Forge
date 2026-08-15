@@ -5,6 +5,8 @@ import { updateDialogueLine, deleteDialogueLine } from "@/lib/voice";
 const patchSchema = z.object({
   characterId: z.string().optional(),
   text: z.string().min(1).optional(),
+  deliveryNotes: z.string().optional().nullable(),
+  speed: z.number().min(0.25).max(4).optional().nullable(),
 });
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

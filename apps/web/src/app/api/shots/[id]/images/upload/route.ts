@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uploadSceneImage } from "@/lib/scene-images";
+import { uploadShotImage } from "@/lib/shot-images";
 
 const MAX_BYTES = 15 * 1024 * 1024;
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id: sceneId } = await params;
+  const { id: shotId } = await params;
   const formData = await req.formData();
   const file = formData.get("file");
 
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const image = await uploadSceneImage(sceneId, buffer, file.name, file.type);
+  const image = await uploadShotImage(shotId, buffer, file.name, file.type);
 
   return NextResponse.json(image, { status: 201 });
 }

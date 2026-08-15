@@ -1,5 +1,6 @@
+import { z } from "zod";
 import { prisma, type Asset } from "@/lib/db";
-import { generateSpeech, OpenRouterError } from "@/lib/ai/openrouter";
+import { callChatModel, generateSpeech, OpenRouterError } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
 
 export interface SerializedAudioTake {
@@ -131,6 +132,8 @@ interface DialogueLineRow {
   sceneId: string;
   order: number;
   text: string;
+  deliveryNotes: string | null;
+  speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: Asset[];
 }
@@ -140,6 +143,8 @@ export interface SerializedDialogueLine {
   sceneId: string;
   order: number;
   text: string;
+  deliveryNotes: string | null;
+  speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: SerializedAudioTake[];
 }
@@ -150,6 +155,8 @@ export function serializeDialogueLine(line: DialogueLineRow): SerializedDialogue
     sceneId: line.sceneId,
     order: line.order,
     text: line.text,
+    deliveryNotes: line.deliveryNotes,
+    speed: line.speed,
     character: line.character,
     audio: line.audio.map(serializeAudioTake),
   };
@@ -183,7 +190,7 @@ export async function createDialogueLine({
 
 export async function updateDialogueLine(
   id: string,
-  fields: { characterId?: string; text?: string }
+  fields: { characterId?: string; text?: string; deliveryNotes?: string | null; speed?: number | null }
 ): Promise<SerializedDialogueLine> {
   const line = await prisma.dialogueLine.update({
     where: { id },
@@ -191,6 +198,86 @@ export async function updateDialogueLine(
     include: DIALOGUE_LINE_INCLUDE,
   });
   return serializeDialogueLine(line);
+}
+
+// Phase 8 — DIALOGUE_DIRECTION: directs every line in a scene in one call
+// (not line by line) so a conversation's emotional arc stays coherent across
+// lines, same batch-per-scene idea as Phase 7's Audio Plan. AI-drafted, then
+// user-editable via updateDialogueLine above — lines the AI omits from its
+// response keep whatever direction they already had.
+
+const dialogueDirectionResponseSchema = z.object({
+  lines: z.array(
+    z.object({
+      order: z.number().int(),
+      deliveryNotes: z.string(),
+      speed: z.number().min(0.25).max(4).nullable().optional(),
+    })
+  ),
+});
+
+// Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
+// appears below to satisfy the provider's json_object requirement.
+const DIALOGUE_DIRECTION_SYSTEM_PROMPT = `You are the Dialogue Direction step of Narrata's Voice pipeline. Given a scene's ordered dialogue lines (with speaker names), direct how each line should be delivered — emotion, tone, emphasis, pacing — keeping the conversation's emotional arc coherent from line to line.
+
+Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
+{
+  "lines": [
+    { "order": 1, "deliveryNotes": "concrete delivery direction for a text-to-speech model, e.g. 'anxious, quiet, hesitant pauses between phrases'", "speed": 1.0 }
+  ]
+}
+speed is a pace multiplier where 1.0 is normal, 0.25 is slowest, 4.0 is fastest — omit it to leave pace at the default.`;
+
+export async function generateDialogueDirection({
+  sceneId,
+  modelId,
+}: {
+  sceneId: string;
+  modelId: string;
+}): Promise<SerializedDialogueLine[]> {
+  const lines = await prisma.dialogueLine.findMany({
+    where: { sceneId },
+    orderBy: { order: "asc" },
+    include: { character: { select: { name: true } } },
+  });
+  if (lines.length === 0) {
+    throw new OpenRouterError("This scene has no dialogue lines yet.");
+  }
+
+  const userPrompt = lines.map((l) => `${l.order}. ${l.character.name}: ${l.text}`).join("\n");
+
+  const raw = await callChatModel({
+    modelId,
+    systemPrompt: DIALOGUE_DIRECTION_SYSTEM_PROMPT,
+    userPrompt,
+    jsonMode: true,
+  });
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    throw new OpenRouterError("AI returned invalid JSON.");
+  }
+  const parsed = dialogueDirectionResponseSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new OpenRouterError("AI returned an unexpected shape.");
+  }
+
+  const byOrder = new Map(parsed.data.lines.map((l) => [l.order, l]));
+  await prisma.$transaction(
+    lines
+      .filter((line) => byOrder.has(line.order))
+      .map((line) => {
+        const direction = byOrder.get(line.order)!;
+        return prisma.dialogueLine.update({
+          where: { id: line.id },
+          data: { deliveryNotes: direction.deliveryNotes, speed: direction.speed ?? null },
+        });
+      })
+  );
+
+  return getSceneDialogueLines(sceneId);
 }
 
 export async function deleteDialogueLine(id: string): Promise<void> {
@@ -274,6 +361,8 @@ export async function generateDialogueAudio({
     modelId,
     text: line.text,
     voice: line.character.voiceName,
+    instructions: line.deliveryNotes ?? undefined,
+    speed: line.speed ?? undefined,
   });
   const buffer = Buffer.from(generated.base64, "base64");
   const key = buildStorageKey("dialogue-lines", dialogueLineId, "line.wav");

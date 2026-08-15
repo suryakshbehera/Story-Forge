@@ -24,6 +24,8 @@ const defaultModels: Array<{
   { jobType: "AUDIO_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "MUSIC_GENERATION", provider: "openrouter", modelId: "google/lyria-3-pro-preview", displayName: "Lyria 3 Pro Preview" },
   { jobType: "SFX_GENERATION", provider: "openrouter", modelId: "openai/gpt-audio", displayName: "GPT Audio" },
+  { jobType: "SHOT_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { jobType: "DIALOGUE_DIRECTION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
 ];
 
 async function main() {

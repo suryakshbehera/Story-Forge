@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
-import { prisma, type Asset, type Prisma, type SceneCameraMovement } from "@/lib/db";
+import { prisma, type Asset, type Prisma, type CameraMovement } from "@/lib/db";
 import { parentWhere, type ScenesParentType } from "@/lib/scenes";
 import { runFfmpeg, probeDuration } from "@/lib/ffmpeg";
 import { storage, buildStorageKey } from "@/lib/storage";
@@ -28,7 +28,7 @@ const ZOOM_STEP_PER_FRAME = 0.0015;
 const ZOOM_MAX = 1.5;
 const PAN_ZOOM = 1.15; // constant zoom while panning, so panning never exposes the source's edge
 
-function buildCameraFilter(movement: SceneCameraMovement, frames: number): string {
+function buildCameraFilter(movement: CameraMovement, frames: number): string {
   if (movement === "STATIC") return SCALE_PAD_FILTER;
 
   const lastFrame = Math.max(frames - 1, 1);
@@ -79,7 +79,10 @@ function belongsToParent(asset: Asset, parentType: ScenesParentType, parentId: s
 }
 
 const ASSEMBLY_SCENE_INCLUDE = {
-  images: { where: { isSelected: true }, take: 1 },
+  shots: {
+    orderBy: { order: "asc" as const },
+    include: { images: { where: { isSelected: true }, take: 1 } },
+  },
   videoClips: { where: { isSelected: true }, take: 1 },
   narrationAudio: { where: { isSelected: true }, take: 1 },
   dialogueLines: {
@@ -157,6 +160,51 @@ async function buildSceneVoiceTrack(scene: AssemblyScene, workDir: string, index
   return audioPath;
 }
 
+// Phase 8 — one Ken Burns clip per shot, concatenated in order. Shots with
+// an explicit durationSeconds keep it; whatever's left of the scene's total
+// duration splits evenly among the shots without one (floored at a minimum
+// so a pathological "explicit durations already exceed the total" config
+// can't produce a zero/negative-length ffmpeg segment — muxSceneSegment's
+// `-shortest` mux trims any resulting overshoot against the audio anyway).
+const MIN_SHOT_SECONDS = 0.5;
+
+async function buildIllustrationSegment(
+  scene: AssemblyScene,
+  workDir: string,
+  index: number,
+  totalDuration: number,
+  outPath: string
+): Promise<string> {
+  const shots = scene.shots;
+  const explicitTotal = shots.reduce((sum, s) => sum + (s.durationSeconds ?? 0), 0);
+  const unsetCount = shots.filter((s) => s.durationSeconds == null).length;
+  const remainingDuration = Math.max(totalDuration - explicitTotal, 0);
+  const evenShare = unsetCount > 0 ? remainingDuration / unsetCount : 0;
+
+  const shotPaths: string[] = [];
+  for (const [i, shot] of shots.entries()) {
+    const shotDuration = Math.max(shot.durationSeconds ?? evenShare, MIN_SHOT_SECONDS);
+    const shotPath = path.join(workDir, `scene${index}-shot${i}.mp4`);
+    const imagePath = await writeAssetToTemp(shot.images[0], workDir, `scene${index}-shot${i}-image`);
+    const frames = Math.max(Math.round(shotDuration * FPS), 1);
+    await runFfmpeg([
+      "-loop", "1",
+      "-i", imagePath,
+      "-t", shotDuration.toFixed(3),
+      "-vf", buildCameraFilter(shot.cameraMovement, frames),
+      "-pix_fmt", "yuv420p",
+      "-an",
+      shotPath,
+    ]);
+    shotPaths.push(shotPath);
+  }
+
+  const listPath = path.join(workDir, `scene${index}-shots-list.txt`);
+  await fs.writeFile(listPath, concatListFile(shotPaths));
+  await runFfmpeg(["-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outPath]);
+  return outPath;
+}
+
 // Silent, normalized visual segment. targetDuration comes from the scene's
 // audio track (null when the scene has no audio at all).
 async function buildVisualSegment(
@@ -169,19 +217,8 @@ async function buildVisualSegment(
   const needsClip = scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO";
 
   if (!needsClip) {
-    const imagePath = await writeAssetToTemp(scene.images[0], workDir, `scene${index}-image`);
     const duration = targetDuration ?? DEFAULT_ILLUSTRATION_SECONDS;
-    const frames = Math.max(Math.round(duration * FPS), 1);
-    await runFfmpeg([
-      "-loop", "1",
-      "-i", imagePath,
-      "-t", duration.toFixed(3),
-      "-vf", buildCameraFilter(scene.cameraMovement, frames),
-      "-pix_fmt", "yuv420p",
-      "-an",
-      outPath,
-    ]);
-    return outPath;
+    return buildIllustrationSegment(scene, workDir, index, duration, outPath);
   }
 
   const clipPath = await writeAssetToTemp(scene.videoClips[0], workDir, `scene${index}-clip`);
@@ -332,11 +369,12 @@ export async function assembleVideo({ parentType, parentId, modelId }: AssembleV
 
   const unready = scenes.filter((scene) => {
     const needsClip = scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO";
-    return needsClip ? scene.videoClips.length === 0 : scene.images.length === 0;
+    if (needsClip) return scene.videoClips.length === 0;
+    return scene.shots.length === 0 || scene.shots.some((s) => s.images.length === 0);
   });
   if (unready.length > 0) {
     const names = unready.map((s) => `#${s.order}${s.title ? ` "${s.title}"` : ""}`).join(", ");
-    throw new Error(`These scenes don't have a selected image or video clip yet: ${names}.`);
+    throw new Error(`These scenes don't have a selected image (every shot needs one) or video clip yet: ${names}.`);
   }
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-assembly-"));

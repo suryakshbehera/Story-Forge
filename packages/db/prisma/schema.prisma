@@ -159,20 +159,6 @@ enum SceneVisualMode {
   TEXT_TO_VIDEO
 }
 
-// Phase 6 — a deterministic Ken Burns-style pan/zoom applied to ILLUSTRATION
-// scenes at assembly time (plain ffmpeg, no AI call), not a prompt: the set
-// of movements is small and enumerable, unlike motionPrompt/videoPrompt
-// below which describe AI-generated motion for IMAGE_TO_VIDEO/TEXT_TO_VIDEO.
-enum SceneCameraMovement {
-  STATIC
-  ZOOM_IN
-  ZOOM_OUT
-  PAN_LEFT
-  PAN_RIGHT
-  PAN_UP
-  PAN_DOWN
-}
-
 model Scene {
   id String @id @default(cuid())
 
@@ -188,10 +174,6 @@ model Scene {
 
   visualMode       SceneVisualMode @default(ILLUSTRATION)
   visualModeReason String?         @db.Text
-
-  // Phase 6 — see SceneCameraMovement above. Only meaningful when
-  // visualMode is ILLUSTRATION; ignored by assembly otherwise.
-  cameraMovement SceneCameraMovement @default(STATIC)
 
   // Phase 4 — the narrator's spoken script for this scene, manually written
   // (mirrors Episode.summary: no AI-drafting step, only text-to-speech).
@@ -230,15 +212,11 @@ model Scene {
 
   characters    Character[]
   locations     Location[]
-  // Phase 3's generated scene images. Named (not just typed) Asset[] because
-  // Phase 4 adds a second, separate Asset relation below (narrationAudio) —
-  // Prisma requires explicit @relation names once two relations connect the
-  // same two models, so it can't stay unnamed. Deliberately NOT reused for
-  // narration audio: every consumer of this relation (SCENE_INCLUDE,
-  // mapSceneImages, the scene-manager.tsx image gallery) treats every row
-  // here as a displayable image with no type filter — mixing audio in would
-  // render broken <img> tags and get swept into image select/delete calls.
-  images Asset[] @relation("SceneImages")
+
+  // Phase 8 — the scene's ordered shots, each carrying its own images (and,
+  // for ILLUSTRATION scenes, its own camera movement). Scene stopped being
+  // the image unit — see Shot below.
+  shots Shot[]
 
   // Phase 4 — narration audio takes, kept on its own FK/relation rather than
   // reusing images' sceneId (see comment above).
@@ -264,6 +242,59 @@ model Scene {
   @@unique([storyId, order])
   @@unique([episodeId, order])
   @@map("scenes")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shot Engine (Phase 8) — subdivides a Scene into an ordered sequence of
+// distinct visual compositions. Each Shot is its own continuity frame — shot
+// 2 continues the story from shot 1, it is not an alternate take of it.
+// Alternates only exist *within* one Shot's own image gallery, the same
+// isSelected take-history pattern Scene.images used to have. Scene stopped
+// being the image unit and became a pure container (narrative description,
+// tags, audio, music); Shots underneath now carry the visuals. Plain-CRUD,
+// not versioned — same reasoning as Scene itself.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum CameraMovement {
+  STATIC
+  ZOOM_IN
+  ZOOM_OUT
+  PAN_LEFT
+  PAN_RIGHT
+  PAN_UP
+  PAN_DOWN
+}
+
+model Shot {
+  id String @id @default(cuid())
+
+  sceneId String
+  scene   Scene  @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+
+  order       Int
+  description String @db.Text
+
+  // Only meaningful for ILLUSTRATION scenes — each shot's image is held via
+  // Ken Burns for its own slice of the scene's audio duration, then
+  // concatenated in order. For IMAGE_TO_VIDEO scenes, shots feed continuity
+  // frames into ONE scene-level video generation instead (first shot's image
+  // as first_frame, last shot's image as last_frame) rather than each
+  // getting its own clip — see generateSceneVideo() in scene-video.ts. TEXT_
+  // TO_VIDEO scenes don't use shots at all (no source image to speak of).
+  cameraMovement CameraMovement @default(STATIC)
+
+  // Optional explicit length; shots left unset evenly split whatever
+  // duration remains of the scene's total audio after explicit ones are
+  // subtracted out.
+  durationSeconds Int?
+
+  images Asset[] @relation("ShotImages")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sceneId, order])
+  @@map("shots")
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -346,6 +377,15 @@ model DialogueLine {
   order Int
   text  String @db.Text
 
+  // Phase 8 — "direction" for this line: AI-drafted (via DIALOGUE_DIRECTION,
+  // one call per scene so a conversation's emotional beats stay coherent
+  // across lines), then user-editable, same AI-drafts/user-edits pattern as
+  // visualModeReason/musicPrompt. Both map to real, documented OpenAI-
+  // compatible TTS params — deliveryNotes to `instructions`, speed to
+  // `speed` — passed through in generateDialogueAudio() (lib/voice.ts).
+  deliveryNotes String? @db.Text
+  speed         Float?
+
   audio Asset[]
 
   createdAt DateTime @default(now())
@@ -357,8 +397,9 @@ model DialogueLine {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Asset library. Phase 0+1 only stored reference images; Phase 3 adds
-// GENERATED_IMAGE (scene images produced by the Image pipeline, via sceneId);
-// Phase 4 adds AUDIO_NARRATION (via its own narrationSceneId FK, kept
+// GENERATED_IMAGE (originally scene images via sceneId, now shot images via
+// shotId — see Shot model, Phase 8); Phase 4 adds AUDIO_NARRATION (via its
+// own narrationSceneId FK, kept
 // separate from sceneId so narration takes never show up in the image
 // gallery) and AUDIO_DIALOGUE (via dialogueLineId). Phase 7 adds MUSIC (via
 // musicSceneId) and SFX (via sfxSceneId) — both AI-generated (through
@@ -395,8 +436,10 @@ model Asset {
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: Cascade)
 
-  sceneId String?
-  scene   Scene?  @relation("SceneImages", fields: [sceneId], references: [id], onDelete: Cascade)
+  // Phase 8 — a shot's own generated/uploaded image attempts, one selected
+  // at a time (same isSelected take-history pattern as narrationAudio).
+  shotId String?
+  shot   Shot?   @relation("ShotImages", fields: [shotId], references: [id], onDelete: Cascade)
 
   narrationSceneId String?
   narrationScene   Scene? @relation("SceneNarrationAudio", fields: [narrationSceneId], references: [id], onDelete: Cascade)
@@ -523,6 +566,12 @@ enum AiJobType {
   // the other.
   MUSIC_GENERATION
   SFX_GENERATION
+  // Phase 8 — proposes an ordered list of Shots for one scene (mirrors
+  // SCENE_PLANNING one level down: Story→Scenes becomes Scene→Shots).
+  SHOT_PLANNING
+  // Phase 8 — drafts DialogueLine.deliveryNotes/speed for every line in a
+  // scene in one call, so a conversation's delivery stays coherent.
+  DIALOGUE_DIRECTION
 }
 
 model AiModelOption {

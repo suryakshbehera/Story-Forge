@@ -132,6 +132,12 @@ export interface GenerateSpeechParams {
   // Provider-specific voice name (e.g. "alloy") — not a fixed enum here for
   // the same reason Character.voiceName isn't one; see schema.prisma.
   voice?: string;
+  // Phase 8 — delivery direction (DialogueLine.deliveryNotes) and pace
+  // (DialogueLine.speed). Both are real, documented OpenAI-compatible TTS
+  // params (`instructions`, `speed` on /audio/speech), not a guessed
+  // mechanism — lower-risk than generateAudio() below.
+  instructions?: string;
+  speed?: number;
 }
 
 export interface GeneratedSpeech {
@@ -150,7 +156,13 @@ export interface GeneratedSpeech {
 // lowest-common-denominator format every provider on this endpoint accepts.
 // The tradeoff is that PCM comes back headerless, so it's wrapped in a
 // standard WAV header before storage/playback — see wrapPcmAsWav().
-export async function generateSpeech({ modelId, text, voice = "alloy" }: GenerateSpeechParams): Promise<GeneratedSpeech> {
+export async function generateSpeech({
+  modelId,
+  text,
+  voice = "alloy",
+  instructions,
+  speed,
+}: GenerateSpeechParams): Promise<GeneratedSpeech> {
   const apiKey = requireApiKey();
 
   const response = await fetch("https://openrouter.ai/api/v1/audio/speech", {
@@ -164,6 +176,8 @@ export async function generateSpeech({ modelId, text, voice = "alloy" }: Generat
       input: text,
       voice,
       response_format: "pcm",
+      ...(instructions ? { instructions } : {}),
+      ...(speed ? { speed } : {}),
     }),
   });
 
@@ -189,6 +203,12 @@ export interface GenerateVideoParams {
   // publicly reachable URL required. Omitted entirely for TEXT_TO_VIDEO
   // scenes, which have no source image to seed the first frame with.
   imageDataUri?: string;
+  // Phase 8 — the scene's last shot's image, given as a `last_frame`
+  // continuity anchor alongside imageDataUri's `first_frame` when a scene
+  // has more than one shot (confirmed real via OpenRouter's docs: frame_type
+  // accepts "first_frame"/"last_frame", model-dependent support — Veo 3.1,
+  // the seeded default, supports both). Omitted for single-shot scenes.
+  lastFrameDataUri?: string;
   durationSeconds?: number;
 }
 
@@ -231,6 +251,7 @@ export async function generateVideo({
   modelId,
   prompt,
   imageDataUri,
+  lastFrameDataUri,
   durationSeconds,
 }: GenerateVideoParams): Promise<GeneratedVideo> {
   const apiKey = requireApiKey();
@@ -246,7 +267,14 @@ export async function generateVideo({
       prompt,
       ...(durationSeconds ? { duration: durationSeconds } : {}),
       ...(imageDataUri
-        ? { frame_images: [{ type: "image_url", image_url: { url: imageDataUri }, frame_type: "first_frame" }] }
+        ? {
+            frame_images: [
+              { type: "image_url", image_url: { url: imageDataUri }, frame_type: "first_frame" },
+              ...(lastFrameDataUri
+                ? [{ type: "image_url", image_url: { url: lastFrameDataUri }, frame_type: "last_frame" }]
+                : []),
+            ],
+          }
         : {}),
     }),
   });

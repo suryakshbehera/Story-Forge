@@ -15,6 +15,8 @@ const JOB_TYPES = [
   "AUDIO_PLANNING",
   "MUSIC_GENERATION",
   "SFX_GENERATION",
+  "SHOT_PLANNING",
+  "DIALOGUE_DIRECTION",
 ] as const satisfies readonly AiJobType[];
 
 export async function GET(req: NextRequest) {

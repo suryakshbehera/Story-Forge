@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
 import { OpenRouterError } from "@/lib/ai/openrouter";
-import { generateSceneImage } from "@/lib/scene-images";
+import { generateShotImage } from "@/lib/shot-images";
 
 const bodySchema = z.object({
   promptModelId: z.string().optional(),
@@ -12,7 +12,7 @@ const bodySchema = z.object({
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id: sceneId } = await params;
+  const { id: shotId } = await params;
   const body = bodySchema.parse(await req.json().catch(() => ({})));
 
   const [promptModel, imageModel, validationModel] = await Promise.all([
@@ -35,8 +35,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const result = await generateSceneImage({
-      sceneId,
+    const result = await generateShotImage({
+      shotId,
       promptModelId: promptModel.modelId,
       imageModelId: imageModel.modelId,
       // Validation is advisory-only — an unconfigured model just skips it.

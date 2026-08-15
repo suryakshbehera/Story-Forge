@@ -336,6 +336,12 @@ export interface GeneratedAudio {
 // param of the shared multimodal endpoint, not a TTS-only concept as
 // originally assumed. Defaulted to "alloy" since music/SFX prompts don't
 // carry a voice choice of their own.
+//
+// Also confirmed same day: OpenAI rejects `audio.format: "mp3"` when
+// stream=true ("does not support 'mp3' ... Supported values are: 'pcm16'").
+// So this requests "pcm16" and wraps the raw PCM in a WAV header via
+// wrapPcmAsWav() below (same 24kHz/16-bit/mono assumption already used for
+// generateSpeech's PCM output) instead of returning MP3 bytes directly.
 export async function generateAudio({ modelId, prompt, durationSeconds }: GenerateAudioParams): Promise<GeneratedAudio> {
   const apiKey = requireApiKey();
 
@@ -350,7 +356,7 @@ export async function generateAudio({ modelId, prompt, durationSeconds }: Genera
     body: JSON.stringify({
       model: modelId,
       modalities: ["text", "audio"],
-      audio: { format: "mp3", voice: "alloy" },
+      audio: { format: "pcm16", voice: "alloy" },
       stream: true,
       messages: [{ role: "user", content: userPrompt }],
     }),
@@ -402,7 +408,8 @@ export async function generateAudio({ modelId, prompt, durationSeconds }: Genera
     throw new OpenRouterError(`OpenRouter returned no audio data.${transcript ? ` (transcript: ${transcript})` : ""}`);
   }
 
-  return { base64: audioBase64, mimeType: "audio/mpeg" };
+  const pcm = Buffer.from(audioBase64, "base64");
+  return { base64: wrapPcmAsWav(pcm).toString("base64"), mimeType: "audio/wav" };
 }
 
 // Headerless 16-bit signed little-endian PCM at 24kHz mono — confirmed for

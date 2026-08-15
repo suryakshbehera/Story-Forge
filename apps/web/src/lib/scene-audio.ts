@@ -1,7 +1,11 @@
 import { z } from "zod";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
 import { prisma, type Asset } from "@/lib/db";
 import { callChatModel, generateAudio, OpenRouterError } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
+import { probeDuration } from "@/lib/ffmpeg";
 
 export interface SerializedAudioAsset {
   id: string;
@@ -111,6 +115,44 @@ export async function generateAudioPlan({ sceneId, modelId }: { sceneId: string;
   return { musicPrompt, sfxPrompt };
 }
 
+// Estimates how long the generated music/sfx clip should be: the scene's
+// voice track (selected narration + selected dialogue line takes, same set
+// buildSceneVoiceTrack in video-assembly.ts concatenates), probed via
+// ffprobe. Without this, generateAudio() had no length hint at all and the
+// underlying model defaulted to its own multi-minute clip length regardless
+// of how short the scene actually was. Returns null (no hint passed) if the
+// scene has no voice audio yet — e.g. music generated before narration.
+async function getSceneVoiceDurationSeconds(sceneId: string): Promise<number | null> {
+  const scene = await prisma.scene.findUniqueOrThrow({
+    where: { id: sceneId },
+    include: {
+      narrationAudio: { where: { isSelected: true }, take: 1 },
+      dialogueLines: { include: { audio: { where: { isSelected: true }, take: 1 } } },
+    },
+  });
+
+  const takes: Asset[] = [...scene.narrationAudio];
+  for (const line of scene.dialogueLines) {
+    if (line.audio[0]) takes.push(line.audio[0]);
+  }
+  if (takes.length === 0) return null;
+
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-audio-duration-"));
+  try {
+    let total = 0;
+    for (const [i, take] of takes.entries()) {
+      const bytes = await storage.get(take.storageKey);
+      if (!bytes) continue;
+      const filePath = path.join(workDir, `take${i}`);
+      await fs.writeFile(filePath, bytes);
+      total += await probeDuration(filePath);
+    }
+    return total > 0 ? total : null;
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+}
+
 // ── Music — one selected take at a time (same take-history/isSelected
 // pattern as narrationAudio), generated from Scene.musicPrompt (the Audio
 // Plan, possibly hand-edited since) or uploaded directly. ──────────────────
@@ -121,7 +163,8 @@ export async function generateSceneMusic({ sceneId, modelId }: { sceneId: string
     throw new OpenRouterError("Generate an Audio Plan first, or write a music prompt manually.");
   }
 
-  const generated = await generateAudio({ modelId, prompt: scene.musicPrompt });
+  const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
+  const generated = await generateAudio({ modelId, prompt: scene.musicPrompt, durationSeconds: durationSeconds ?? undefined });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `music.${extFromMime(generated.mimeType)}`;
   const key = buildStorageKey("scenes", sceneId, fileName);
@@ -196,7 +239,8 @@ export async function generateSceneSfx({ sceneId, modelId }: { sceneId: string; 
     throw new OpenRouterError("Generate an Audio Plan first, or write an sfx prompt manually.");
   }
 
-  const generated = await generateAudio({ modelId, prompt: scene.sfxPrompt });
+  const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
+  const generated = await generateAudio({ modelId, prompt: scene.sfxPrompt, durationSeconds: durationSeconds ?? undefined });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `sfx.${extFromMime(generated.mimeType)}`;
   const key = buildStorageKey("scenes", sceneId, fileName);

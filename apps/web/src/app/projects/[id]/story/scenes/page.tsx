@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
 import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
+import { mapSceneAudioData } from "@/lib/scene-audio";
 import { mapFinalVideos } from "@/lib/video-assembly";
 import { SceneManager } from "@/components/scene-manager";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
@@ -23,6 +24,11 @@ const VIDEO_INCLUDE = {
   videoClips: { orderBy: { createdAt: "desc" as const } },
 };
 
+const AUDIO_INCLUDE = {
+  music: { orderBy: { createdAt: "desc" as const } },
+  sfx: { orderBy: { createdAt: "desc" as const } },
+};
+
 export default async function StoryScenesPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const project = await prisma.project.findUnique({ where: { id }, include: { story: true } });
@@ -33,7 +39,7 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
     prisma.scene.findMany({
       where: { storyId: project.story.id },
       orderBy: { order: "asc" },
-      include: { ...SCENE_INCLUDE, ...VOICE_INCLUDE, ...VIDEO_INCLUDE },
+      include: { ...SCENE_INCLUDE, ...VOICE_INCLUDE, ...VIDEO_INCLUDE, ...AUDIO_INCLUDE },
     }),
     prisma.character.findMany({ where: { projectId: id }, orderBy: { name: "asc" } }),
     prisma.location.findMany({ where: { projectId: id }, orderBy: { name: "asc" } }),
@@ -49,7 +55,7 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
         parentType="story"
         parentId={project.story.id}
         projectId={id}
-        initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData).map(mapSceneVideoData)}
+        initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
         characters={characters}
         locations={locations}
         initialNarratorVoiceName={project.narratorVoiceName}

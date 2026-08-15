@@ -405,7 +405,83 @@ Postgres-via-Docker (see `.env.example`), not a hosted API key.
 
 ---
 
-## Proposed roadmap (Phase 7+) — 🚧 not built, not confirmed
+## Phase 7 — Background Music & SFX ✅ Complete
+
+**Goal:** per-scene background music and sound effects, AI-generated or
+user-uploaded, mixed under narration/dialogue at Phase 6 assembly time.
+
+### Data model (`packages/db/prisma/schema.prisma`)
+
+- `Scene.musicPrompt` / `Scene.sfxPrompt` — the "Audio Plan": AI-drafted by
+  `AUDIO_PLANNING`, then user-editable before the actual generation call,
+  same pattern as `visualModeReason`. An empty prompt blocks generation for
+  that track, same idiom as `Scene.narration`.
+- `Scene.musicVolume` / `Scene.sfxVolume` — mix levels (0-1) applied at
+  assembly time, relative to the voice track at full volume. Defaults 0.25 /
+  0.8.
+- `Scene.music` / `Scene.sfx` — one selected take at a time each (same
+  take-history/`isSelected` pattern as `narrationAudio`), via their own
+  `Asset.musicSceneId` / `Asset.sfxSceneId` FKs.
+- `AiJobType.AUDIO_PLANNING`, `MUSIC_GENERATION`, `SFX_GENERATION` — kept as
+  three distinct job types (planning is a chat model; music and sfx
+  generation are independent calls, since a provider suited to one isn't
+  necessarily suited to the other).
+
+### Features
+
+- **Audio Plan** (`generateAudioPlan` in
+  [`apps/web/src/lib/scene-audio.ts`](apps/web/src/lib/scene-audio.ts)) —
+  one `AUDIO_PLANNING` chat call per scene (never a whole-episode pass)
+  drafts both `musicPrompt` and `sfxPrompt` from the scene's description plus
+  a light genre/tone/visualStyle hint, strict JSON output. Either field can
+  come back empty if the AI judges that track unnecessary for that scene.
+- **Music / SFX generation** (`generateSceneMusic`/`generateSceneSfx`) — each
+  reads its (possibly hand-edited) prompt and calls
+  [`generateAudio()`](apps/web/src/lib/ai/openrouter.ts). Unlike
+  `generateImage`/`generateSpeech`/`generateVideo`, OpenRouter has no
+  dedicated endpoint for music/SFX — confirmed against its docs, the only
+  dedicated audio endpoints are `/audio/speech` (TTS) and
+  `/audio/transcriptions` (STT). Music/audio-generation-capable models
+  (Google Lyria, OpenAI GPT Audio) are invoked through
+  `/chat/completions` with an audio output modality instead, per
+  OpenRouter's own description of every other modality "running on
+  /chat/completions, differing only by content type." This is the
+  least-confirmed primitive in `openrouter.ts` — no dedicated-endpoint doc
+  page to point at, unlike its three siblings — flagged in code as the first
+  place to adjust if a provider expects a different request shape.
+- **Manual upload** (`uploadSceneMusic`/`uploadSceneSfx`) — same dual path as
+  `GENERATED_IMAGE`: AI generation or direct upload, either becomes the
+  selected take.
+- **UI** (`scene-audio-panel.tsx`) — one "Generate Audio Plan" action per
+  scene populates both prompt fields; independent Music/SFX sections below
+  each have their own prompt textarea, volume slider, model picker,
+  Generate/Upload buttons, and take list (`<audio>` previews, select/delete).
+- **New API routes**: `POST /api/scenes/[id]/audio-plan/generate`, and per
+  track (`music`, `sfx`): `generate`, `upload`,
+  `[assetId]/select`, `DELETE [assetId]`.
+
+### Assembly (`apps/web/src/lib/video-assembly.ts`)
+
+Music loops (via `-stream_loop -1`) and sfx pads with silence (`apad`) to
+match the scene's final visual duration, each with its own `volume` filter
+applied first; all present layers (voice/music/sfx) are combined with
+ffmpeg's `amix` filter (`normalize=0` so voice keeps its natural level
+instead of being auto-divided by input count, `alimiter` afterward as a
+clipping safety net). Scenes with neither music nor sfx are byte-for-byte
+unaffected — the single-layer and no-layer paths skip the mix step entirely.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`Scene.musicPrompt`,
+`sfxPrompt`, `musicVolume`, `sfxVolume`, `music`, `sfx`; `Asset.musicSceneId`,
+`sfxSceneId`; `AiJobType.AUDIO_PLANNING`/`MUSIC_GENERATION`/`SFX_GENERATION`),
+[`apps/web/src/lib/scene-audio.ts`](apps/web/src/lib/scene-audio.ts),
+[`apps/web/src/lib/ai/openrouter.ts`](apps/web/src/lib/ai/openrouter.ts)
+(`generateAudio`),
+[`apps/web/src/lib/video-assembly.ts`](apps/web/src/lib/video-assembly.ts),
+[`apps/web/src/components/scene-audio-panel.tsx`](apps/web/src/components/scene-audio-panel.tsx).
+
+---
+
+## Proposed roadmap (Phase 8+) — 🚧 not built, not confirmed
 
 Everything below is **inferred**, not decided. The evidence is real (an enum
 value, a seed row, a code comment) but none of it is a commitment — no phase
@@ -419,6 +495,57 @@ today but never called. It reads as a reserved slot for an orchestrating
 agent that could sit across several of the phases above (e.g. driving
 scene → image → voice → video as one pipeline) rather than a phase of its
 own — but that's a guess, not something the code states.
+
+### Discussed, not evidenced — design notes from 2026-08-15 conversation
+
+The items below have no trace in the schema/code yet. They came out of a
+design discussion with the project owner, not from reading the codebase —
+recorded here as candidate scope for Phase 8+, not a commitment.
+
+**Shot-level visuals.** Replace "one image per Scene" with an ordered
+`Shot` sub-entity under `Scene` (numbered, each with its own generated
+image, user can add/remove/reorder/regenerate) — Scene becomes a container
+rather than the image unit. Master AI would propose a shot count/split
+per scene (heuristic: one shot per dialogue-speaker-change or ~2-3 lines,
+plus one per major action beat, floor set by minimum shot duration), user
+can always override. This changes where image generation attaches
+(Shot, not Scene) — a real schema/pipeline change, not a small tweak.
+
+**Dialogue delivery / voice rhythm.** Extend `DialogueLine` with delivery
+metadata (emotion, pace, emphasis/pause markers) that Master AI fills in
+during dialogue generation and that feeds into the TTS call params
+alongside the existing per-character `voiceName` — see
+`apps/web/src/lib/voice.ts` (Phase 4). Style/rhythm should be informed by
+Story Bible tone + character profile via the existing Context Engine path.
+
+**Character/visual style consistency.** Two candidate fixes, not yet
+confirmed as implemented: (a) verify every image-generation call
+conditions on the tagged character's locked reference image, not just a
+text description — check `apps/web/src/lib/scene-images.ts`'s
+`IMAGE_PROMPTS` step; (b) add a project-level style prompt/seed anchor so
+every image call shares one style reference instead of drifting per
+generation.
+
+**Story chat AI.** A chat interface scoped to the current Story/Episode
+context (reusing the Context Engine), where the user can converse, paste
+in scene dialogue for feedback/rewrite, and apply each AI-proposed change
+via an explicit "Add to Story" button rather than auto-writing — fits the
+existing "AI prepares, user approves" pattern with no schema change,
+just a new chat surface + diff/apply action.
+
+**Master AI as a studio hierarchy.** Two separable pieces of the
+Showrunner/Producer/Creative-Director org-chart the owner sketched:
+(a) retention/hook-writing instructions (3-second hook, strong emotional
+triggers) are just system-prompt content for the dialogue/scene-writing
+step — cheap to add now; (b) the full role hierarchy (Showrunner →
+Creative Head/Producer → Story/Visual/Audio → specialized roles like Art
+Director, Character Designer, Continuity Editor) maps onto the "Unplaced —
+Master AI orchestrator" entry above as a set of distinct
+prompt-plus-tool-scoped agents with a top-level orchestrator delegating
+between them. This is a large, multi-role build — needs its own plan
+(per-role prompts/tool scope, delegation logic, how a Continuity Editor
+role would enforce the character/visual consistency item above) before
+implementation starts.
 
 ### Not evidenced at all
 

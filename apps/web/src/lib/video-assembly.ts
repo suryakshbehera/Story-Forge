@@ -86,6 +86,8 @@ const ASSEMBLY_SCENE_INCLUDE = {
     orderBy: { order: "asc" as const },
     include: { audio: { where: { isSelected: true }, take: 1 } },
   },
+  music: { where: { isSelected: true }, take: 1 },
+  sfx: { where: { isSelected: true }, take: 1 },
 } satisfies Prisma.SceneInclude;
 
 type AssemblyScene = Prisma.SceneGetPayload<{ include: typeof ASSEMBLY_SCENE_INCLUDE }>;
@@ -104,6 +106,10 @@ function extFromMime(mimeType: string | null): string {
       return ".mp4";
     case "audio/wav":
       return ".wav";
+    case "audio/mpeg":
+      return ".mp3";
+    case "audio/ogg":
+      return ".ogg";
     default:
       return "";
   }
@@ -123,9 +129,11 @@ function concatListFile(paths: string[]): string {
   return paths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n");
 }
 
-// Narration then each dialogue line, in order — one continuous audio track
-// for the scene. No audio at all (silent scene) returns null.
-async function buildSceneAudioTrack(scene: AssemblyScene, workDir: string, index: number): Promise<string | null> {
+// Narration then each dialogue line, in order — one continuous voice track
+// for the scene. No narration/dialogue at all returns null. Named "voice"
+// (not "audio") now that music/sfx are separate layers mixed in later — see
+// buildAmbienceLayer/mixAudioLayers below.
+async function buildSceneVoiceTrack(scene: AssemblyScene, workDir: string, index: number): Promise<string | null> {
   const takes: Asset[] = [];
   if (scene.narrationAudio[0]) takes.push(scene.narrationAudio[0]);
   for (const line of scene.dialogueLines) {
@@ -205,25 +213,71 @@ async function buildVisualSegment(
   return outPath;
 }
 
-async function muxSceneSegment(
-  visualPath: string,
-  audioPath: string | null,
+// Loops (music) or pads-with-silence (sfx) a single asset to exactly
+// `duration` seconds with `volume` applied, so it can be layered under the
+// scene's voice track. Looping suits a music bed shorter than the scene;
+// padding suits a one-shot sound effect — looping a sound effect would sound
+// like a glitch, not ambience.
+async function buildAmbienceLayer(
+  asset: Asset,
   workDir: string,
-  index: number,
-  targetDuration: number | null
+  name: string,
+  duration: number,
+  volume: number,
+  loop: boolean
 ): Promise<string> {
+  const srcPath = await writeAssetToTemp(asset, workDir, `${name}-src`);
+  const outPath = path.join(workDir, `${name}.wav`);
+  const durationStr = duration.toFixed(3);
+  await runFfmpeg([
+    ...(loop ? ["-stream_loop", "-1"] : []),
+    "-i", srcPath,
+    "-af", loop ? `volume=${volume}` : `volume=${volume},apad`,
+    "-t", durationStr,
+    "-ar", String(AUDIO_RATE),
+    "-ac", "2",
+    outPath,
+  ]);
+  return outPath;
+}
+
+// Combines whichever of voice/music/sfx layers exist into one track exactly
+// `duration` seconds long. A single layer is returned as-is (no re-encode).
+// normalize=0 keeps the voice track at its natural level instead of amix's
+// default of dividing every input by the input count (which would make
+// dialogue quieter just because music/sfx are also present) — music/sfx are
+// already scaled down via their own volume filter in buildAmbienceLayer.
+// alimiter is a cheap safety net against the rare case where peaks from all
+// layers stack past full scale.
+async function mixAudioLayers(layers: string[], workDir: string, index: number, duration: number): Promise<string | null> {
+  if (layers.length === 0) return null;
+  if (layers.length === 1) return layers[0];
+
+  const outPath = path.join(workDir, `scene${index}-mixed.wav`);
+  const inputArgs = layers.flatMap((p) => ["-i", p]);
+  await runFfmpeg([
+    ...inputArgs,
+    "-filter_complex", `amix=inputs=${layers.length}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95`,
+    "-t", duration.toFixed(3),
+    "-ar", String(AUDIO_RATE),
+    "-ac", "2",
+    outPath,
+  ]);
+  return outPath;
+}
+
+async function muxSceneSegment(visualPath: string, audioPath: string | null, workDir: string, index: number, duration: number): Promise<string> {
   const outPath = path.join(workDir, `scene${index}.mp4`);
   if (audioPath) {
     await runFfmpeg(["-i", visualPath, "-i", audioPath, "-c:v", "copy", "-c:a", "aac", "-ar", String(AUDIO_RATE), "-shortest", outPath]);
   } else {
-    const silenceDuration = targetDuration ?? (await probeDuration(visualPath));
     await runFfmpeg([
       "-i", visualPath,
       "-f", "lavfi",
       "-i", `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE}`,
       "-c:v", "copy",
       "-c:a", "aac",
-      "-t", silenceDuration.toFixed(3),
+      "-t", duration.toFixed(3),
       outPath,
     ]);
   }
@@ -231,10 +285,26 @@ async function muxSceneSegment(
 }
 
 async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: number): Promise<string> {
-  const audioPath = await buildSceneAudioTrack(scene, workDir, index);
-  const targetDuration = audioPath ? await probeDuration(audioPath) : null;
-  const visualPath = await buildVisualSegment(scene, workDir, index, targetDuration);
-  return muxSceneSegment(visualPath, audioPath, workDir, index, targetDuration);
+  const voicePath = await buildSceneVoiceTrack(scene, workDir, index);
+  const baseDuration = voicePath ? await probeDuration(voicePath) : null;
+  const visualPath = await buildVisualSegment(scene, workDir, index, baseDuration);
+  // The visual segment is always built to an exact, known duration (either
+  // baseDuration, or its own fallback/native length when baseDuration is
+  // null — see buildVisualSegment) — probing it here is what lets music/sfx
+  // size themselves correctly even when there's no voice track to measure.
+  const finalDuration = await probeDuration(visualPath);
+
+  const layers: string[] = [];
+  if (voicePath) layers.push(voicePath);
+  if (scene.music[0]) {
+    layers.push(await buildAmbienceLayer(scene.music[0], workDir, `scene${index}-music`, finalDuration, scene.musicVolume, true));
+  }
+  if (scene.sfx[0]) {
+    layers.push(await buildAmbienceLayer(scene.sfx[0], workDir, `scene${index}-sfx`, finalDuration, scene.sfxVolume, false));
+  }
+
+  const audioPath = await mixAudioLayers(layers, workDir, index, finalDuration);
+  return muxSceneSegment(visualPath, audioPath, workDir, index, finalDuration);
 }
 
 async function concatSegments(segmentPaths: string[], workDir: string, outPath: string): Promise<void> {

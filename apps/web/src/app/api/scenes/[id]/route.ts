@@ -15,6 +15,10 @@ const patchSchema = z.object({
   motionPrompt: z.string().optional().nullable(),
   videoPrompt: z.string().optional().nullable(),
   videoDurationSeconds: z.number().int().positive().optional().nullable(),
+  musicPrompt: z.string().optional().nullable(),
+  sfxPrompt: z.string().optional().nullable(),
+  musicVolume: z.number().min(0).max(1).optional(),
+  sfxVolume: z.number().min(0).max(1).optional(),
   characterIds: z.array(z.string()).optional(),
   locationIds: z.array(z.string()).optional(),
 });

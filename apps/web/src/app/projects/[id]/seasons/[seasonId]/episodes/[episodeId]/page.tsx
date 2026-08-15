@@ -5,6 +5,7 @@ import { assembleContext } from "@/lib/context/assemble";
 import { SCENE_INCLUDE, mapScenesImages } from "@/lib/scenes";
 import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
+import { mapSceneAudioData } from "@/lib/scene-audio";
 import { mapFinalVideos } from "@/lib/video-assembly";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
@@ -27,6 +28,11 @@ const VIDEO_INCLUDE = {
   videoClips: { orderBy: { createdAt: "desc" as const } },
 };
 
+const AUDIO_INCLUDE = {
+  music: { orderBy: { createdAt: "desc" as const } },
+  sfx: { orderBy: { createdAt: "desc" as const } },
+};
+
 export default async function EpisodePage({
   params,
 }: {
@@ -42,7 +48,7 @@ export default async function EpisodePage({
     prisma.scene.findMany({
       where: { episodeId },
       orderBy: { order: "asc" },
-      include: { ...SCENE_INCLUDE, ...VOICE_INCLUDE, ...VIDEO_INCLUDE },
+      include: { ...SCENE_INCLUDE, ...VOICE_INCLUDE, ...VIDEO_INCLUDE, ...AUDIO_INCLUDE },
     }),
     prisma.character.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
     prisma.location.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
@@ -102,7 +108,7 @@ export default async function EpisodePage({
             parentType="episode"
             parentId={episode.id}
             projectId={projectId}
-            initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData).map(mapSceneVideoData)}
+            initialScenes={mapScenesImages(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
             characters={characters}
             locations={locations}
             initialNarratorVoiceName={project.narratorVoiceName}

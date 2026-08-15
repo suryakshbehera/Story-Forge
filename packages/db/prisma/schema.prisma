@@ -212,6 +212,22 @@ model Scene {
   // to `description` at generation time when unset, same as motionPrompt.
   videoPrompt String? @db.Text
 
+  // Phase 7 — the "Audio Plan" step: AI-drafted (via AUDIO_PLANNING), then
+  // user-editable before the actual MUSIC_GENERATION/SFX_GENERATION call, same
+  // pattern as visualModeReason (AI proposes, user can overwrite). Kept as two
+  // separate fields, not one combined prompt, since music and sfx are
+  // generated independently (different job types, different Asset relations
+  // below) and a scene may want only one of the two. An empty prompt means
+  // "don't generate this" — generation is blocked on blank, same idiom as
+  // Scene.narration in voice.ts.
+  musicPrompt String? @db.Text
+  sfxPrompt   String? @db.Text
+  // Mix levels applied at Phase 6 assembly time (0-1, relative to the voice
+  // track which always plays at full volume). Defaults keep music
+  // unobtrusive under dialogue/narration and sfx clearly audible.
+  musicVolume Float @default(0.25)
+  sfxVolume   Float @default(0.8)
+
   characters    Character[]
   locations     Location[]
   // Phase 3's generated scene images. Named (not just typed) Asset[] because
@@ -234,6 +250,13 @@ model Scene {
   // separate-relation reasoning as narrationAudio: mixing clips into `images`
   // would break the image gallery's <img>-only assumption.
   videoClips Asset[] @relation("SceneVideoClips")
+
+  // Phase 7 — background music bed and sound-effect takes, one selected slot
+  // each (same take-history/isSelected pattern as narrationAudio), own
+  // relations for the same reason narrationAudio/videoClips are separate from
+  // `images`.
+  music Asset[] @relation("SceneMusic")
+  sfx   Asset[] @relation("SceneSfx")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -337,8 +360,11 @@ model DialogueLine {
 // GENERATED_IMAGE (scene images produced by the Image pipeline, via sceneId);
 // Phase 4 adds AUDIO_NARRATION (via its own narrationSceneId FK, kept
 // separate from sceneId so narration takes never show up in the image
-// gallery) and AUDIO_DIALOGUE (via dialogueLineId). Remaining types land once
-// their generation pipelines exist (video, etc).
+// gallery) and AUDIO_DIALOGUE (via dialogueLineId). Phase 7 adds MUSIC (via
+// musicSceneId) and SFX (via sfxSceneId) — both AI-generated (through
+// OpenRouter's general /chat/completions audio-output modality, since it has
+// no dedicated music/SFX endpoint the way images/speech/video do) or
+// user-uploaded, same dual path as GENERATED_IMAGE.
 // ─────────────────────────────────────────────────────────────────────────
 
 enum AssetType {
@@ -382,6 +408,14 @@ model Asset {
   // same reason narrationAudio is (see Scene.videoClips comment).
   videoSceneId String?
   videoScene   Scene? @relation("SceneVideoClips", fields: [videoSceneId], references: [id], onDelete: Cascade)
+
+  // Phase 7 — background music / sfx takes, own FK/relation pair each, same
+  // reasoning as videoSceneId above.
+  musicSceneId String?
+  musicScene   Scene? @relation("SceneMusic", fields: [musicSceneId], references: [id], onDelete: Cascade)
+
+  sfxSceneId String?
+  sfxScene   Scene? @relation("SceneSfx", fields: [sfxSceneId], references: [id], onDelete: Cascade)
 
   // Phase 5 — which selected GENERATED_IMAGE this clip was generated from,
   // for traceability when a scene's image is later regenerated/reselected.
@@ -480,6 +514,15 @@ enum AiJobType {
   // assembly of the final output (a later, separate phase).
   VIDEO_GENERATION
   VIDEO
+  // Phase 7 — the "Audio Plan" step: drafts Scene.musicPrompt/sfxPrompt from
+  // the scene's description + style context, same shape as IMAGE_PROMPTS.
+  AUDIO_PLANNING
+  // Phase 7 — kept as two distinct job types (not one AUDIO_GENERATION) since
+  // music and sound effects are generated independently and a provider well
+  // suited to one (e.g. a music model like Lyria) isn't necessarily suited to
+  // the other.
+  MUSIC_GENERATION
+  SFX_GENERATION
 }
 
 model AiModelOption {

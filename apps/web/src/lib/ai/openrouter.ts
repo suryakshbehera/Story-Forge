@@ -272,6 +272,64 @@ export async function generateVideo({
   return { base64: buffer.toString("base64"), mimeType };
 }
 
+export interface GenerateAudioParams {
+  modelId: string;
+  prompt: string;
+  durationSeconds?: number;
+}
+
+export interface GeneratedAudio {
+  base64: string;
+  mimeType: string;
+}
+
+// MUSIC_GENERATION / SFX_GENERATION. Unlike generateImage/generateSpeech/
+// generateVideo above, OpenRouter has no dedicated endpoint for music/SFX
+// generation — confirmed against its docs: the only dedicated endpoints are
+// /audio/speech (TTS), /audio/transcriptions (STT), /images, and /videos.
+// OpenRouter's own docs describe every other modality, including audio
+// output from models like Google Lyria or OpenAI's GPT Audio, as running
+// through /chat/completions and differing only by content type/modalities —
+// the same OpenAI-compatible "modalities": ["text","audio"] shape used by
+// audio-output chat models generally (request an `audio.format`, read the
+// result back from `message.audio.data`). No `voice` param here — that's a
+// TTS/persona concept and doesn't apply to music/SFX generation. This is the
+// least-confirmed primitive in this file (no dedicated-endpoint doc page to
+// point at) — if a specific model's provider expects a different request
+// shape, this is the first place to adjust.
+export async function generateAudio({ modelId, prompt, durationSeconds }: GenerateAudioParams): Promise<GeneratedAudio> {
+  const apiKey = requireApiKey();
+
+  const userPrompt = durationSeconds ? `${prompt}\n\n(Target length: approximately ${durationSeconds} seconds.)` : prompt;
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      modalities: ["text", "audio"],
+      audio: { format: "mp3" },
+      messages: [{ role: "user", content: userPrompt }],
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new OpenRouterError(`OpenRouter audio request failed (${response.status}): ${body}`);
+  }
+
+  const data = await response.json();
+  const audio = data?.choices?.[0]?.message?.audio;
+  if (!audio?.data) {
+    throw new OpenRouterError("OpenRouter returned no audio data.");
+  }
+
+  return { base64: audio.data, mimeType: "audio/mpeg" };
+}
+
 // Headerless 16-bit signed little-endian PCM at 24kHz mono — confirmed for
 // Gemini TTS and the de facto standard most speech-only PCM APIs (OpenAI's
 // realtime audio included) use for this endpoint's "pcm" format. Wraps it in

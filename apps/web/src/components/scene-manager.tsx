@@ -20,6 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ModelSelect } from "@/components/model-select";
 import { SceneVoicePanel, type AudioTake, type DialogueLineItem } from "@/components/scene-voice-panel";
 import { SceneVideoPanel, type SceneVideoClipItem } from "@/components/scene-video-panel";
+import { SceneAudioPanel } from "@/components/scene-audio-panel";
 import { cn } from "@/lib/utils";
 import {
   Sparkles,
@@ -73,6 +74,12 @@ export interface SceneItem {
   videoPrompt: string | null;
   videoDurationSeconds: number | null;
   videoClips: SceneVideoClipItem[];
+  musicPrompt: string | null;
+  sfxPrompt: string | null;
+  musicVolume: number;
+  sfxVolume: number;
+  music: AudioTake[];
+  sfx: AudioTake[];
 }
 
 const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
@@ -105,6 +112,8 @@ function withVoiceDefaults(scene: SceneItem): SceneItem {
     narrationAudio: scene.narrationAudio ?? [],
     dialogueLines: scene.dialogueLines ?? [],
     videoClips: scene.videoClips ?? [],
+    music: scene.music ?? [],
+    sfx: scene.sfx ?? [],
   };
 }
 
@@ -179,6 +188,8 @@ export function SceneManager({
                 narrationAudio: scene.narrationAudio ?? s.narrationAudio,
                 dialogueLines: scene.dialogueLines ?? s.dialogueLines,
                 videoClips: scene.videoClips ?? s.videoClips,
+                music: scene.music ?? s.music,
+                sfx: scene.sfx ?? s.sfx,
               }
             : s
         )
@@ -196,6 +207,8 @@ export function SceneManager({
           narrationAudio: u.narrationAudio ?? existing?.narrationAudio ?? [],
           dialogueLines: u.dialogueLines ?? existing?.dialogueLines ?? [],
           videoClips: u.videoClips ?? existing?.videoClips ?? [],
+          music: u.music ?? existing?.music ?? [],
+          sfx: u.sfx ?? existing?.sfx ?? [],
         });
       }
       return Array.from(byId.values()).sort((a, b) => a.order - b.order);
@@ -855,6 +868,16 @@ function SceneRow({
           initialNarration={scene.narration ?? ""}
           initialNarrationAudio={scene.narrationAudio}
           initialDialogueLines={scene.dialogueLines}
+        />
+
+        <SceneAudioPanel
+          sceneId={scene.id}
+          initialMusicPrompt={scene.musicPrompt ?? ""}
+          initialSfxPrompt={scene.sfxPrompt ?? ""}
+          initialMusicVolume={scene.musicVolume}
+          initialSfxVolume={scene.sfxVolume}
+          initialMusic={scene.music}
+          initialSfx={scene.sfx}
         />
       </CardContent>
     </Card>

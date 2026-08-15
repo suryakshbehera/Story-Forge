@@ -21,6 +21,9 @@ const defaultModels: Array<{
   { jobType: "VOICE", provider: "openrouter", modelId: "mistralai/voxtral-mini-tts-2603", displayName: "Voxtral Mini TTS" },
   { jobType: "VIDEO_GENERATION", provider: "openrouter", modelId: "google/veo-3.1", displayName: "Veo 3.1" },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
+  { jobType: "AUDIO_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { jobType: "MUSIC_GENERATION", provider: "openrouter", modelId: "google/lyria-3-pro-preview", displayName: "Lyria 3 Pro Preview" },
+  { jobType: "SFX_GENERATION", provider: "openrouter", modelId: "openai/gpt-audio", displayName: "GPT Audio" },
 ];
 
 async function main() {

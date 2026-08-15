@@ -572,6 +572,12 @@ enum AiJobType {
   // Phase 8 — drafts DialogueLine.deliveryNotes/speed for every line in a
   // scene in one call, so a conversation's delivery stays coherent.
   DIALOGUE_DIRECTION
+  // Drafts Scene.narration plus, only when the scene currently has none, new
+  // DialogueLine rows for characters already attached to the scene — same
+  // "AI proposes, user can overwrite/edit" shape as AUDIO_PLANNING, one level
+  // up from DIALOGUE_DIRECTION (which only redirects lines that already
+  // exist). See generateSceneScript in lib/voice.ts.
+  SCRIPT_DRAFTING
 }
 
 model AiModelOption {

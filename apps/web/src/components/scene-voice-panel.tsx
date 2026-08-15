@@ -71,6 +71,8 @@ export function SceneVoicePanel({
   const [dialogueLines, setDialogueLines] = useState(initialDialogueLines);
   const [directionModelId, setDirectionModelId] = useState("");
   const [directing, setDirecting] = useState(false);
+  const [scriptModelId, setScriptModelId] = useState("");
+  const [drafting, setDrafting] = useState(false);
 
   async function saveNarration() {
     setSavingNarration(true);
@@ -199,8 +201,53 @@ export function SceneVoicePanel({
     }
   }
 
+  async function draftScript() {
+    if (!scriptModelId) {
+      toast.error("Pick a Script Drafting model first.");
+      return;
+    }
+    setDrafting(true);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/script/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId: scriptModelId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Drafting failed");
+      }
+      const draft: { narration: string | null; dialogueLines: DialogueLineItem[]; dialogueSkipped: boolean } =
+        await res.json();
+      setNarration(draft.narration ?? "");
+      setSavedNarration(draft.narration ?? "");
+      setDialogueLines(draft.dialogueLines);
+      toast.success(
+        draft.dialogueSkipped
+          ? "Narration drafted — this scene already had dialogue lines, so those were left untouched."
+          : "Narration and dialogue drafted — review below."
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Drafting failed.");
+    } finally {
+      setDrafting(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4 border-t pt-3">
+      <div className="flex flex-wrap items-end gap-2">
+        <Label className="text-xs text-muted-foreground flex-1 min-w-[12rem]">
+          Draft Script — proposes narration for this scene, plus dialogue lines for characters already attached to
+          it (only if the scene has none yet)
+        </Label>
+        <ModelSelect jobType="SCRIPT_DRAFTING" value={scriptModelId} onChange={setScriptModelId} />
+        <Button size="sm" variant="outline" onClick={draftScript} disabled={drafting}>
+          <Wand2 className="size-3.5" />
+          {drafting ? "Drafting…" : "Draft Narration & Dialogue"}
+        </Button>
+      </div>
+
       <div>
         <Label className="text-xs text-muted-foreground">Narration script</Label>
         <Textarea

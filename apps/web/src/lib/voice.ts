@@ -280,6 +280,120 @@ export async function generateDialogueDirection({
   return getSceneDialogueLines(sceneId);
 }
 
+// ── Script Drafting — one AI call per scene that proposes Scene.narration
+// plus, only when the scene has no dialogue lines yet, new DialogueLine rows
+// for characters already attached to the scene (Scene.characters — not the
+// full project roster, so the AI can't invent a speaker who isn't part of
+// this scene). Narration always gets overwritten by a fresh draft, same "AI
+// proposes, user can overwrite" idiom as AUDIO_PLANNING; dialogue is
+// additive-only-when-empty because lines can carry generated audio takes
+// that a silent overwrite would orphan. ─────────────────────────────────────
+
+// Scoped-down copy of scene-audio.ts's loadAudioStyleContext, not imported —
+// same reasoning given there: this step doesn't need that file's other
+// concerns, just genre/tone for tone-matching the script.
+async function loadSceneScriptContext(sceneId: string) {
+  const scene = await prisma.scene.findUniqueOrThrow({
+    where: { id: sceneId },
+    include: {
+      story: true,
+      episode: { include: { season: { include: { project: { include: { storyBible: true } } } } } },
+      characters: { select: { id: true, name: true, personality: true } },
+      dialogueLines: { select: { id: true } },
+    },
+  });
+
+  const genre = scene.story?.genre ?? scene.episode?.season.project.storyBible?.genre ?? null;
+  const tone = scene.story?.tone ?? scene.episode?.season.project.storyBible?.tone ?? null;
+  const style = [genre && `Genre: ${genre}`, tone && `Tone: ${tone}`].filter(Boolean).join("\n") || null;
+
+  return { scene, style };
+}
+
+const scriptDraftResponseSchema = z.object({
+  narration: z.string(),
+  dialogueLines: z.array(
+    z.object({
+      characterName: z.string(),
+      text: z.string(),
+    })
+  ),
+});
+
+// Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
+// appears below to satisfy the provider's json_object requirement.
+function buildScriptDraftSystemPrompt(characterNames: string[]): string {
+  const roster = characterNames.length > 0 ? characterNames.join(", ") : "(no characters are attached to this scene)";
+  return `You are the Script Drafting step of Narrata's Voice pipeline. Given one scene's description and style context, draft the narrator's voiceover script and, if the scene calls for spoken dialogue, the dialogue lines for it.
+
+Characters available to speak in this scene: ${roster}
+Only write dialogue for characters in that exact list — never invent a new speaker or use a character not listed. If the scene needs a line from someone not on the list, leave that line out rather than misattributing it.
+
+Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
+{
+  "narration": "the narrator's voiceover script for this scene, or an empty string if the scene should play out through dialogue alone / needs no narration",
+  "dialogueLines": [
+    { "characterName": "must exactly match a name from the roster above", "text": "the line they say" }
+  ]
+}
+Leave "dialogueLines" empty if this scene doesn't call for spoken dialogue — not every scene needs it.`;
+}
+
+export interface SceneScriptDraft {
+  narration: string | null;
+  dialogueLines: SerializedDialogueLine[];
+  dialogueSkipped: boolean;
+}
+
+export async function generateSceneScript({
+  sceneId,
+  modelId,
+}: {
+  sceneId: string;
+  modelId: string;
+}): Promise<SceneScriptDraft> {
+  const { scene, style } = await loadSceneScriptContext(sceneId);
+
+  const userPrompt = [`# Scene\n${scene.description}`, style && `# Style\n${style}`].filter(Boolean).join("\n\n");
+
+  const raw = await callChatModel({
+    modelId,
+    systemPrompt: buildScriptDraftSystemPrompt(scene.characters.map((c) => c.name)),
+    userPrompt,
+    jsonMode: true,
+  });
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    throw new OpenRouterError("AI returned invalid JSON.");
+  }
+  const parsed = scriptDraftResponseSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new OpenRouterError("AI returned an unexpected shape.");
+  }
+
+  const narration = parsed.data.narration.trim() || null;
+  await prisma.scene.update({ where: { id: sceneId }, data: { narration } });
+
+  const dialogueSkipped = scene.dialogueLines.length > 0;
+  if (!dialogueSkipped && parsed.data.dialogueLines.length > 0) {
+    const byName = new Map(scene.characters.map((c) => [c.name.trim().toLowerCase(), c.id]));
+    const matched = parsed.data.dialogueLines
+      .map((line) => ({ characterId: byName.get(line.characterName.trim().toLowerCase()), text: line.text.trim() }))
+      .filter((line): line is { characterId: string; text: string } => !!line.characterId && line.text.length > 0);
+
+    await prisma.$transaction(
+      matched.map((line, i) =>
+        prisma.dialogueLine.create({ data: { sceneId, characterId: line.characterId, text: line.text, order: i + 1 } })
+      )
+    );
+  }
+
+  return { narration, dialogueLines: await getSceneDialogueLines(sceneId), dialogueSkipped };
+}
+
 export async function deleteDialogueLine(id: string): Promise<void> {
   const assets = await prisma.asset.findMany({ where: { dialogueLineId: id } });
 

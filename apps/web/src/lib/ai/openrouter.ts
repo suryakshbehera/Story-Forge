@@ -325,6 +325,12 @@ export interface GeneratedAudio {
 // least-confirmed primitive in this file (no dedicated-endpoint doc page to
 // point at) — if a specific model's provider expects a different request
 // shape, this is the first place to adjust.
+//
+// Confirmed 2026-08-15 against a live key: OpenRouter rejects a non-streaming
+// audio-output request with 400 "Audio output requires stream: true" for at
+// least some providers. So this always streams (SSE) and reassembles the
+// audio from `choices[0].delta.audio.data` chunks rather than reading a
+// single `message.audio.data` blob off a non-streaming response.
 export async function generateAudio({ modelId, prompt, durationSeconds }: GenerateAudioParams): Promise<GeneratedAudio> {
   const apiKey = requireApiKey();
 
@@ -340,6 +346,7 @@ export async function generateAudio({ modelId, prompt, durationSeconds }: Genera
       model: modelId,
       modalities: ["text", "audio"],
       audio: { format: "mp3" },
+      stream: true,
       messages: [{ role: "user", content: userPrompt }],
     }),
   });
@@ -348,14 +355,49 @@ export async function generateAudio({ modelId, prompt, durationSeconds }: Genera
     const body = await response.text();
     throw new OpenRouterError(`OpenRouter audio request failed (${response.status}): ${body}`);
   }
-
-  const data = await response.json();
-  const audio = data?.choices?.[0]?.message?.audio;
-  if (!audio?.data) {
-    throw new OpenRouterError("OpenRouter returned no audio data.");
+  if (!response.body) {
+    throw new OpenRouterError("OpenRouter audio request returned no response body.");
   }
 
-  return { base64: audio.data, mimeType: "audio/mpeg" };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let audioBase64 = "";
+  let transcript = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice("data:".length).trim();
+      if (payload === "[DONE]") continue;
+
+      let chunk: unknown;
+      try {
+        chunk = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+
+      const delta = (chunk as { choices?: Array<{ delta?: { audio?: { data?: string; transcript?: string } } }> })
+        ?.choices?.[0]?.delta;
+      if (delta?.audio?.data) audioBase64 += delta.audio.data;
+      if (delta?.audio?.transcript) transcript += delta.audio.transcript;
+    }
+  }
+
+  if (!audioBase64) {
+    throw new OpenRouterError(`OpenRouter returned no audio data.${transcript ? ` (transcript: ${transcript})` : ""}`);
+  }
+
+  return { base64: audioBase64, mimeType: "audio/mpeg" };
 }
 
 // Headerless 16-bit signed little-endian PCM at 24kHz mono — confirmed for

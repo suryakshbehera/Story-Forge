@@ -320,17 +320,22 @@ export interface GeneratedAudio {
 // through /chat/completions and differing only by content type/modalities —
 // the same OpenAI-compatible "modalities": ["text","audio"] shape used by
 // audio-output chat models generally (request an `audio.format`, read the
-// result back from `message.audio.data`). No `voice` param here — that's a
-// TTS/persona concept and doesn't apply to music/SFX generation. This is the
-// least-confirmed primitive in this file (no dedicated-endpoint doc page to
-// point at) — if a specific model's provider expects a different request
-// shape, this is the first place to adjust.
+// result back from `message.audio.data`). This is the least-confirmed
+// primitive in this file (no dedicated-endpoint doc page to point at) — if a
+// specific model's provider expects a different request shape, this is the
+// first place to adjust.
 //
 // Confirmed 2026-08-15 against a live key: OpenRouter rejects a non-streaming
 // audio-output request with 400 "Audio output requires stream: true" for at
 // least some providers. So this always streams (SSE) and reassembles the
 // audio from `choices[0].delta.audio.data` chunks rather than reading a
 // single `message.audio.data` blob off a non-streaming response.
+//
+// Also confirmed same day: OpenAI's audio-output endpoint requires
+// `audio.voice` even for non-speech content (music/SFX) — it's a required
+// param of the shared multimodal endpoint, not a TTS-only concept as
+// originally assumed. Defaulted to "alloy" since music/SFX prompts don't
+// carry a voice choice of their own.
 export async function generateAudio({ modelId, prompt, durationSeconds }: GenerateAudioParams): Promise<GeneratedAudio> {
   const apiKey = requireApiKey();
 
@@ -345,7 +350,7 @@ export async function generateAudio({ modelId, prompt, durationSeconds }: Genera
     body: JSON.stringify({
       model: modelId,
       modalities: ["text", "audio"],
-      audio: { format: "mp3" },
+      audio: { format: "mp3", voice: "alloy" },
       stream: true,
       messages: [{ role: "user", content: userPrompt }],
     }),

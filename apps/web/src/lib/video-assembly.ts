@@ -8,7 +8,10 @@ import { storage, buildStorageKey } from "@/lib/storage";
 
 // Canonical output format every intermediate segment is normalized to, so
 // ffmpeg's concat demuxer can stream-copy them together at the end without
-// re-encoding the whole final video a second time.
+// re-encoding the whole final video a second time. Used for the real,
+// user-facing render (assembleVideo) — never implicitly defaulted to, always
+// passed explicitly, so a future second VisualTarget can't accidentally leak
+// into the actual final output.
 const WIDTH = 1920;
 const HEIGHT = 1080;
 const FPS = 30;
@@ -16,41 +19,65 @@ const AUDIO_RATE = 44100;
 const DEFAULT_ILLUSTRATION_SECONDS = 5;
 const DURATION_TOLERANCE_SECONDS = 0.15;
 
-const SCALE_PAD_FILTER = `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${FPS}`;
+interface VisualTarget {
+  width: number;
+  height: number;
+  fps: number;
+}
+
+const FULL_RES: VisualTarget = { width: WIDTH, height: HEIGHT, fps: FPS };
+
+// The AI-facing silent picture (assembleSilentPicture, for Audio Cue
+// Planning) doesn't need — or benefit from — full-resolution/framerate: a
+// video-understanding model reads scene content/pacing/mood from it, not
+// fine detail, and Ken Burns' zoompan cost scales with output pixel count ×
+// frame count. Cuts both the ffmpeg encode time (the dominant cost of
+// drafting a cue plan on a real episode, observed live: ~9 minutes for a
+// 10-scene/33-shot episode at full res) and the base64 upload size, without
+// touching the real final render at all — assembleVideo always passes
+// FULL_RES explicitly, never this.
+const CUE_PLAN_RES: VisualTarget = { width: 640, height: 360, fps: 8 };
+
+function scalePadFilter({ width, height, fps }: VisualTarget): string {
+  return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps}`;
+}
 
 // Ken Burns pan/zoom for ILLUSTRATION scenes — a deterministic ffmpeg
 // zoompan, not an AI call. zoompan crops into the source rather than
 // letterboxing it, so it prescales/crops to 2x target size first (zoompan
 // is jittery fed a source close to its own output size) and deliberately
-// doesn't reuse SCALE_PAD_FILTER's pad-to-fit behavior.
-const CAMERA_PRESCALE_FILTER = `scale=${WIDTH * 2}:${HEIGHT * 2}:force_original_aspect_ratio=increase,crop=${WIDTH * 2}:${HEIGHT * 2}`;
+// doesn't reuse scalePadFilter's pad-to-fit behavior.
+function cameraPrescaleFilter({ width, height }: VisualTarget): string {
+  return `scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase,crop=${width * 2}:${height * 2}`;
+}
 const ZOOM_STEP_PER_FRAME = 0.0015;
 const ZOOM_MAX = 1.5;
 const PAN_ZOOM = 1.15; // constant zoom while panning, so panning never exposes the source's edge
 
-function buildCameraFilter(movement: CameraMovement, frames: number): string {
-  if (movement === "STATIC") return SCALE_PAD_FILTER;
+function buildCameraFilter(movement: CameraMovement, frames: number, target: VisualTarget): string {
+  if (movement === "STATIC") return scalePadFilter(target);
 
+  const prescale = cameraPrescaleFilter(target);
   const lastFrame = Math.max(frames - 1, 1);
   const centerX = "iw/2-(iw/zoom/2)";
   const centerY = "ih/2-(ih/zoom/2)";
-  const zoompanTail = `d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS}`;
+  const zoompanTail = `d=${frames}:s=${target.width}x${target.height}:fps=${target.fps}`;
 
   switch (movement) {
     case "ZOOM_IN":
-      return `${CAMERA_PRESCALE_FILTER},zoompan=z='min(zoom+${ZOOM_STEP_PER_FRAME},${ZOOM_MAX})':x='${centerX}':y='${centerY}':${zoompanTail}`;
+      return `${prescale},zoompan=z='min(zoom+${ZOOM_STEP_PER_FRAME},${ZOOM_MAX})':x='${centerX}':y='${centerY}':${zoompanTail}`;
     case "ZOOM_OUT":
-      return `${CAMERA_PRESCALE_FILTER},zoompan=z='if(eq(on,0),${ZOOM_MAX},max(zoom-${ZOOM_STEP_PER_FRAME},1))':x='${centerX}':y='${centerY}':${zoompanTail}`;
+      return `${prescale},zoompan=z='if(eq(on,0),${ZOOM_MAX},max(zoom-${ZOOM_STEP_PER_FRAME},1))':x='${centerX}':y='${centerY}':${zoompanTail}`;
     case "PAN_LEFT":
-      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(1-on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(1-on/${lastFrame})':y='${centerY}':${zoompanTail}`;
     case "PAN_RIGHT":
-      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(on/${lastFrame})':y='${centerY}':${zoompanTail}`;
     case "PAN_UP":
-      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(1-on/${lastFrame})':${zoompanTail}`;
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(1-on/${lastFrame})':${zoompanTail}`;
     case "PAN_DOWN":
-      return `${CAMERA_PRESCALE_FILTER},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(on/${lastFrame})':${zoompanTail}`;
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(on/${lastFrame})':${zoompanTail}`;
     default:
-      return SCALE_PAD_FILTER;
+      return scalePadFilter(target);
   }
 }
 
@@ -179,7 +206,7 @@ async function buildSceneVoiceTrack(scene: AssemblyScene, workDir: string, index
 // segment.
 const MIN_SHOT_SECONDS = 0.5;
 
-async function buildIllustrationSegment(scene: AssemblyScene, workDir: string, index: number, outPath: string): Promise<string> {
+async function buildIllustrationSegment(scene: AssemblyScene, workDir: string, index: number, outPath: string, target: VisualTarget): Promise<string> {
   const shots = scene.shots;
 
   const shotPaths: string[] = [];
@@ -187,12 +214,12 @@ async function buildIllustrationSegment(scene: AssemblyScene, workDir: string, i
     const shotDuration = Math.max(shot.durationSeconds ?? DEFAULT_ILLUSTRATION_SECONDS, MIN_SHOT_SECONDS);
     const shotPath = path.join(workDir, `scene${index}-shot${i}.mp4`);
     const imagePath = await writeAssetToTemp(shot.images[0], workDir, `scene${index}-shot${i}-image`);
-    const frames = Math.max(Math.round(shotDuration * FPS), 1);
+    const frames = Math.max(Math.round(shotDuration * target.fps), 1);
     await runFfmpeg([
       "-loop", "1",
       "-i", imagePath,
       "-t", shotDuration.toFixed(3),
-      "-vf", buildCameraFilter(shot.cameraMovement, frames),
+      "-vf", buildCameraFilter(shot.cameraMovement, frames, target),
       "-pix_fmt", "yuv420p",
       "-an",
       shotPath,
@@ -233,16 +260,16 @@ async function extractClipAudioLayer(clipPath: string, workDir: string, name: st
 // narration/dialogue — the picture is assembled first and is authoritative;
 // voice is fit to *it* instead (see padVoiceToMatch/padVisualToMatch in
 // buildSceneSegment) so cue planning has a locked timeline to plan against.
-async function buildVisualSegment(scene: AssemblyScene, workDir: string, index: number): Promise<VisualSegmentResult> {
+async function buildVisualSegment(scene: AssemblyScene, workDir: string, index: number, target: VisualTarget): Promise<VisualSegmentResult> {
   const outPath = path.join(workDir, `scene${index}-visual.mp4`);
   const needsClip = scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO";
 
   if (!needsClip) {
-    return { path: await buildIllustrationSegment(scene, workDir, index, outPath), clipPath: null };
+    return { path: await buildIllustrationSegment(scene, workDir, index, outPath, target), clipPath: null };
   }
 
   const clipPath = await writeAssetToTemp(scene.videoClips[0], workDir, `scene${index}-clip`);
-  await runFfmpeg(["-i", clipPath, "-vf", SCALE_PAD_FILTER, "-pix_fmt", "yuv420p", "-an", outPath]);
+  await runFfmpeg(["-i", clipPath, "-vf", scalePadFilter(target), "-pix_fmt", "yuv420p", "-an", outPath]);
   return { path: outPath, clipPath };
 }
 
@@ -341,7 +368,7 @@ async function muxSceneSegment(visualPath: string, audioPath: string | null, wor
 }
 
 async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: number, includeClipAudio: boolean): Promise<string> {
-  const { path: rawVisualPath, clipPath } = await buildVisualSegment(scene, workDir, index);
+  const { path: rawVisualPath, clipPath } = await buildVisualSegment(scene, workDir, index, FULL_RES);
   const visualDuration = await probeDuration(rawVisualPath);
 
   const voicePath = await buildSceneVoiceTrack(scene, workDir, index);
@@ -438,7 +465,7 @@ export async function assembleSilentPicture(parentType: ScenesParentType, parent
     const segmentPaths: string[] = [];
     let cursor = 0;
     for (const [index, scene] of scenes.entries()) {
-      const { path: visualPath } = await buildVisualSegment(scene, workDir, index);
+      const { path: visualPath } = await buildVisualSegment(scene, workDir, index, CUE_PLAN_RES);
       const durationSeconds = await probeDuration(visualPath);
       segmentPaths.push(visualPath);
       manifest.push({

@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import { prisma, type Asset, type Prisma, type CameraMovement } from "@/lib/db";
 import { parentWhere, type ScenesParentType } from "@/lib/scenes";
-import { runFfmpeg, probeDuration } from "@/lib/ffmpeg";
+import { runFfmpeg, probeDuration, hasAudioStream } from "@/lib/ffmpeg";
 import { storage, buildStorageKey } from "@/lib/storage";
 
 // Canonical output format every intermediate segment is normalized to, so
@@ -205,49 +205,81 @@ async function buildIllustrationSegment(
   return outPath;
 }
 
-// Silent, normalized visual segment. targetDuration comes from the scene's
-// audio track (null when the scene has no audio at all).
+interface VisualSegmentResult {
+  path: string;
+  // The clip's own baked-in audio (e.g. Veo3 Lite's generated sound), pulled
+  // out as a separate layer rather than left attached to the visual segment
+  // — so it mixes with voice/music/sfx via mixAudioLayers below instead of
+  // fighting muxSceneSegment's single-audio-input mux. null when the scene
+  // has no clip, includeClipAudio is off, or the clip has no audio track.
+  clipAudioPath: string | null;
+}
+
+// Extracts and pads/trims a clip's own audio track to exactly `duration`
+// seconds. Silent clips (no audio stream at all — common for older/other
+// video models) return null rather than erroring, since not every clip is
+// expected to carry audio.
+async function extractClipAudioLayer(clipPath: string, workDir: string, name: string, duration: number): Promise<string | null> {
+  if (!(await hasAudioStream(clipPath))) return null;
+  const outPath = path.join(workDir, `${name}.wav`);
+  await runFfmpeg(["-i", clipPath, "-vn", "-af", "apad", "-t", duration.toFixed(3), "-ar", String(AUDIO_RATE), "-ac", "2", outPath]);
+  return outPath;
+}
+
+// Normalized visual segment. targetDuration comes from the scene's audio
+// track (null when the scene has no audio at all). The visual track itself
+// is still always rendered silent (-an) and re-muxed later in
+// muxSceneSegment — includeClipAudio only controls whether the clip's audio
+// is *also* extracted as a layer to mix in, not whether the clip keeps its
+// audio attached here.
 async function buildVisualSegment(
   scene: AssemblyScene,
   workDir: string,
   index: number,
-  targetDuration: number | null
-): Promise<string> {
+  targetDuration: number | null,
+  includeClipAudio: boolean
+): Promise<VisualSegmentResult> {
   const outPath = path.join(workDir, `scene${index}-visual.mp4`);
   const needsClip = scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO";
 
   if (!needsClip) {
     const duration = targetDuration ?? DEFAULT_ILLUSTRATION_SECONDS;
-    return buildIllustrationSegment(scene, workDir, index, duration, outPath);
+    return { path: await buildIllustrationSegment(scene, workDir, index, duration, outPath), clipAudioPath: null };
   }
 
   const clipPath = await writeAssetToTemp(scene.videoClips[0], workDir, `scene${index}-clip`);
 
+  let duration: number;
   if (targetDuration === null) {
     await runFfmpeg(["-i", clipPath, "-vf", SCALE_PAD_FILTER, "-pix_fmt", "yuv420p", "-an", outPath]);
-    return outPath;
-  }
-
-  const clipDuration = await probeDuration(clipPath);
-  if (clipDuration < targetDuration - DURATION_TOLERANCE_SECONDS) {
-    // Freeze-pad: hold the last frame for the remaining gap rather than
-    // cutting the narration/dialogue off early.
-    const pad = (targetDuration - clipDuration).toFixed(3);
-    await runFfmpeg([
-      "-i", clipPath,
-      "-vf", `${SCALE_PAD_FILTER},tpad=stop_mode=clone:stop_duration=${pad}`,
-      "-pix_fmt", "yuv420p",
-      "-t", targetDuration.toFixed(3),
-      "-an",
-      outPath,
-    ]);
+    duration = await probeDuration(outPath);
   } else {
-    // Either already matches (within tolerance) or runs long — trim to the
-    // audio's exact length either way.
-    await runFfmpeg(["-i", clipPath, "-t", targetDuration.toFixed(3), "-vf", SCALE_PAD_FILTER, "-pix_fmt", "yuv420p", "-an", outPath]);
+    const clipDuration = await probeDuration(clipPath);
+    if (clipDuration < targetDuration - DURATION_TOLERANCE_SECONDS) {
+      // Freeze-pad: hold the last frame for the remaining gap rather than
+      // cutting the narration/dialogue off early.
+      const pad = (targetDuration - clipDuration).toFixed(3);
+      await runFfmpeg([
+        "-i", clipPath,
+        "-vf", `${SCALE_PAD_FILTER},tpad=stop_mode=clone:stop_duration=${pad}`,
+        "-pix_fmt", "yuv420p",
+        "-t", targetDuration.toFixed(3),
+        "-an",
+        outPath,
+      ]);
+    } else {
+      // Either already matches (within tolerance) or runs long — trim to the
+      // audio's exact length either way.
+      await runFfmpeg(["-i", clipPath, "-t", targetDuration.toFixed(3), "-vf", SCALE_PAD_FILTER, "-pix_fmt", "yuv420p", "-an", outPath]);
+    }
+    duration = targetDuration;
   }
 
-  return outPath;
+  const clipAudioPath = includeClipAudio
+    ? await extractClipAudioLayer(clipPath, workDir, `scene${index}-clipaudio`, duration)
+    : null;
+
+  return { path: outPath, clipAudioPath };
 }
 
 // Loops (music) or pads-with-silence (sfx) a single asset to exactly
@@ -321,10 +353,10 @@ async function muxSceneSegment(visualPath: string, audioPath: string | null, wor
   return outPath;
 }
 
-async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: number): Promise<string> {
+async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: number, includeClipAudio: boolean): Promise<string> {
   const voicePath = await buildSceneVoiceTrack(scene, workDir, index);
   const baseDuration = voicePath ? await probeDuration(voicePath) : null;
-  const visualPath = await buildVisualSegment(scene, workDir, index, baseDuration);
+  const { path: visualPath, clipAudioPath } = await buildVisualSegment(scene, workDir, index, baseDuration, includeClipAudio);
   // The visual segment is always built to an exact, known duration (either
   // baseDuration, or its own fallback/native length when baseDuration is
   // null — see buildVisualSegment) — probing it here is what lets music/sfx
@@ -333,6 +365,7 @@ async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: n
 
   const layers: string[] = [];
   if (voicePath) layers.push(voicePath);
+  if (clipAudioPath) layers.push(clipAudioPath);
   if (scene.music[0]) {
     layers.push(await buildAmbienceLayer(scene.music[0], workDir, `scene${index}-music`, finalDuration, scene.musicVolume, true));
   }
@@ -354,9 +387,18 @@ interface AssembleVideoParams {
   parentType: ScenesParentType;
   parentId: string;
   modelId: string;
+  // Off by default — matches the pre-existing behavior of always discarding
+  // a video clip's own audio track (e.g. Veo3 Lite's generated sound) in
+  // favor of just narration/dialogue/music/sfx.
+  includeClipAudio?: boolean;
 }
 
-export async function assembleVideo({ parentType, parentId, modelId }: AssembleVideoParams): Promise<SerializedFinalVideo> {
+export async function assembleVideo({
+  parentType,
+  parentId,
+  modelId,
+  includeClipAudio = false,
+}: AssembleVideoParams): Promise<SerializedFinalVideo> {
   const scenes = await prisma.scene.findMany({
     where: parentWhere(parentType, parentId),
     orderBy: { order: "asc" },
@@ -381,7 +423,7 @@ export async function assembleVideo({ parentType, parentId, modelId }: AssembleV
   try {
     const segmentPaths: string[] = [];
     for (const [index, scene] of scenes.entries()) {
-      segmentPaths.push(await buildSceneSegment(scene, workDir, index));
+      segmentPaths.push(await buildSceneSegment(scene, workDir, index, includeClipAudio));
     }
 
     const finalPath = path.join(workDir, "final.mp4");

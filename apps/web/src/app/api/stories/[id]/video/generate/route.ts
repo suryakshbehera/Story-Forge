@@ -6,6 +6,7 @@ import { FfmpegError } from "@/lib/ffmpeg";
 
 const bodySchema = z.object({
   modelId: z.string().optional(),
+  includeClipAudio: z.boolean().optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -21,7 +22,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const video = await assembleVideo({ parentType: "story", parentId: storyId, modelId: model.modelId });
+    const video = await assembleVideo({
+      parentType: "story",
+      parentId: storyId,
+      modelId: model.modelId,
+      includeClipAudio: body.includeClipAudio,
+    });
     return NextResponse.json(video, { status: 201 });
   } catch (error) {
     if (error instanceof FfmpegError) {

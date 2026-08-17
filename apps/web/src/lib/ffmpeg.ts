@@ -30,6 +30,24 @@ export async function runFfmpeg(args: string[]): Promise<void> {
   }
 }
 
+export async function hasAudioStream(filePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", filePath],
+      { maxBuffer: MAX_BUFFER }
+    );
+    return stdout.trim().length > 0;
+  } catch (error) {
+    if (isMissingBinaryError(error)) {
+      throw new FfmpegError(
+        "ffprobe isn't installed or isn't on PATH. It normally ships alongside ffmpeg — reinstall ffmpeg and confirm `ffprobe -version` works."
+      );
+    }
+    throw new FfmpegError(`ffprobe failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export async function probeDuration(filePath: string): Promise<number> {
   try {
     const { stdout } = await execFileAsync(

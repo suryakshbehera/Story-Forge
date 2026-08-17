@@ -4,6 +4,8 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ModelSelect } from "@/components/model-select";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { Clapperboard, Trash2 } from "lucide-react";
 
 export interface FinalVideoItem {
@@ -27,6 +29,10 @@ export function VideoAssemblyPanel({
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(false);
   const [finalVideos, setFinalVideos] = useState(initialFinalVideos);
+  // Off by default — matches the pre-existing behavior of always discarding
+  // a video clip's own baked-in audio (e.g. Veo3 Lite's generated sound) in
+  // favor of just narration/dialogue/music/sfx.
+  const [includeClipAudio, setIncludeClipAudio] = useState(false);
 
   const base = parentType === "story" ? `/api/stories/${parentId}/video` : `/api/episodes/${parentId}/video`;
 
@@ -40,7 +46,7 @@ export function VideoAssemblyPanel({
       const res = await fetch(`${base}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelId }),
+        body: JSON.stringify({ modelId, includeClipAudio }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -81,12 +87,18 @@ export function VideoAssemblyPanel({
         Stitches every scene&apos;s selected image/clip and narration/dialogue audio, in order, into one final video.
         Each scene needs a selected visual first — missing audio just means a silent scene.
       </p>
-      <div className="flex flex-wrap items-end gap-2">
+      <div className="flex flex-wrap items-end gap-3">
         <ModelSelect jobType="VIDEO" value={modelId} onChange={setModelId} />
         <Button size="sm" onClick={generate} disabled={generating}>
           <Clapperboard className="size-3.5" />
           {generating ? "Assembling…" : "Assemble Final Video"}
         </Button>
+        <div className="flex items-center gap-1.5">
+          <Switch id="include-clip-audio" checked={includeClipAudio} onCheckedChange={setIncludeClipAudio} />
+          <Label htmlFor="include-clip-audio" className="text-xs text-muted-foreground">
+            Include clip audio (e.g. Veo3)
+          </Label>
+        </div>
       </div>
 
       {finalVideos.length > 0 && (

@@ -130,7 +130,15 @@ export async function callChatModel({
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || content.length === 0) {
-    throw new OpenRouterError("OpenRouter returned an empty response.");
+    // Surface whatever OpenRouter/the upstream provider did say — a bare
+    // "empty response" message gave no way to tell a genuine model refusal
+    // (e.g. finish_reason "content_filter"/"length") apart from a transient
+    // provider hiccup without re-reading server logs by hand.
+    const finishReason = data?.choices?.[0]?.finish_reason;
+    const detail = [finishReason && `finish_reason: ${finishReason}`, data?.error && `error: ${JSON.stringify(data.error)}`]
+      .filter(Boolean)
+      .join(", ");
+    throw new OpenRouterError(`OpenRouter returned an empty response.${detail ? ` (${detail})` : ""}`);
   }
 
   return content;

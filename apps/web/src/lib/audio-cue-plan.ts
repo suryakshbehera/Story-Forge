@@ -116,13 +116,32 @@ export async function draftAudioCuePlan({
 
   const userPrompt = [style && `# Style\n${style}`, `# Scene manifest\n${buildManifestText(manifest)}`].filter(Boolean).join("\n\n");
 
-  const raw = await callChatModel({
-    modelId,
-    systemPrompt: CUE_PLAN_SYSTEM_PROMPT,
-    userPrompt,
-    jsonMode: true,
-    videos: [`data:${mimeType};base64,${base64}`],
-  });
+  // A large video attachment (a whole assembled episode) occasionally comes
+  // back with an empty choices[0].message.content on the first attempt —
+  // observed live: an identical retry of the same request succeeded, which
+  // points at transient upstream flakiness on a heavy request rather than a
+  // deterministic problem with the request itself. One retry only — if it's
+  // failing for a real reason (e.g. the video is genuinely too large/long),
+  // retrying forever would just burn time and cost without ever succeeding.
+  let raw: string;
+  try {
+    raw = await callChatModel({
+      modelId,
+      systemPrompt: CUE_PLAN_SYSTEM_PROMPT,
+      userPrompt,
+      jsonMode: true,
+      videos: [`data:${mimeType};base64,${base64}`],
+    });
+  } catch (error) {
+    if (!(error instanceof OpenRouterError) || !error.message.includes("empty response")) throw error;
+    raw = await callChatModel({
+      modelId,
+      systemPrompt: CUE_PLAN_SYSTEM_PROMPT,
+      userPrompt,
+      jsonMode: true,
+      videos: [`data:${mimeType};base64,${base64}`],
+    });
+  }
 
   let parsedJson: unknown;
   try {

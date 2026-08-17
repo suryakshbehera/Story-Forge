@@ -196,78 +196,6 @@ export async function generateImage({
   return { base64: image.b64_json, mimeType: image.media_type ?? "image/png" };
 }
 
-export interface GenerateSpeechParams {
-  modelId: string;
-  text: string;
-  // Provider-specific voice name (e.g. "alloy") — not a fixed enum here for
-  // the same reason Character.voiceName isn't one; see schema.prisma.
-  voice?: string;
-  // Phase 8 — delivery direction (DialogueLine.deliveryNotes) and pace
-  // (DialogueLine.speed). Both are real, documented OpenAI-compatible TTS
-  // params (`instructions`, `speed` on /audio/speech), not a guessed
-  // mechanism — lower-risk than generateAudio() below.
-  instructions?: string;
-  speed?: number;
-}
-
-export interface GeneratedSpeech {
-  base64: string;
-  mimeType: string;
-}
-
-// VOICE goes through OpenRouter's dedicated TTS API (POST /api/v1/audio/speech,
-// OpenAI Audio Speech-compatible) rather than chat completions — same reasoning
-// as generateImage() above: a separate endpoint, not a "modalities" flag on
-// callChatModel. Returns raw audio bytes directly (not JSON) on success.
-//
-// Always requests response_format="pcm" rather than "mp3" — OpenRouter's docs
-// list "pcm" as this endpoint's own default, and in practice some providers
-// (confirmed: Gemini TTS) reject "mp3" outright with a 400. "pcm" is the
-// lowest-common-denominator format every provider on this endpoint accepts.
-// The tradeoff is that PCM comes back headerless, so it's wrapped in a
-// standard WAV header before storage/playback — see wrapPcmAsWav().
-export async function generateSpeech({
-  modelId,
-  text,
-  voice = "alloy",
-  instructions,
-  speed,
-}: GenerateSpeechParams): Promise<GeneratedSpeech> {
-  const apiKey = requireApiKey();
-
-  const response = await fetchWithTimeout(
-    "https://openrouter.ai/api/v1/audio/speech",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: modelId,
-        input: text,
-        voice,
-        response_format: "pcm",
-        ...(instructions ? { instructions } : {}),
-        ...(speed ? { speed } : {}),
-      }),
-    },
-    60_000
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${body}`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.byteLength === 0) {
-    throw new OpenRouterError("OpenRouter returned no audio data.");
-  }
-
-  return { base64: wrapPcmAsWav(buffer).toString("base64"), mimeType: "audio/wav" };
-}
-
 export interface GenerateVideoParams {
   modelId: string;
   prompt: string;
@@ -292,11 +220,11 @@ export interface GeneratedVideo {
 }
 
 // VIDEO_GENERATION goes through OpenRouter's dedicated video API
-// (POST /api/v1/videos) — a third separate endpoint alongside generateImage
-// and generateSpeech above. Unlike those two, video generation is
-// asynchronous: submitting returns a job id/status immediately, and the
-// actual clip is retrieved by polling GET /api/v1/videos/{id} until the job
-// reaches a terminal status, then downloading from the returned URL.
+// (POST /api/v1/videos) — a separate endpoint alongside generateImage above.
+// Unlike that one, video generation is asynchronous: submitting returns a job
+// id/status immediately, and the actual clip is retrieved by polling
+// GET /api/v1/videos/{id} until the job reaches a terminal status, then
+// downloading from the returned URL.
 async function pollVideoJob(jobId: string, apiKey: string): Promise<string> {
   const deadline = Date.now() + 5 * 60 * 1000;
   while (Date.now() < deadline) {
@@ -384,142 +312,7 @@ export async function generateVideo({
   return { base64: buffer.toString("base64"), mimeType };
 }
 
-export interface GenerateAudioParams {
-  modelId: string;
-  prompt: string;
-  durationSeconds?: number;
-}
-
-export interface GeneratedAudio {
-  base64: string;
-  mimeType: string;
-}
-
-// MUSIC_GENERATION / SFX_GENERATION. Unlike generateImage/generateSpeech/
-// generateVideo above, OpenRouter has no dedicated endpoint for music/SFX
-// generation — confirmed against its docs: the only dedicated endpoints are
-// /audio/speech (TTS), /audio/transcriptions (STT), /images, and /videos.
-// OpenRouter's own docs describe every other modality, including audio
-// output from models like Google Lyria or OpenAI's GPT Audio, as running
-// through /chat/completions and differing only by content type/modalities —
-// the same OpenAI-compatible "modalities": ["text","audio"] shape used by
-// audio-output chat models generally (request an `audio.format`, read the
-// result back from `message.audio.data`). This is the least-confirmed
-// primitive in this file (no dedicated-endpoint doc page to point at) — if a
-// specific model's provider expects a different request shape, this is the
-// first place to adjust.
-//
-// Confirmed 2026-08-15 against a live key: OpenRouter rejects a non-streaming
-// audio-output request with 400 "Audio output requires stream: true" for at
-// least some providers. So this always streams (SSE) and reassembles the
-// audio from `choices[0].delta.audio.data` chunks rather than reading a
-// single `message.audio.data` blob off a non-streaming response.
-//
-// Also confirmed same day: OpenAI's audio-output endpoint requires
-// `audio.voice` even for non-speech content (music/SFX) — it's a required
-// param of the shared multimodal endpoint, not a TTS-only concept as
-// originally assumed. Defaulted to "alloy" since music/SFX prompts don't
-// carry a voice choice of their own.
-//
-// Also confirmed same day: OpenAI rejects `audio.format: "mp3"` when
-// stream=true ("does not support 'mp3' ... Supported values are: 'pcm16'").
-// So this requests "pcm16" and wraps the raw PCM in a WAV header via
-// wrapPcmAsWav() below (same 24kHz/16-bit/mono assumption already used for
-// generateSpeech's PCM output) instead of returning MP3 bytes directly.
-export async function generateAudio({ modelId, prompt, durationSeconds }: GenerateAudioParams): Promise<GeneratedAudio> {
-  const apiKey = requireApiKey();
-
-  const userPrompt = durationSeconds ? `${prompt}\n\n(Target length: approximately ${durationSeconds} seconds.)` : prompt;
-
-  const response = await fetchWithTimeout(
-    "https://openrouter.ai/api/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: modelId,
-        modalities: ["text", "audio"],
-        audio: { format: "pcm16", voice: "alloy" },
-        stream: true,
-        messages: [{ role: "user", content: userPrompt }],
-      }),
-    },
-    120_000
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new OpenRouterError(`OpenRouter audio request failed (${response.status}): ${body}`);
-  }
-  if (!response.body) {
-    throw new OpenRouterError("OpenRouter audio request returned no response body.");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let audioBase64 = "";
-  let transcript = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice("data:".length).trim();
-      if (payload === "[DONE]") continue;
-
-      let chunk: unknown;
-      try {
-        chunk = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-
-      const delta = (chunk as { choices?: Array<{ delta?: { audio?: { data?: string; transcript?: string } } }> })
-        ?.choices?.[0]?.delta;
-      if (delta?.audio?.data) audioBase64 += delta.audio.data;
-      if (delta?.audio?.transcript) transcript += delta.audio.transcript;
-    }
-  }
-
-  if (!audioBase64) {
-    throw new OpenRouterError(`OpenRouter returned no audio data.${transcript ? ` (transcript: ${transcript})` : ""}`);
-  }
-
-  const pcm = Buffer.from(audioBase64, "base64");
-  return { base64: wrapPcmAsWav(pcm).toString("base64"), mimeType: "audio/wav" };
-}
-
-// Headerless 16-bit signed little-endian PCM at 24kHz mono — confirmed for
-// Gemini TTS and the de facto standard most speech-only PCM APIs (OpenAI's
-// realtime audio included) use for this endpoint's "pcm" format. Wraps it in
-// a standard 44-byte WAV header so browsers can play it via <audio>.
-function wrapPcmAsWav(pcm: Buffer, sampleRate = 24000, bitsPerSample = 16, channels = 1): Buffer {
-  const blockAlign = channels * (bitsPerSample / 8);
-  const byteRate = sampleRate * blockAlign;
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + pcm.length, 4);
-  header.write("WAVE", 8);
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(channels, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(bitsPerSample, 34);
-  header.write("data", 36);
-  header.writeUInt32LE(pcm.length, 40);
-  return Buffer.concat([header, pcm]);
-}
+// generateSpeech (VOICE) and generateAudio (MUSIC_GENERATION/SFX_GENERATION)
+// used to live here — see apps/web/src/lib/ai/elevenlabs.ts. Phase 10 moved
+// all three job types off this OpenRouter workaround onto ElevenLabs'
+// purpose-built endpoints.

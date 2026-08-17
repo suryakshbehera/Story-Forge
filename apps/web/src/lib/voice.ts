@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { prisma, type Asset } from "@/lib/db";
-import { callChatModel, generateSpeech, OpenRouterError } from "@/lib/ai/openrouter";
+import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
+import { generateSpeech, ElevenLabsError } from "@/lib/ai/elevenlabs";
 import { storage, buildStorageKey } from "@/lib/storage";
 
 export interface SerializedAudioTake {
@@ -47,20 +48,20 @@ export async function generateNarrationAudio({
 }): Promise<SerializedAudioTake> {
   const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
   if (!scene.narration?.trim()) {
-    throw new OpenRouterError("Write a narration script for this scene before generating audio.");
+    throw new ElevenLabsError("Write a narration script for this scene before generating audio.");
   }
 
   const projectId = await resolveSceneProjectId(sceneId);
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
   if (!project.narratorVoiceName?.trim()) {
-    throw new OpenRouterError(
+    throw new ElevenLabsError(
       "Set a Narrator Voice in the Voice Settings panel above before generating narration audio."
     );
   }
 
-  const generated = await generateSpeech({ modelId, text: scene.narration, voice: project.narratorVoiceName });
+  const generated = await generateSpeech({ modelId, text: scene.narration, voiceId: project.narratorVoiceName });
   const buffer = Buffer.from(generated.base64, "base64");
-  const key = buildStorageKey("scenes", sceneId, "narration.wav");
+  const key = buildStorageKey("scenes", sceneId, "narration.mp3");
   await storage.put(key, buffer);
 
   const asset = await prisma.$transaction(async (tx) => {
@@ -72,7 +73,7 @@ export async function generateNarrationAudio({
       data: {
         type: "AUDIO_NARRATION",
         storageKey: key,
-        fileName: "narration.wav",
+        fileName: "narration.mp3",
         mimeType: generated.mimeType,
         sizeBytes: buffer.byteLength,
         narrationSceneId: sceneId,
@@ -466,7 +467,7 @@ export async function generateDialogueAudio({
   // default: an unset voice blocks generation rather than silently reusing
   // a generic voice that two different unassigned characters would share.
   if (!line.character.voiceName?.trim()) {
-    throw new OpenRouterError(
+    throw new ElevenLabsError(
       `Set a voice for ${line.character.name} in their Character profile before generating dialogue audio.`
     );
   }
@@ -474,12 +475,12 @@ export async function generateDialogueAudio({
   const generated = await generateSpeech({
     modelId,
     text: line.text,
-    voice: line.character.voiceName,
+    voiceId: line.character.voiceName,
     instructions: line.deliveryNotes ?? undefined,
     speed: line.speed ?? undefined,
   });
   const buffer = Buffer.from(generated.base64, "base64");
-  const key = buildStorageKey("dialogue-lines", dialogueLineId, "line.wav");
+  const key = buildStorageKey("dialogue-lines", dialogueLineId, "line.mp3");
   await storage.put(key, buffer);
 
   const asset = await prisma.$transaction(async (tx) => {
@@ -491,7 +492,7 @@ export async function generateDialogueAudio({
       data: {
         type: "AUDIO_DIALOGUE",
         storageKey: key,
-        fileName: "line.wav",
+        fileName: "line.mp3",
         mimeType: generated.mimeType,
         sizeBytes: buffer.byteLength,
         dialogueLineId,

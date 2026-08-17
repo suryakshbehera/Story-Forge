@@ -3,7 +3,8 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { prisma, type Asset } from "@/lib/db";
-import { callChatModel, generateAudio, OpenRouterError } from "@/lib/ai/openrouter";
+import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
+import { generateMusic, generateSoundEffect, ElevenLabsError } from "@/lib/ai/elevenlabs";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { probeDuration } from "@/lib/ffmpeg";
 
@@ -160,11 +161,11 @@ async function getSceneVoiceDurationSeconds(sceneId: string): Promise<number | n
 export async function generateSceneMusic({ sceneId, modelId }: { sceneId: string; modelId: string }): Promise<SerializedAudioAsset> {
   const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
   if (!scene.musicPrompt?.trim()) {
-    throw new OpenRouterError("Generate an Audio Plan first, or write a music prompt manually.");
+    throw new ElevenLabsError("Generate an Audio Plan first, or write a music prompt manually.");
   }
 
   const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
-  const generated = await generateAudio({ modelId, prompt: scene.musicPrompt, durationSeconds: durationSeconds ?? undefined });
+  const generated = await generateMusic({ prompt: scene.musicPrompt, durationSeconds: durationSeconds ?? undefined });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `music.${extFromMime(generated.mimeType)}`;
   const key = buildStorageKey("scenes", sceneId, fileName);
@@ -236,11 +237,11 @@ export async function deleteSceneMusic(sceneId: string, assetId: string): Promis
 export async function generateSceneSfx({ sceneId, modelId }: { sceneId: string; modelId: string }): Promise<SerializedAudioAsset> {
   const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
   if (!scene.sfxPrompt?.trim()) {
-    throw new OpenRouterError("Generate an Audio Plan first, or write an sfx prompt manually.");
+    throw new ElevenLabsError("Generate an Audio Plan first, or write an sfx prompt manually.");
   }
 
   const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
-  const generated = await generateAudio({ modelId, prompt: scene.sfxPrompt, durationSeconds: durationSeconds ?? undefined });
+  const generated = await generateSoundEffect({ modelId, prompt: scene.sfxPrompt, durationSeconds: durationSeconds ?? undefined });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `sfx.${extFromMime(generated.mimeType)}`;
   const key = buildStorageKey("scenes", sceneId, fileName);

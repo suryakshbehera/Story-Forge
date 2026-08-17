@@ -337,11 +337,11 @@ export function SceneManager({
           <CardTitle className="text-base">Voice Settings</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <Field label="Narrator voice (used for every scene's narration in this project)">
+          <Field label="Narrator voice (ElevenLabs voice ID, used for every scene's narration in this project)">
             <div className="flex gap-2">
               <Input
                 className="max-w-xs"
-                placeholder='e.g. "alloy"'
+                placeholder='e.g. "21m00Tcm4TlvDq8ikWAM"'
                 value={narratorVoiceName}
                 onChange={(e) => setNarratorVoiceName(e.target.value)}
               />

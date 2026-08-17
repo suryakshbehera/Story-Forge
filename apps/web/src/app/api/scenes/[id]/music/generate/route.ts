@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
-import { OpenRouterError } from "@/lib/ai/openrouter";
+import { ElevenLabsError } from "@/lib/ai/elevenlabs";
 import { generateSceneMusic } from "@/lib/scene-audio";
 
 const bodySchema = z.object({
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const music = await generateSceneMusic({ sceneId, modelId: model.modelId });
     return NextResponse.json(music, { status: 201 });
   } catch (error) {
-    if (error instanceof OpenRouterError) {
+    if (error instanceof ElevenLabsError) {
       return NextResponse.json({ error: error.message }, { status: 502 });
     }
     throw error;

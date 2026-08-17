@@ -18,11 +18,14 @@ interface SourceDocument {
   createdAt: string;
 }
 
-// Phase 9 — the "kill per-episode setup repetition" entry point. Parsing is
-// a preview only: nothing lands in StoryBible/SeriesBlueprint/Character/
-// Location until Apply is clicked, same "AI prepares, user approves" pattern
-// as every other generation flow in the app — this just fans out to four
-// entities instead of one, hence the extra review step before committing.
+// Phase 9 — the "kill per-episode setup repetition" entry point. Works for
+// both project types: SINGLE gets `preview.story`, SERIES gets
+// `preview.storyBible` + `preview.blueprint` (see story-ingestion.ts) — this
+// panel just renders whichever fields came back. Parsing is a preview only:
+// nothing lands in Story/StoryBible/SeriesBlueprint/Character/Location until
+// Apply is clicked, same "AI prepares, user approves" pattern as every other
+// generation flow in the app — this just fans out to several entities
+// instead of one, hence the extra review step before committing.
 export function DocumentIngestPanel({
   projectId,
   initialSourceDocuments,
@@ -93,7 +96,7 @@ export function DocumentIngestPanel({
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? "Apply failed");
       }
-      toast.success("Applied to Story Bible, Blueprint, Characters, and Locations. Reloading…");
+      toast.success("Applied. Reloading…");
       setTimeout(() => window.location.reload(), 800);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Apply failed.");
@@ -115,9 +118,9 @@ export function DocumentIngestPanel({
       <CardHeader>
         <CardTitle className="text-base">Import from Document</CardTitle>
         <p className="text-xs text-muted-foreground">
-          Upload a series bible, pitch doc, or character sheet once — it drafts the Story Bible, Series Blueprint,
-          Characters, and Locations for you to review before anything is saved. Entirely optional; the fields below
-          work fine on their own too.
+          Upload a bible, pitch doc, or character sheet once — it drafts your Story (or Story Bible + Series
+          Blueprint, for a series), Characters, and Locations for you to review before anything is saved. Entirely
+          optional; the fields below work fine on their own too.
         </p>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -148,12 +151,23 @@ export function DocumentIngestPanel({
             <div className="flex flex-col gap-4 rounded-md border p-4">
               <p className="text-sm font-medium">Preview — nothing is saved yet</p>
 
-              <PreviewField label="Story Bible" summary={summarizeBible(preview)} content={preview.storyBible.content} />
-              <PreviewField
-                label="Series Blueprint"
-                summary={summarizeBlueprint(preview)}
-                content={preview.blueprint.content}
-              />
+              {preview.story && (
+                <PreviewField label="Story" summary={summarizeStory(preview.story)} content={preview.story.content} />
+              )}
+              {preview.storyBible && (
+                <PreviewField
+                  label="Story Bible"
+                  summary={summarizeBible(preview.storyBible)}
+                  content={preview.storyBible.content}
+                />
+              )}
+              {preview.blueprint && (
+                <PreviewField
+                  label="Series Blueprint"
+                  summary={summarizeBlueprint(preview.blueprint)}
+                  content={preview.blueprint.content}
+                />
+              )}
 
               <NameMatchList label="Characters" matches={matches.characters} />
               <NameMatchList label="Locations" matches={matches.locations} />
@@ -212,21 +226,31 @@ export function DocumentIngestPanel({
   );
 }
 
-function summarizeBible(preview: IngestionPreview): Array<[string, string | null | undefined]> {
+function summarizeStory(story: NonNullable<IngestionPreview["story"]>): Array<[string, string | null | undefined]> {
   return [
-    ["Premise", preview.storyBible.premise],
-    ["Genre", preview.storyBible.genre],
-    ["Tone", preview.storyBible.tone],
-    ["Language", preview.storyBible.language],
+    ["Topic", story.topic],
+    ["Premise", story.premise],
+    ["Genre", story.genre],
+    ["Tone", story.tone],
+    ["Duration", story.duration],
   ];
 }
 
-function summarizeBlueprint(preview: IngestionPreview): Array<[string, string | null | undefined]> {
+function summarizeBible(storyBible: NonNullable<IngestionPreview["storyBible"]>): Array<[string, string | null | undefined]> {
   return [
-    ["Act structure", preview.blueprint.actStructure],
-    ["Scene/shot guidance", preview.blueprint.sceneShotGuidance],
-    ["Runtime target", preview.blueprint.runtimeTarget],
-    ["Tone", preview.blueprint.tone],
+    ["Premise", storyBible.premise],
+    ["Genre", storyBible.genre],
+    ["Tone", storyBible.tone],
+    ["Language", storyBible.language],
+  ];
+}
+
+function summarizeBlueprint(blueprint: NonNullable<IngestionPreview["blueprint"]>): Array<[string, string | null | undefined]> {
+  return [
+    ["Act structure", blueprint.actStructure],
+    ["Scene/shot guidance", blueprint.sceneShotGuidance],
+    ["Runtime target", blueprint.runtimeTarget],
+    ["Tone", blueprint.tone],
   ];
 }
 

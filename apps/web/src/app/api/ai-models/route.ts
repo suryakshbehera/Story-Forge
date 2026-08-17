@@ -18,6 +18,10 @@ const JOB_TYPES = [
   "SHOT_PLANNING",
   "DIALOGUE_DIRECTION",
   "SCRIPT_DRAFTING",
+  "STORY_CHAT",
+  "STORY_INGESTION",
+  "BLUEPRINT_PLANNING",
+  "MOTION_PROMPT_DRAFTING",
 ] as const satisfies readonly AiJobType[];
 
 export async function GET(req: NextRequest) {

@@ -2,6 +2,34 @@ import { z } from "zod";
 import { prisma, type Asset } from "@/lib/db";
 import { callChatModel, generateImage, OpenRouterError } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
+import { IMAGE_GENERATION_STALE_MS } from "@/lib/shot-image-generation";
+
+// Atomically claims a shot for image generation by stamping
+// Shot.imageGenerationStartedAt — an existing, non-stale stamp means a
+// generation is genuinely still in flight (this tab, another tab, or a
+// reload of either), so the caller should reject the request rather than
+// starting a second paid job on top of it. Stale stamps (older than
+// IMAGE_GENERATION_STALE_MS) are treated as abandoned and reclaimed, so a
+// crashed request can't block generation forever.
+export async function claimShotForImageGeneration(shotId: string): Promise<boolean> {
+  const staleThreshold = new Date(Date.now() - IMAGE_GENERATION_STALE_MS);
+  const result = await prisma.shot.updateMany({
+    where: {
+      id: shotId,
+      OR: [{ imageGenerationStartedAt: null }, { imageGenerationStartedAt: { lt: staleThreshold } }],
+    },
+    data: { imageGenerationStartedAt: new Date() },
+  });
+  return result.count > 0;
+}
+
+// Always called from a finally in the route handler so the claim is released
+// on both success and failure — an unreleased claim just self-heals once
+// stale, but releasing promptly means the next click doesn't have to wait
+// out the full stale window.
+export async function releaseShotImageGeneration(shotId: string): Promise<void> {
+  await prisma.shot.update({ where: { id: shotId }, data: { imageGenerationStartedAt: null } });
+}
 
 export interface SerializedShotImage {
   id: string;

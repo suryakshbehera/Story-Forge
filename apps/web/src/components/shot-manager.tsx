@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { isImageGenerationActive } from "@/lib/shot-image-generation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -50,6 +51,11 @@ export interface ShotItem {
   cameraMovement: CameraMovement;
   durationSeconds: number | null;
   images: ShotImageItem[];
+  // Non-null and recent means a generation is genuinely in flight (this tab,
+  // another tab, or before a reload) — see lib/shot-image-generation.ts for
+  // the staleness rule that keeps this from being read as "generating"
+  // forever if the server died mid-request.
+  imageGenerationStartedAt: string | null;
 }
 
 // Shots are continuity, not alternates — shot 2 continues the scene from
@@ -227,9 +233,45 @@ function ShotCard({
   const [saving, setSaving] = useState(false);
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [imageGenerating, setImageGenerating] = useState(false);
+  const [imageGenerating, setImageGenerating] = useState(() => isImageGenerationActive(shot.imageGenerationStartedAt));
   const [imageUploading, setImageUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const unmountedRef = useRef(false);
+  useEffect(() => () => {
+    unmountedRef.current = true;
+  }, []);
+
+  // Watches a generation claimed by someone/somewhen else — this tab before
+  // a reload, or another tab entirely — until it finishes, so the spinner
+  // this reflects is always backed by a real in-flight request rather than
+  // stale local state. Stops as soon as the server-side claim clears.
+  async function pollUntilGenerationIdle() {
+    while (!unmountedRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (unmountedRef.current) return;
+      const res = await fetch(`/api/shots/${shot.id}`).catch(() => null);
+      if (!res?.ok) continue;
+      const updated: ShotItem = await res.json();
+      if (!isImageGenerationActive(updated.imageGenerationStartedAt)) {
+        if (!unmountedRef.current) {
+          onUpdate(updated);
+          setImageGenerating(false);
+        }
+        return;
+      }
+    }
+  }
+
+  // Mount-only: picks up a generation already in flight when this card first
+  // renders (page load/reload, or a shot newly scrolled into view) — must
+  // NOT re-run on every `shot` prop update, or a normal click-triggered
+  // generation would spuriously kick off a second poll loop alongside it.
+  useEffect(() => {
+    if (isImageGenerationActive(shot.imageGenerationStartedAt)) {
+      pollUntilGenerationIdle();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const dirty =
     description !== shot.description ||
@@ -308,20 +350,33 @@ function ShotCard({
           instructions: imageInstructions,
         }),
       });
+      // Another generation is already claimed for this shot (this tab from
+      // before a reload, or another tab) — stay in the "Generating…" state
+      // and watch for it to finish instead of erroring out into a button
+      // that would just 409 again on the next click.
+      if (res.status === 409) {
+        toast.warning("Already generating for this shot — watching for it to finish.");
+        pollUntilGenerationIdle();
+        return;
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? "Image generation failed.");
       }
       const data: { image: ShotImageItem; missingReferenceFor: string[] } = await res.json();
-      onUpdate({ ...shot, images: [data.image, ...shot.images.map((img) => ({ ...img, isSelected: false }))] });
+      onUpdate({
+        ...shot,
+        imageGenerationStartedAt: null,
+        images: [data.image, ...shot.images.map((img) => ({ ...img, isSelected: false }))],
+      });
       if (data.missingReferenceFor.length > 0) {
         toast.warning(`No reference image for: ${data.missingReferenceFor.join(", ")} — consistency wasn't checked.`);
       } else {
         toast.success("Image generated.");
       }
+      setImageGenerating(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Image generation failed.");
-    } finally {
       setImageGenerating(false);
     }
   }

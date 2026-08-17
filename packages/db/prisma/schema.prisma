@@ -341,6 +341,15 @@ model Shot {
 
   images Asset[] @relation("ShotImages")
 
+  // Set right before an image-generation call starts, cleared in a finally
+  // once it ends (success or failure) — lets the UI show a persisted
+  // "Generating…" state across a page reload and lets the API reject a
+  // second concurrent generate call as a duplicate. Treated as stale (i.e.
+  // no generation is actually running) once older than the API route's
+  // IMAGE_GENERATION_STALE_MS, so a crashed request can't leave this stuck
+  // forever — see /api/shots/[id]/images/generate.
+  imageGenerationStartedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

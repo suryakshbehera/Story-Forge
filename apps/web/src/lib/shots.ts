@@ -25,6 +25,11 @@ export type ShotWithImages = Prisma.ShotGetPayload<{ include: typeof SHOT_INCLUD
 export function mapShotImages<T extends ShotWithImages>(shot: T) {
   return {
     ...shot,
+    // A Date here would cross the server→client boundary as a real Date
+    // instance for SSR-provided initial props (React Flight supports that)
+    // but as a string for every fetch()-based update — normalize to string
+    // always so ShotItem's shape is consistent regardless of source.
+    imageGenerationStartedAt: shot.imageGenerationStartedAt?.toISOString() ?? null,
     images: shot.images.map((img) => ({
       id: img.id,
       url: storage.url(img.storageKey),

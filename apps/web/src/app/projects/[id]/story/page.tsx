@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { listVersions } from "@/lib/versioning";
 import { StoryEditor } from "@/components/story-editor";
+import { DocumentIngestPanel } from "@/components/document-ingest-panel";
 import { StyleAnchorCard } from "@/components/style-anchor-card";
 import { StoryChatPanel } from "@/components/story-chat-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,7 +11,11 @@ export default async function StoryPage({ params }: { params: Promise<{ id: stri
   const { id } = await params;
   const project = await prisma.project.findUnique({
     where: { id },
-    include: { story: true, styleReferences: true },
+    include: {
+      story: true,
+      styleReferences: true,
+      sourceDocuments: { orderBy: { createdAt: "desc" } },
+    },
   });
   if (!project) notFound();
   if (project.type !== "SINGLE" || !project.story) redirect(`/projects/${id}/bible`);
@@ -19,6 +24,16 @@ export default async function StoryPage({ params }: { params: Promise<{ id: stri
 
   return (
     <div className="flex flex-col gap-4">
+      <DocumentIngestPanel
+        projectId={id}
+        initialSourceDocuments={project.sourceDocuments.map((d) => ({
+          id: d.id,
+          fileName: d.fileName,
+          storageKey: d.storageKey,
+          createdAt: d.createdAt.toISOString(),
+        }))}
+      />
+
       <StoryEditor
         projectId={id}
         initialFields={{

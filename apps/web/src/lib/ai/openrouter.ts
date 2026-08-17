@@ -41,6 +41,40 @@ function requireApiKey(): string {
   return apiKey;
 }
 
+// None of the calls below had a timeout — a stalled upstream provider (no
+// response, no error) left the client's "Generating…" spinner stuck forever
+// with no way to recover short of a page reload. Every OpenRouter fetch now
+// aborts after a generous but finite budget so a stall surfaces as a clear
+// OpenRouterError instead.
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new OpenRouterError(`OpenRouter request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+    }
+    // Node's fetch (undici) reports DNS/connection failures as a generic
+    // "TypeError: fetch failed", with the real reason on `.cause` (e.g.
+    // ENOTFOUND when DNS can't resolve openrouter.ai, ECONNRESET/ECONNREFUSED
+    // for a dropped/refused connection). Left as-is this isn't an
+    // OpenRouterError, so it would skip every route handler's `if (error
+    // instanceof OpenRouterError) return 502` branch and surface as an
+    // opaque, unhandled 500 instead — wrapping it here turns a real network
+    // hiccup on the server's own connection into a plain, actionable message.
+    const cause = error instanceof Error ? (error.cause as { code?: string } | undefined) : undefined;
+    if (cause?.code) {
+      throw new OpenRouterError(
+        `Couldn't reach OpenRouter (${cause.code}) — check the internet connection on the machine running this server and try again.`
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // The one reusable AI-call primitive for this phase — every text generation
 // job (story writing, scene planning, image prompts/validation, etc.) routes
 // through here with a different modelId pulled from the AiModelOption
@@ -66,23 +100,27 @@ export async function callChatModel({
       ]
     : userPrompt;
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const response = await fetchWithTimeout(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        temperature,
+        ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...(history ?? []),
+          { role: "user", content: userContent },
+        ],
+      }),
     },
-    body: JSON.stringify({
-      model: modelId,
-      temperature,
-      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...(history ?? []),
-        { role: "user", content: userContent },
-      ],
-    }),
-  });
+    120_000
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -124,21 +162,25 @@ export async function generateImage({
 }: GenerateImageParams): Promise<GeneratedImage> {
   const apiKey = requireApiKey();
 
-  const response = await fetch("https://openrouter.ai/api/v1/images", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const response = await fetchWithTimeout(
+    "https://openrouter.ai/api/v1/images",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        prompt,
+        aspect_ratio: aspectRatio,
+        ...(inputReferences && inputReferences.length > 0
+          ? { input_references: inputReferences.map((url) => ({ type: "image_url", image_url: { url } })) }
+          : {}),
+      }),
     },
-    body: JSON.stringify({
-      model: modelId,
-      prompt,
-      aspect_ratio: aspectRatio,
-      ...(inputReferences && inputReferences.length > 0
-        ? { input_references: inputReferences.map((url) => ({ type: "image_url", image_url: { url } })) }
-        : {}),
-    }),
-  });
+    180_000
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -193,21 +235,25 @@ export async function generateSpeech({
 }: GenerateSpeechParams): Promise<GeneratedSpeech> {
   const apiKey = requireApiKey();
 
-  const response = await fetch("https://openrouter.ai/api/v1/audio/speech", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const response = await fetchWithTimeout(
+    "https://openrouter.ai/api/v1/audio/speech",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        input: text,
+        voice,
+        response_format: "pcm",
+        ...(instructions ? { instructions } : {}),
+        ...(speed ? { speed } : {}),
+      }),
     },
-    body: JSON.stringify({
-      model: modelId,
-      input: text,
-      voice,
-      response_format: "pcm",
-      ...(instructions ? { instructions } : {}),
-      ...(speed ? { speed } : {}),
-    }),
-  });
+    60_000
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -254,9 +300,11 @@ export interface GeneratedVideo {
 async function pollVideoJob(jobId: string, apiKey: string): Promise<string> {
   const deadline = Date.now() + 5 * 60 * 1000;
   while (Date.now() < deadline) {
-    const response = await fetch(`https://openrouter.ai/api/v1/videos/${jobId}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
+    const response = await fetchWithTimeout(
+      `https://openrouter.ai/api/v1/videos/${jobId}`,
+      { headers: { Authorization: `Bearer ${apiKey}` } },
+      20_000
+    );
     if (!response.ok) {
       const body = await response.text();
       throw new OpenRouterError(`OpenRouter video status check failed (${response.status}): ${body}`);
@@ -284,28 +332,32 @@ export async function generateVideo({
 }: GenerateVideoParams): Promise<GeneratedVideo> {
   const apiKey = requireApiKey();
 
-  const submitResponse = await fetch("https://openrouter.ai/api/v1/videos", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const submitResponse = await fetchWithTimeout(
+    "https://openrouter.ai/api/v1/videos",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        prompt,
+        ...(durationSeconds ? { duration: durationSeconds } : {}),
+        ...(imageDataUri
+          ? {
+              frame_images: [
+                { type: "image_url", image_url: { url: imageDataUri }, frame_type: "first_frame" },
+                ...(lastFrameDataUri
+                  ? [{ type: "image_url", image_url: { url: lastFrameDataUri }, frame_type: "last_frame" }]
+                  : []),
+              ],
+            }
+          : {}),
+      }),
     },
-    body: JSON.stringify({
-      model: modelId,
-      prompt,
-      ...(durationSeconds ? { duration: durationSeconds } : {}),
-      ...(imageDataUri
-        ? {
-            frame_images: [
-              { type: "image_url", image_url: { url: imageDataUri }, frame_type: "first_frame" },
-              ...(lastFrameDataUri
-                ? [{ type: "image_url", image_url: { url: lastFrameDataUri }, frame_type: "last_frame" }]
-                : []),
-            ],
-          }
-        : {}),
-    }),
-  });
+    60_000
+  );
 
   if (!submitResponse.ok) {
     const body = await submitResponse.text();
@@ -315,7 +367,11 @@ export async function generateVideo({
   const submitted = await submitResponse.json();
   const downloadUrl = await pollVideoJob(submitted.id, apiKey);
 
-  const contentResponse = await fetch(downloadUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+  const contentResponse = await fetchWithTimeout(
+    downloadUrl,
+    { headers: { Authorization: `Bearer ${apiKey}` } },
+    60_000
+  );
   if (!contentResponse.ok) {
     throw new OpenRouterError(`OpenRouter video download failed (${contentResponse.status}).`);
   }
@@ -375,20 +431,24 @@ export async function generateAudio({ modelId, prompt, durationSeconds }: Genera
 
   const userPrompt = durationSeconds ? `${prompt}\n\n(Target length: approximately ${durationSeconds} seconds.)` : prompt;
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const response = await fetchWithTimeout(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        modalities: ["text", "audio"],
+        audio: { format: "pcm16", voice: "alloy" },
+        stream: true,
+        messages: [{ role: "user", content: userPrompt }],
+      }),
     },
-    body: JSON.stringify({
-      model: modelId,
-      modalities: ["text", "audio"],
-      audio: { format: "pcm16", voice: "alloy" },
-      stream: true,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
+    120_000
+  );
 
   if (!response.ok) {
     const body = await response.text();

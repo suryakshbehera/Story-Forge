@@ -1,59 +1,79 @@
 import { z } from "zod";
-import { prisma } from "@/lib/db";
+import { prisma, type ProjectType } from "@/lib/db";
 import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
 import { createVersion } from "@/lib/versioning";
 
 // Phase 9 — one-time document ingestion. Modeled directly on
 // lib/scenes.ts's generateScenes(): strict-JSON system prompt, zod-validated
 // response, JSON.parse/safeParse -> OpenRouterError on failure. Parsing is a
-// preview only — nothing is written to StoryBible/SeriesBlueprint/Character/
-// Location until applyIngestionPreview() is called (the "Apply" click).
+// preview only — nothing is written to Story/StoryBible/SeriesBlueprint/
+// Character/Location until applyIngestionPreview() is called ("Apply").
+//
+// SINGLE projects get `story` (mirrors the Story model); SERIES projects get
+// `storyBible` + `blueprint` (SeriesBlueprint has no SINGLE-video analog —
+// there are no episodes for a format shape to apply across). Both optional
+// in the schema so one response type covers either path; parseStoryDocument
+// only ever asks the model to fill the one relevant to the project's type.
 
 const nullableText = () => z.string().nullable().optional();
 
+const characterSchema = z.object({
+  name: z.string().min(1),
+  identity: nullableText(),
+  appearance: nullableText(),
+  personality: nullableText(),
+  clothing: nullableText(),
+  background: nullableText(),
+  characterArc: nullableText(),
+});
+
+const locationSchema = z.object({
+  name: z.string().min(1),
+  description: nullableText(),
+  architecture: nullableText(),
+  environment: nullableText(),
+  timeWeather: nullableText(),
+  visualStyle: nullableText(),
+});
+
 const ingestionResponseSchema = z.object({
-  storyBible: z.object({
-    premise: nullableText(),
-    genre: nullableText(),
-    tone: nullableText(),
-    language: nullableText(),
-    worldRules: nullableText(),
-    visualStyle: nullableText(),
-    timelineNotes: nullableText(),
-    content: z.string().min(1),
-  }),
-  blueprint: z.object({
-    actStructure: nullableText(),
-    sceneShotGuidance: nullableText(),
-    runtimeTarget: nullableText(),
-    tone: nullableText(),
-    content: z.string().min(1),
-  }),
-  characters: z
-    .array(
-      z.object({
-        name: z.string().min(1),
-        identity: nullableText(),
-        appearance: nullableText(),
-        personality: nullableText(),
-        clothing: nullableText(),
-        background: nullableText(),
-        characterArc: nullableText(),
-      })
-    )
-    .default([]),
-  locations: z
-    .array(
-      z.object({
-        name: z.string().min(1),
-        description: nullableText(),
-        architecture: nullableText(),
-        environment: nullableText(),
-        timeWeather: nullableText(),
-        visualStyle: nullableText(),
-      })
-    )
-    .default([]),
+  story: z
+    .object({
+      topic: nullableText(),
+      premise: nullableText(),
+      genre: nullableText(),
+      tone: nullableText(),
+      language: nullableText(),
+      duration: nullableText(),
+      narrationStyle: nullableText(),
+      openingStyle: nullableText(),
+      closingStyle: nullableText(),
+      content: z.string().min(1),
+    })
+    .optional(),
+  storyBible: z
+    .object({
+      premise: nullableText(),
+      genre: nullableText(),
+      tone: nullableText(),
+      language: nullableText(),
+      worldRules: nullableText(),
+      visualStyle: nullableText(),
+      timelineNotes: nullableText(),
+      content: z.string().min(1),
+    })
+    .optional(),
+  blueprint: z
+    .object({
+      actStructure: nullableText(),
+      sceneShotGuidance: nullableText(),
+      runtimeTarget: nullableText(),
+      tone: nullableText(),
+      content: z.string().min(1),
+    })
+    .optional(),
+  characters: z.array(characterSchema).default([]),
+  locations: z.array(locationSchema).default([]),
 });
 
 export type IngestionPreview = z.infer<typeof ingestionResponseSchema>;
@@ -61,31 +81,7 @@ export { ingestionResponseSchema };
 
 // Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
 // appears below to satisfy the provider's json_object requirement.
-const INGESTION_SYSTEM_PROMPT = `You are the Story Ingestion engine inside Narrata, a manual-first AI story/video production studio.
-A producer has uploaded a source document (a series bible, pitch doc, character sheet, or similar) for a new series. Read it and extract everything below as strict JSON — no prose, no markdown code fences, no commentary.
-
-Fill every field you can support from the document. If the document is silent on a field, use your best judgment from context (genre/tone/premise) rather than leaving obvious fields empty — like a writer drafting a first pass, not a form-filler. "content" fields are full prose write-ups (a few paragraphs each), not one-line summaries.
-
-The JSON must match this shape exactly:
-{
-  "storyBible": {
-    "premise": "one-paragraph premise or null",
-    "genre": "short genre label or null",
-    "tone": "short tone label or null",
-    "language": "the document's language, e.g. English, or null",
-    "worldRules": "world-building rules/constraints or null",
-    "visualStyle": "overall visual style description or null",
-    "timelineNotes": "chronology/continuity notes or null",
-    "content": "the full Story Bible write-up, several paragraphs"
-  },
-  "blueprint": {
-    "actStructure": "the series' typical episode act structure (e.g. '3-act: cold open, escalation, resolution') or null",
-    "sceneShotGuidance": "typical scene/shot counts per episode (e.g. '6-8 scenes, 2-3 shots each') or null",
-    "runtimeTarget": "typical episode runtime (e.g. '8-10 minutes') or null",
-    "tone": "short tone label for the format itself or null",
-    "content": "a short write-up of the format shape new episodes should follow"
-  },
-  "characters": [
+const CHARACTERS_LOCATIONS_SHAPE = `  "characters": [
     {
       "name": "character name",
       "identity": "role/identity or null",
@@ -93,7 +89,7 @@ The JSON must match this shape exactly:
       "personality": "personality traits or null",
       "clothing": "typical clothing/costume or null",
       "background": "backstory or null",
-      "characterArc": "arc across the series or null"
+      "characterArc": "arc across the story or null"
     }
   ],
   "locations": [
@@ -110,17 +106,72 @@ The JSON must match this shape exactly:
 
 Only list characters/locations that are actually described or clearly implied in the document. Use an empty array if none are described.`;
 
+function buildIngestionSystemPrompt(projectType: ProjectType): string {
+  const intro = `You are the Story Ingestion engine inside Narrata, a manual-first AI story/video production studio.
+A producer has uploaded a source document (a bible, pitch doc, character sheet, or similar) for a ${
+    projectType === "SINGLE" ? "single video" : "series"
+  }. Read it and extract everything below as strict JSON — no prose, no markdown code fences, no commentary.
+
+Fill every field you can support from the document. If the document is silent on a field, use your best judgment from context (genre/tone/premise) rather than leaving obvious fields empty — like a writer drafting a first pass, not a form-filler. "content" fields are full prose write-ups (a few paragraphs each), not one-line summaries.
+
+The JSON must match this shape exactly:
+{
+`;
+
+  const singleShape = `  "story": {
+    "topic": "short topic/subject line or null",
+    "premise": "one-paragraph premise or null",
+    "genre": "short genre label or null",
+    "tone": "short tone label or null",
+    "language": "the document's language, e.g. English, or null",
+    "duration": "target duration, e.g. '5-7 minutes', or null",
+    "narrationStyle": "style of narration, e.g. first-person reflective, or null",
+    "openingStyle": "how the video should open or null",
+    "closingStyle": "how the video should close or null",
+    "content": "the full Story write-up, several paragraphs"
+  },
+`;
+
+  const seriesShape = `  "storyBible": {
+    "premise": "one-paragraph premise or null",
+    "genre": "short genre label or null",
+    "tone": "short tone label or null",
+    "language": "the document's language, e.g. English, or null",
+    "worldRules": "world-building rules/constraints or null",
+    "visualStyle": "overall visual style description or null",
+    "timelineNotes": "chronology/continuity notes or null",
+    "content": "the full Story Bible write-up, several paragraphs"
+  },
+  "blueprint": {
+    "actStructure": "the series' typical episode act structure (e.g. '3-act: cold open, escalation, resolution') or null",
+    "sceneShotGuidance": "typical scene/shot counts per episode (e.g. '6-8 scenes, 2-3 shots each') or null",
+    "runtimeTarget": "typical episode runtime (e.g. '8-10 minutes') or null",
+    "tone": "short tone label for the format itself or null",
+    "content": "a short write-up of the format shape new episodes should follow"
+  },
+`;
+
+  return intro + (projectType === "SINGLE" ? singleShape : seriesShape) + CHARACTERS_LOCATIONS_SHAPE;
+}
+
 interface ParseStoryDocumentParams {
   text: string;
   modelId: string;
+  projectType: ProjectType;
 }
 
-export async function parseStoryDocument({ text, modelId }: ParseStoryDocumentParams): Promise<IngestionPreview> {
-  const userPrompt = `# Source Document\n${text}\n\n# Instructions\nExtract the Story Bible, Series Blueprint, Characters, and Locations from this document now, as JSON.`;
+export async function parseStoryDocument({
+  text,
+  modelId,
+  projectType,
+}: ParseStoryDocumentParams): Promise<IngestionPreview> {
+  const userPrompt = `# Source Document\n${text}\n\n# Instructions\nExtract the ${
+    projectType === "SINGLE" ? "Story" : "Story Bible, Series Blueprint,"
+  } Characters, and Locations from this document now, as JSON.`;
 
   const raw = await callChatModel({
     modelId,
-    systemPrompt: INGESTION_SYSTEM_PROMPT,
+    systemPrompt: buildIngestionSystemPrompt(projectType),
     userPrompt,
     jsonMode: true,
   });
@@ -177,6 +228,7 @@ function fillIfBlank(existing: string | null, incoming?: string | null): string 
 
 interface ApplyIngestionPreviewParams {
   projectId: string;
+  projectType: ProjectType;
   preview: IngestionPreview;
   modelId: string;
   sourceFileName?: string;
@@ -191,58 +243,92 @@ export interface ApplyIngestionResult {
 
 export async function applyIngestionPreview({
   projectId,
+  projectType,
   preview,
   modelId,
   sourceFileName,
 }: ApplyIngestionPreviewParams): Promise<ApplyIngestionResult> {
   const versionPrompt = `Document ingestion${sourceFileName ? ` — ${sourceFileName}` : ""}`;
 
-  const storyBible = await prisma.storyBible.findUniqueOrThrow({ where: { projectId } });
-  await createVersion({
-    entityType: "STORY_BIBLE",
-    entityId: storyBible.id,
-    payload: { content: preview.storyBible.content },
-    createdBy: "AI",
-    prompt: versionPrompt,
-    modelId,
-  });
-  await prisma.storyBible.update({
-    where: { projectId },
-    data: {
-      premise: preview.storyBible.premise ?? null,
-      genre: preview.storyBible.genre ?? null,
-      tone: preview.storyBible.tone ?? null,
-      language: preview.storyBible.language ?? null,
-      worldRules: preview.storyBible.worldRules ?? null,
-      visualStyle: preview.storyBible.visualStyle ?? null,
-      timelineNotes: preview.storyBible.timelineNotes ?? null,
-      content: preview.storyBible.content,
-    },
-  });
+  if (projectType === "SINGLE") {
+    if (!preview.story) {
+      throw new OpenRouterError("AI response didn't include Story fields for this single-video project.");
+    }
+    const story = await prisma.story.findUniqueOrThrow({ where: { projectId } });
+    await createVersion({
+      entityType: "STORY",
+      entityId: story.id,
+      payload: { content: preview.story.content },
+      createdBy: "AI",
+      prompt: versionPrompt,
+      modelId,
+    });
+    await prisma.story.update({
+      where: { projectId },
+      data: {
+        topic: preview.story.topic ?? null,
+        premise: preview.story.premise ?? null,
+        genre: preview.story.genre ?? null,
+        tone: preview.story.tone ?? null,
+        language: preview.story.language ?? null,
+        duration: preview.story.duration ?? null,
+        narrationStyle: preview.story.narrationStyle ?? null,
+        openingStyle: preview.story.openingStyle ?? null,
+        closingStyle: preview.story.closingStyle ?? null,
+        content: preview.story.content,
+      },
+    });
+  } else {
+    if (!preview.storyBible || !preview.blueprint) {
+      throw new OpenRouterError("AI response didn't include Story Bible/Blueprint fields for this series project.");
+    }
+    const storyBible = await prisma.storyBible.findUniqueOrThrow({ where: { projectId } });
+    await createVersion({
+      entityType: "STORY_BIBLE",
+      entityId: storyBible.id,
+      payload: { content: preview.storyBible.content },
+      createdBy: "AI",
+      prompt: versionPrompt,
+      modelId,
+    });
+    await prisma.storyBible.update({
+      where: { projectId },
+      data: {
+        premise: preview.storyBible.premise ?? null,
+        genre: preview.storyBible.genre ?? null,
+        tone: preview.storyBible.tone ?? null,
+        language: preview.storyBible.language ?? null,
+        worldRules: preview.storyBible.worldRules ?? null,
+        visualStyle: preview.storyBible.visualStyle ?? null,
+        timelineNotes: preview.storyBible.timelineNotes ?? null,
+        content: preview.storyBible.content,
+      },
+    });
 
-  const blueprint = await prisma.seriesBlueprint.upsert({
-    where: { projectId },
-    create: { projectId },
-    update: {},
-  });
-  await createVersion({
-    entityType: "SERIES_BLUEPRINT",
-    entityId: blueprint.id,
-    payload: { content: preview.blueprint.content },
-    createdBy: "AI",
-    prompt: versionPrompt,
-    modelId,
-  });
-  await prisma.seriesBlueprint.update({
-    where: { projectId },
-    data: {
-      actStructure: preview.blueprint.actStructure ?? null,
-      sceneShotGuidance: preview.blueprint.sceneShotGuidance ?? null,
-      runtimeTarget: preview.blueprint.runtimeTarget ?? null,
-      tone: preview.blueprint.tone ?? null,
-      content: preview.blueprint.content,
-    },
-  });
+    const blueprint = await prisma.seriesBlueprint.upsert({
+      where: { projectId },
+      create: { projectId },
+      update: {},
+    });
+    await createVersion({
+      entityType: "SERIES_BLUEPRINT",
+      entityId: blueprint.id,
+      payload: { content: preview.blueprint.content },
+      createdBy: "AI",
+      prompt: versionPrompt,
+      modelId,
+    });
+    await prisma.seriesBlueprint.update({
+      where: { projectId },
+      data: {
+        actStructure: preview.blueprint.actStructure ?? null,
+        sceneShotGuidance: preview.blueprint.sceneShotGuidance ?? null,
+        runtimeTarget: preview.blueprint.runtimeTarget ?? null,
+        tone: preview.blueprint.tone ?? null,
+        content: preview.blueprint.content,
+      },
+    });
+  }
 
   const [existingCharacters, existingLocations] = await Promise.all([
     prisma.character.findMany({ where: { projectId } }),

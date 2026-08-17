@@ -9,6 +9,15 @@ const patchSchema = z.object({
   durationSeconds: z.number().int().positive().optional().nullable(),
 });
 
+// Polled by the client while a persisted "Generating…" state is active (see
+// ShotManager) so a reload — or another tab — can tell when a generation
+// claimed by claimShotForImageGeneration actually finishes.
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const shot = await prisma.shot.findUniqueOrThrow({ where: { id }, include: SHOT_INCLUDE });
+  return NextResponse.json(mapShotImages(shot));
+}
+
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const body = patchSchema.parse(await req.json());

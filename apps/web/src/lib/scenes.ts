@@ -49,6 +49,9 @@ export function mapSceneShots<T extends SceneWithTags>(scene: T) {
     ...scene,
     shots: scene.shots.map((shot) => ({
       ...shot,
+      // See mapShotImages in lib/shots.ts for why this needs an explicit
+      // stringify rather than passing the Date straight through.
+      imageGenerationStartedAt: shot.imageGenerationStartedAt?.toISOString() ?? null,
       images: shot.images.map((img) => ({
         id: img.id,
         url: storage.url(img.storageKey),

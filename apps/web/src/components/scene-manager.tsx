@@ -68,6 +68,18 @@ export interface SceneItem {
   sfx: AudioTake[];
 }
 
+// Cycled per scene purely so adjacent scenes are visually distinguishable
+// at a glance — low-opacity so it reads as a tint, not a solid fill, and
+// stays legible in both light and dark mode.
+const SCENE_COLORS = [
+  "bg-rose-500/5 border-rose-500/20",
+  "bg-amber-500/5 border-amber-500/20",
+  "bg-emerald-500/5 border-emerald-500/20",
+  "bg-sky-500/5 border-sky-500/20",
+  "bg-violet-500/5 border-violet-500/20",
+  "bg-pink-500/5 border-pink-500/20",
+];
+
 const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
   ILLUSTRATION: "Illustration",
   IMAGE_TO_VIDEO: "Image → Video",
@@ -390,6 +402,7 @@ export function SceneManager({
               scene={scene}
               isFirst={index === 0}
               isLast={index === scenes.length - 1}
+              colorClass={SCENE_COLORS[index % SCENE_COLORS.length]}
               characters={characters}
               locations={locations}
               onUpdate={updateScene}
@@ -469,6 +482,7 @@ function SceneRow({
   scene,
   isFirst,
   isLast,
+  colorClass,
   characters,
   locations,
   onUpdate,
@@ -484,6 +498,7 @@ function SceneRow({
   scene: SceneItem;
   isFirst: boolean;
   isLast: boolean;
+  colorClass: string;
   characters: TagOption[];
   locations: TagOption[];
   onUpdate: (scene: SceneItem) => void;
@@ -585,7 +600,7 @@ function SceneRow({
   }
 
   return (
-    <Card>
+    <Card className={colorClass}>
       <CardHeader className="flex flex-row items-center justify-between gap-2">
         <CardTitle className="text-base">
           #{scene.order} {title || <span className="text-muted-foreground">Untitled Scene</span>}

@@ -8,21 +8,16 @@ import { parseStoryDocument, matchExistingNames } from "@/lib/story-ingestion";
 
 const MAX_BYTES = 20 * 1024 * 1024;
 
-// Phase 9 — parses an uploaded PDF/DOCX into a StoryBible + SeriesBlueprint +
-// Characters + Locations preview. This is a read-only draft: the source file
-// is stored (same reasoning as any other upload — traceability/re-parsing),
-// but nothing is written to StoryBible/SeriesBlueprint/Character/Location
-// until POST .../ingest/apply is called with the (possibly edited) preview.
+// Phase 9 — parses an uploaded PDF/DOCX into a Story (single video) or
+// StoryBible + SeriesBlueprint (series) + Characters + Locations preview.
+// This is a read-only draft: the source file is stored (same reasoning as
+// any other upload — traceability/re-parsing), but nothing is written to
+// Story/StoryBible/SeriesBlueprint/Character/Location until POST
+// .../ingest/apply is called with the (possibly edited) preview.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: projectId } = await params;
 
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
-  if (project.type !== "SERIES") {
-    return NextResponse.json(
-      { error: "Document ingestion is only available for Series projects." },
-      { status: 400 }
-    );
-  }
 
   const formData = await req.formData();
   const file = formData.get("file");
@@ -65,7 +60,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   try {
     const text = await extractTextFromDocument(file);
-    const preview = await parseStoryDocument({ text, modelId: model.modelId });
+    const preview = await parseStoryDocument({ text, modelId: model.modelId, projectType: project.type });
     const matches = await matchExistingNames(projectId, preview);
     return NextResponse.json({ sourceAsset, preview, matches, modelId: model.modelId });
   } catch (error) {

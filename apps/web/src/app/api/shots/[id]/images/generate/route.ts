@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
 import { OpenRouterError } from "@/lib/ai/openrouter";
-import { generateShotImage } from "@/lib/shot-images";
+import { generateShotImage, claimShotForImageGeneration, releaseShotImageGeneration } from "@/lib/shot-images";
 
 const bodySchema = z.object({
   promptModelId: z.string().optional(),
@@ -34,6 +34,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     );
   }
 
+  // Claimed after the model checks above (so a 400 never mutates state) and
+  // released in `finally` below (so both success and failure clear it) — see
+  // claimShotForImageGeneration for the staleness rule that keeps this from
+  // getting stuck if the server dies mid-request.
+  const claimed = await claimShotForImageGeneration(shotId);
+  if (!claimed) {
+    return NextResponse.json(
+      { error: "Image generation is already in progress for this shot." },
+      { status: 409 }
+    );
+  }
+
   try {
     const result = await generateShotImage({
       shotId,
@@ -49,5 +61,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return NextResponse.json({ error: error.message }, { status: 502 });
     }
     throw error;
+  } finally {
+    await releaseShotImageGeneration(shotId);
   }
 }

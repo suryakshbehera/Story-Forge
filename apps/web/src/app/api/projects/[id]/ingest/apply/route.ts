@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { prisma } from "@/lib/db";
 import { applyIngestionPreview, ingestionResponseSchema } from "@/lib/story-ingestion";
 
 const bodySchema = z.object({
@@ -15,7 +16,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { id: projectId } = await params;
   const { preview, modelId, sourceFileName } = bodySchema.parse(await req.json());
 
-  const result = await applyIngestionPreview({ projectId, preview, modelId, sourceFileName });
+  const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
+  const result = await applyIngestionPreview({ projectId, projectType: project.type, preview, modelId, sourceFileName });
 
   return NextResponse.json(result);
 }

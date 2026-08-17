@@ -45,6 +45,7 @@ const JOB_TYPES = [
   "STORY_INGESTION",
   "BLUEPRINT_PLANNING",
   "MOTION_PROMPT_DRAFTING",
+  "AUDIO_CUE_PLANNING",
 ] as const;
 
 type JobType = (typeof JOB_TYPES)[number];
@@ -69,6 +70,7 @@ const JOB_LABELS: Record<JobType, string> = {
   STORY_INGESTION: "Story Ingestion",
   BLUEPRINT_PLANNING: "Blueprint Planning",
   MOTION_PROMPT_DRAFTING: "Motion Prompt Drafting",
+  AUDIO_CUE_PLANNING: "Audio Cue Planning",
 };
 
 export interface ModelRow {

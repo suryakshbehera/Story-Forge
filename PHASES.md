@@ -5,12 +5,13 @@ tool where AI drafts content on request, but the human always writes, edits,
 locks, and selects the final version. No step auto-runs the next step.
 
 This document tracks what each phase built, grounded in the code and commit
-history in this repo. **Phase 0 through Phase 6 are complete and describe
-what exists today.** Everything from Phase 7 onward is a **proposed
-roadmap**, inferred from schema/enum scaffolding and code comments already in
-the repo (see "Evidence" under each phase) — it has not been built and has
-not been confirmed by the project owner as the committed plan. Treat it as a
-draft to edit, not a spec to build against.
+history in this repo. **Phases marked ✅ Complete describe what exists
+today** (currently Phase 0 through Phase 8, plus Phase 10 and Phase 11 —
+Phase 9 is unverified, see its own section). Sections marked **(proposed)**
+are inferred from schema/enum scaffolding and code comments already in the
+repo (see "Evidence" under each phase) — not built, and not confirmed by the
+project owner as the committed plan. Treat those as a draft to edit, not a
+spec to build against.
 
 ---
 
@@ -586,20 +587,15 @@ pace) so a scene's conversation doesn't all sound the same.
 
 ---
 
-## Proposed roadmap (Phase 9+) — 🚧 not built, not confirmed
+## Phase 9 — One-Time Story Ingestion & Blueprint (proposed)
 
-Everything below is **inferred**, not decided. The evidence is real (an enum
-value, a seed row, a code comment) but none of it is a commitment — no phase
-past Phase 6 has a written scope. Treat this as a reading order, not
-a promise — the actual next phase is whatever the project owner decides next.
-
-Everything from here down came out of a 2026-08-16 planning conversation
-about scaling to **hundreds of episodes across multiple series**, framed
-around one constraint: stay simpler and more efficient, not more
-elaborate. Ordered as the sequence to build in, not by importance — each
-phase assumes the ones above it exist.
-
-### Phase 9 — One-Time Story Ingestion & Blueprint (proposed)
+**Status note added 2026-08-17, unverified:** `AiJobType.STORY_INGESTION`/
+`BLUEPRINT_PLANNING` and a commit message ("Phase 9 blueprint/ingestion
+work") suggest some or all of this is already built, but that wasn't
+re-checked as part of the Phase 10/11 work below — this section is left
+exactly as it read before, neither confirmed done nor reverted to purely
+hypothetical. Check current code (`lib/story-ingestion.ts` and friends)
+before treating it either way.
 
 **Goal:** kill per-episode setup repetition, the actual bottleneck at
 hundreds-of-episodes scale — not any single generation step.
@@ -615,54 +611,174 @@ hundreds-of-episodes scale — not any single generation step.
   a manual click. Same spend-control principle as today, fewer gates to
   click through.
 
-### Phase 10 — ElevenLabs Audio Provider (proposed)
+---
+
+## Phase 10 — ElevenLabs Audio Provider ✅ Complete
 
 **Goal:** replace Phase 7's unconfirmed `generateAudio()` (a workaround on
 OpenRouter's shared chat-completions audio modality) with ElevenLabs'
 purpose-built endpoints for narration, dialogue, music, and SFX.
 
-- `Character.voiceName` / `Project.narratorVoiceName` store ElevenLabs
-  voice IDs instead of free-text OpenRouter voice names.
-- New `elevenlabs.ts` client alongside `openrouter.ts`: TTS, Sound
-  Effects, Music.
-- No schema or pipeline reshape — this is a provider swap inside
-  `generateSpeech()`/`generateAudio()` call sites only. Image/video
-  generation stays on OpenRouter.
+### Data model (`packages/db/prisma/schema.prisma`)
 
-**Why first, before Phase 11:** lowest risk of the audio changes, and an
-immediate quality/consistency win on its own — native voice IDs fit the
-"voice never re-picked per call" rule already in place
-([[voice-consistency-design]]) better than a hacked-together endpoint.
+No schema change — `Character.voiceName` / `Project.narratorVoiceName`
+keep their existing free-text `String?` columns, now expected to hold
+ElevenLabs voice IDs (e.g. `21m00Tcm4TlvDq8ikWAM`) instead of OpenAI-
+compatible voice names like `"alloy"`. `AiModelOption` rows for `VOICE`/
+`MUSIC_GENERATION`/`SFX_GENERATION` were reseeded with `provider:
+"elevenlabs"`; the old OpenRouter rows for those three job types were
+demoted (`isDefault: false`, not deleted) rather than removed, so they
+stay selectable via Settings → AI Models without racing the new default
+on tie-break.
 
-### Phase 11 — Post-Assembly Audio Cue Plan (proposed)
+### Features
+
+- **`apps/web/src/lib/ai/elevenlabs.ts`** (new) — `generateSpeech()`
+  (`POST /v1/text-to-speech/{voice_id}`), `generateSoundEffect()`
+  (`POST /v1/sound-generation`), `generateMusic()` (`POST /v1/music`,
+  always `music_v2`). All three confirmed against ElevenLabs' API
+  reference: `output_format` is a *query* parameter on every endpoint
+  (not a body field, despite similar-looking docs layout), auth is the
+  `xi-api-key` header throughout. Mirrors `openrouter.ts`'s
+  `fetchWithTimeout` hardening (abort timeout, DNS/connection error
+  unwrapping) and `{ base64, mimeType }` return shape.
+- **A full provider swap, not a runtime branch** — `voice.ts` and
+  `scene-audio.ts` call the new client directly for these three job
+  types; `AiModelOption.provider` stays display-only, same as it already
+  was for `VIDEO`'s `"local"`/`"ffmpeg"` row. `generateSpeech()`/
+  `generateAudio()` were deleted from `openrouter.ts` (along with
+  `wrapPcmAsWav()`, now fully unused) rather than left dead.
+- **`DialogueLine.deliveryNotes` → ElevenLabs mapping (least-confirmed
+  part of this integration, same role `generateAudio()` played before
+  Phase 10):** ElevenLabs has no free-text "instructions" param: any
+  non-empty delivery note nudges `voice_settings.style` up from its
+  default (an honest best-effort, not a real translation — see
+  `styleFromInstructions()` in `elevenlabs.ts`).
+- Stored takes are now `audio/mpeg` (`.mp3`) instead of `audio/wav` for
+  these three job types — `video-assembly.ts`'s `extFromMime()` already
+  handled both, so assembly needed no change.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`AiModelOption` seed
+rows, no column changes),
+[`apps/web/src/lib/ai/elevenlabs.ts`](apps/web/src/lib/ai/elevenlabs.ts),
+[`apps/web/src/lib/ai/openrouter.ts`](apps/web/src/lib/ai/openrouter.ts),
+[`apps/web/src/lib/voice.ts`](apps/web/src/lib/voice.ts),
+[`apps/web/src/lib/scene-audio.ts`](apps/web/src/lib/scene-audio.ts),
+[`packages/db/src/seed.ts`](packages/db/src/seed.ts).
+
+---
+
+## Phase 11 — Post-Assembly Audio Cue Plan ✅ Complete
 
 **Goal:** move audio planning from per-scene (blind to pacing) to one pass
 over the fully assembled silent video — how real post-production scores
 to a locked picture, and the fix for "audio review takes too long, once
 per scene."
 
-- **Reorder:** silent visual assembly (Phase 6, minus narration/dialogue/
-  music/sfx) now happens *before* audio planning, not after.
-- New job type (e.g. `AUDIO_CUE_PLANNING`): one AI pass reviews the
-  assembled episode video and outputs a single cue sheet — which shot/time
-  range gets narration, dialogue, music, SFX. Replaces today's per-scene
-  `musicPrompt`/`sfxPrompt` planning step.
-- **Video-input model — confirmed, not a risk.** OpenRouter has a
-  documented Video Inputs API (base64 data URL or public URL, same pattern
-  `generateVideo()` already uses for image inputs), routed to models that
-  support video understanding — Gemini 2.5 Flash/Pro and Gemini 3
-  Flash/Pro Preview all qualify, with enough context window (Gemini 3 Pro:
-  1M tokens) for a full episode's assembled cut. Verified 2026-08-16 via
-  OpenRouter's docs; build directly against `POST /api/v1/chat/completions`
-  with a video content part, same call shape used elsewhere in
-  `openrouter.ts`.
-- Generation stays **per-segment** (per shot/scene, matched to its known
-  duration, via ElevenLabs) — avoids per-call audio-length limits and
-  timing drift that one continuous blind-generated track would hit.
-- New final mix step: composite the generated segments onto the locked
-  picture per the cue sheet's timestamps. This is what Phase 6 originally
-  was, now split into "assemble picture" (early) + "mix sound onto locked
-  picture" (late).
+### Data model (`packages/db/prisma/schema.prisma`)
+
+- `AiJobType.AUDIO_CUE_PLANNING` (migration
+  `20260817150321_phase11_audio_cue_planning`) — the only schema change.
+  `AUDIO_PLANNING` stays in the enum (Postgres can't drop an enum value
+  without a riskier create-new-type/swap/drop-old-type migration) but
+  nothing calls it anymore; its route/UI were deleted.
+- No new tables for the cue sheet itself — a drafted plan proposes new
+  values for the *same* existing fields (`Scene.narration`,
+  `DialogueLine.text`, `Scene.musicPrompt`/`sfxPrompt`) rather than
+  introducing a parallel storage shape.
+
+### Features
+
+- **Reordered duration authority (`apps/web/src/lib/video-assembly.ts`):**
+  each scene's visual segment is now built to its own native/explicit
+  length first — `IMAGE_TO_VIDEO`/`TEXT_TO_VIDEO` use the clip's native
+  probed duration, `ILLUSTRATION` shots use `Shot.durationSeconds`
+  (falling back to the existing 5s default per shot, no longer split
+  across a scene-level total that no longer exists). Voice is then fit to
+  the picture (`padVoiceToMatch`, silence-padded) rather than the other
+  way around; if voice runs *longer* than the picture, the picture
+  freeze-pads to match (`padVisualToMatch`) — narration/dialogue still
+  never gets cut short, same value judgment the old target-duration trim
+  logic made, just applied in the opposite direction.
+- **`assembleSilentPicture()`** (`video-assembly.ts`, new export) — reuses
+  `buildVisualSegment` directly (the same function the real final assembly
+  calls) to concatenate every scene's picture alone, with no
+  narration/dialogue/music/sfx, plus a per-scene manifest (id, order,
+  title, start/duration, tagged characters, existing narration/dialogue/
+  musicPrompt/sfxPrompt). Not persisted as an Asset — built fresh per cue-
+  plan draft in an `os.tmpdir()` scratch dir, same as final assembly.
+- **`apps/web/src/lib/audio-cue-plan.ts`** (new) — `draftAudioCuePlan()`:
+  one `AUDIO_CUE_PLANNING` chat call per story/episode, video-input
+  (`callChatModel`'s `videos` param, same mechanism `MOTION_PROMPT_DRAFTING`
+  uses) attaching the silent picture, strict JSON output proposing
+  narration/dialogue/musicPrompt/sfxPrompt per scene grounded in what the
+  picture actually shows. `applyAudioCuePlan()`: narration/musicPrompt/
+  sfxPrompt always overwrite (same "AI proposes fresh, user can overwrite"
+  idiom used throughout); dialogue lines are additive-only-when-the-scene-
+  currently-has-none, same rule `generateSceneScript` (Script Drafting)
+  already established, for the same reason — existing lines can carry
+  generated audio takes a silent overwrite would orphan.
+- **Supersedes Phase 7's per-scene Audio Plan** — `generateAudioPlan`,
+  its route, and the "Generate Audio Plan" button were deleted rather than
+  kept alongside the new whole-episode pass.
+- **New routes:** `POST /api/stories/[id]/audio-cue-plan/draft`,
+  `POST /api/stories/[id]/audio-cue-plan/apply`, and the same pair under
+  `/api/episodes/[id]/audio-cue-plan/...`. Draft-only, matching every
+  other AI-drafting step here — nothing is saved until Apply.
+- **UI** (`audio-cue-plan-panel.tsx`) — a new "Audio Cue Plan" card
+  between the Scenes card and Final Assembly on both the Story Scenes page
+  and the Episode page: model picker + "Draft Cue Plan", a per-scene
+  review list (editable narration/music/sfx text, removable proposed
+  dialogue lines, a note when a scene's existing dialogue will make its
+  proposal a no-op on apply), and "Apply All". Applying reloads the page
+  (`window.location.reload()`) so the Voice/Audio panels' own client state
+  — initialized once from server props, same as every sibling panel here —
+  picks up the newly-applied values, same pattern `story-chat-panel.tsx`'s
+  "Add to Story/Episode Summary" already used for the identical problem.
+
+### Bugs found and fixed while building this phase
+
+- `apps/web/src/app/api/ai-models/route.ts` had its own independent
+  hardcoded `JOB_TYPES` list (separate from `ai-models-manager.tsx`'s
+  copy) that was missing `AUDIO_CUE_PLANNING` — every past new job type
+  needed updating in both places and this route's copy had been missed
+  before, it just happened to surface now. A request for an unrecognized
+  `jobType` silently fell through to zero filtering, so
+  `GET /api/ai-models?jobType=AUDIO_CUE_PLANNING` returned every job's
+  models unfiltered — `ModelSelect` picked the first `isDefault` row in
+  Postgres enum-declaration order (`MASTER_AI`), not this job's own
+  default. Caught via manual browser testing, which cost one real,
+  unintended OpenRouter call against the wrong model before the fix
+  landed. Fixed by adding the missing entry.
+- `getModelOrDefault()` (`apps/web/src/lib/ai/models.ts`) resolved an
+  explicit `modelId` by id alone, without checking it actually belonged to
+  the requested `jobType` — a client sending a mismatched id (exactly what
+  the bug above produced) would silently use the wrong model rather than
+  falling back to the job's own default. Hardened as a general fix, not
+  just a workaround for the specific bug above.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`AiJobType.AUDIO_CUE_PLANNING`),
+migration `20260817150321_phase11_audio_cue_planning`,
+[`apps/web/src/lib/video-assembly.ts`](apps/web/src/lib/video-assembly.ts),
+[`apps/web/src/lib/audio-cue-plan.ts`](apps/web/src/lib/audio-cue-plan.ts),
+[`apps/web/src/components/audio-cue-plan-panel.tsx`](apps/web/src/components/audio-cue-plan-panel.tsx),
+[`apps/web/src/lib/ai/models.ts`](apps/web/src/lib/ai/models.ts),
+[`apps/web/src/app/api/ai-models/route.ts`](apps/web/src/app/api/ai-models/route.ts).
+
+---
+
+## Proposed roadmap (Phase 12+) — 🚧 not built, not confirmed
+
+Everything below is **inferred**, not decided. The evidence is real (an enum
+value, a seed row, a code comment) but none of it is a commitment — no phase
+past Phase 11 has a written scope. Treat this as a reading order, not
+a promise — the actual next phase is whatever the project owner decides next.
+
+Everything from here down came out of a 2026-08-16 planning conversation
+about scaling to **hundreds of episodes across multiple series**, framed
+around one constraint: stay simpler and more efficient, not more
+elaborate. Ordered as the sequence to build in, not by importance — each
+phase assumes the ones above it exist.
 
 ### Phase 12 — Master AI Orchestrator (proposed)
 

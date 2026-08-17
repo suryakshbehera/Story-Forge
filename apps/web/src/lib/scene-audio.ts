@@ -1,9 +1,7 @@
-import { z } from "zod";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { prisma, type Asset } from "@/lib/db";
-import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
 import { generateMusic, generateSoundEffect, ElevenLabsError } from "@/lib/ai/elevenlabs";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { probeDuration } from "@/lib/ffmpeg";
@@ -28,92 +26,6 @@ function extFromMime(mimeType: string): string {
   if (mimeType === "audio/wav" || mimeType === "audio/x-wav") return "wav";
   if (mimeType === "audio/ogg") return "ogg";
   return "mp3";
-}
-
-// ── Audio Plan — the AUDIO_PLANNING step. Drafts Scene.musicPrompt/sfxPrompt
-// from the scene's own description plus a light genre/tone/visualStyle hint
-// (same style-context idea as shot-images.ts's buildStyleContext, kept as
-// its own small copy here rather than importing — audio planning doesn't
-// need the character/location reference-image joins that file's context
-// query pulls in). One deliberately-scoped-to-this-scene call, never a
-// whole-episode pass — see PHASES.md Phase 7. ──────────────────────────────
-
-async function loadAudioStyleContext(sceneId: string): Promise<{ description: string; style: string | null }> {
-  const scene = await prisma.scene.findUniqueOrThrow({
-    where: { id: sceneId },
-    include: {
-      story: true,
-      episode: { include: { season: { include: { project: { include: { storyBible: true } } } } } },
-    },
-  });
-
-  if (scene.story) {
-    const parts = [scene.story.genre && `Genre: ${scene.story.genre}`, scene.story.tone && `Tone: ${scene.story.tone}`].filter(
-      Boolean
-    );
-    return { description: scene.description, style: parts.length > 0 ? parts.join("\n") : null };
-  }
-
-  const bible = scene.episode?.season.project.storyBible;
-  const parts = [
-    bible?.genre && `Genre: ${bible.genre}`,
-    bible?.tone && `Tone: ${bible.tone}`,
-    bible?.visualStyle && `Visual style: ${bible.visualStyle}`,
-  ].filter(Boolean);
-  return { description: scene.description, style: parts.length > 0 ? parts.join("\n") : null };
-}
-
-const audioPlanResponseSchema = z.object({
-  musicPrompt: z.string(),
-  sfxPrompt: z.string(),
-});
-
-// Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
-// appears below to satisfy the provider's json_object requirement.
-const AUDIO_PLAN_SYSTEM_PROMPT = `You are the Audio Plan step of Narrata's Music/SFX pipeline. Given one scene's description and style context, decide what background music and sound effects (if any) would suit it.
-
-Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
-{
-  "musicPrompt": "a concrete prompt describing the background music (mood, instrumentation, tempo, genre) for a text-to-music model, or an empty string if this scene genuinely doesn't need music",
-  "sfxPrompt": "a concrete prompt describing the sound effect(s) for a text-to-audio model, or an empty string if this scene genuinely doesn't need sfx"
-}
-
-Leave a field empty rather than inventing music/sfx a scene doesn't call for — not every scene needs both.`;
-
-export interface SerializedAudioPlan {
-  musicPrompt: string | null;
-  sfxPrompt: string | null;
-}
-
-export async function generateAudioPlan({ sceneId, modelId }: { sceneId: string; modelId: string }): Promise<SerializedAudioPlan> {
-  const { description, style } = await loadAudioStyleContext(sceneId);
-
-  const userPrompt = [`# Scene\n${description}`, style && `# Style\n${style}`].filter(Boolean).join("\n\n");
-
-  const raw = await callChatModel({
-    modelId,
-    systemPrompt: AUDIO_PLAN_SYSTEM_PROMPT,
-    userPrompt,
-    jsonMode: true,
-  });
-
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(raw);
-  } catch {
-    throw new OpenRouterError("AI returned invalid JSON.");
-  }
-  const parsed = audioPlanResponseSchema.safeParse(parsedJson);
-  if (!parsed.success) {
-    throw new OpenRouterError("AI returned an unexpected shape.");
-  }
-
-  const musicPrompt = parsed.data.musicPrompt.trim() || null;
-  const sfxPrompt = parsed.data.sfxPrompt.trim() || null;
-
-  await prisma.scene.update({ where: { id: sceneId }, data: { musicPrompt, sfxPrompt } });
-
-  return { musicPrompt, sfxPrompt };
 }
 
 // Estimates how long the generated music/sfx clip should be: the scene's

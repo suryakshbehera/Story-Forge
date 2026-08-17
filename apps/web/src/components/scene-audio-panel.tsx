@@ -7,13 +7,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { ModelSelect } from "@/components/model-select";
 import type { AudioTake } from "@/components/scene-voice-panel";
-import { Wand2, Sparkles, Upload, Trash2, Save } from "lucide-react";
+import { Sparkles, Upload, Trash2, Save } from "lucide-react";
 
-// Two independent slots (Music, SFX) sharing one Audio Plan step. The plan
-// (musicPrompt/sfxPrompt) is AI-drafted then user-editable — same pattern as
-// Scene.visualModeReason — and lives on the Scene itself so it's reused as
-// the actual generation prompt below, not just a one-off suggestion. See
-// generateAudioPlan in lib/scene-audio.ts and PHASES.md Phase 7.
+// Two independent slots (Music, SFX). musicPrompt/sfxPrompt are hand-edited
+// here (or populated by the Audio Cue Plan panel above the Scenes card —
+// see audio-cue-plan-panel.tsx / PHASES.md Phase 11) and live on the Scene
+// itself so they're reused as the actual generation prompt below, not just a
+// one-off suggestion.
 export function SceneAudioPanel({
   sceneId,
   initialMusicPrompt,
@@ -40,8 +40,6 @@ export function SceneAudioPanel({
   const [sfxVolume, setSfxVolume] = useState(initialSfxVolume);
   const [savedSfxVolume, setSavedSfxVolume] = useState(initialSfxVolume);
   const [saving, setSaving] = useState(false);
-  const [planModelId, setPlanModelId] = useState("");
-  const [planning, setPlanning] = useState(false);
 
   const dirty =
     musicPrompt !== savedMusicPrompt ||
@@ -75,52 +73,8 @@ export function SceneAudioPanel({
     }
   }
 
-  async function generatePlan() {
-    if (!planModelId) {
-      toast.error("Pick an Audio Planning model first.");
-      return;
-    }
-    if (dirty) {
-      toast.error("Save or discard your edits before generating a new plan.");
-      return;
-    }
-    setPlanning(true);
-    try {
-      const res = await fetch(`/api/scenes/${sceneId}/audio-plan/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelId: planModelId }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Planning failed");
-      }
-      const plan: { musicPrompt: string | null; sfxPrompt: string | null } = await res.json();
-      setMusicPrompt(plan.musicPrompt ?? "");
-      setSavedMusicPrompt(plan.musicPrompt ?? "");
-      setSfxPrompt(plan.sfxPrompt ?? "");
-      setSavedSfxPrompt(plan.sfxPrompt ?? "");
-      toast.success("Audio plan generated — review the prompts below before generating audio.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Planning failed.");
-    } finally {
-      setPlanning(false);
-    }
-  }
-
   return (
     <div className="flex flex-col gap-3 border-t pt-3">
-      <div className="flex flex-wrap items-end gap-2">
-        <Label className="text-xs text-muted-foreground flex-1 min-w-[12rem]">
-          Audio Plan — drafts the two prompts below from this scene (per-scene, not the whole episode at once)
-        </Label>
-        <ModelSelect jobType="AUDIO_PLANNING" value={planModelId} onChange={setPlanModelId} />
-        <Button size="sm" variant="outline" onClick={generatePlan} disabled={planning}>
-          <Wand2 className="size-3.5" />
-          {planning ? "Planning…" : "Generate Audio Plan"}
-        </Button>
-      </div>
-
       <AudioTrackSection
         label="Music"
         sceneId={sceneId}
@@ -130,7 +84,7 @@ export function SceneAudioPanel({
         onPromptChange={setMusicPrompt}
         volume={musicVolume}
         onVolumeChange={setMusicVolume}
-        placeholder="e.g. slow, hopeful piano and strings that build gently — from the Audio Plan above, or written by hand"
+        placeholder="e.g. slow, hopeful piano and strings that build gently — from the Audio Cue Plan above, or written by hand"
         dirty={dirty}
         initialTakes={initialMusic}
       />

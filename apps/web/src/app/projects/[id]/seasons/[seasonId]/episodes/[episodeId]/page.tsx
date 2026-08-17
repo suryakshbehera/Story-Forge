@@ -9,6 +9,7 @@ import { mapSceneAudioData } from "@/lib/scene-audio";
 import { mapFinalVideos } from "@/lib/video-assembly";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
+import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
 import { StoryChatPanel } from "@/components/story-chat-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -129,6 +130,15 @@ export default async function EpisodePage({
             locations={locations}
             initialNarratorVoiceName={project.narratorVoiceName}
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Audio Cue Plan</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <AudioCuePlanPanel parentType="episode" parentId={episodeId} />
         </CardContent>
       </Card>
 

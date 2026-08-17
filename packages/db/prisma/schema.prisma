@@ -674,6 +674,17 @@ enum AiJobType {
   // it has no generated clip yet. Needs a video-input-capable model (e.g.
   // Gemini 2.5 Pro/Flash); see generateSceneVideo in lib/scene-video.ts.
   MOTION_PROMPT_DRAFTING
+  // Phase 11 — one whole-story/episode pass that watches the fully
+  // assembled, still-silent picture (video-input content part, same
+  // mechanism as MOTION_PROMPT_DRAFTING) and proposes narration/dialogue/
+  // musicPrompt/sfxPrompt per scene, grounded in what the assembled picture
+  // actually shows/says rather than each scene's written description in
+  // isolation. Supersedes AUDIO_PLANNING's blind per-scene music/sfx
+  // planning — see draftAudioCuePlan in lib/audio-cue-plan.ts. AUDIO_PLANNING
+  // itself stays in this enum (Postgres can't drop an enum value without a
+  // riskier create-new-type/swap/drop-old-type migration) but nothing calls
+  // it anymore.
+  AUDIO_CUE_PLANNING
 }
 
 model AiModelOption {

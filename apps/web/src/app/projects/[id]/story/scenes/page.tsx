@@ -6,6 +6,7 @@ import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
 import { mapFinalVideos } from "@/lib/video-assembly";
 import { SceneManager } from "@/components/scene-manager";
+import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -60,6 +61,15 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
         locations={locations}
         initialNarratorVoiceName={project.narratorVoiceName}
       />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Audio Cue Plan</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <AudioCuePlanPanel parentType="story" parentId={project.story.id} />
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

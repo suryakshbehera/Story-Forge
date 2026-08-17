@@ -286,9 +286,10 @@ export async function generateDialogueDirection({
 // for characters already attached to the scene (Scene.characters — not the
 // full project roster, so the AI can't invent a speaker who isn't part of
 // this scene). Narration always gets overwritten by a fresh draft, same "AI
-// proposes, user can overwrite" idiom as AUDIO_PLANNING; dialogue is
-// additive-only-when-empty because lines can carry generated audio takes
-// that a silent overwrite would orphan. ─────────────────────────────────────
+// proposes, user can overwrite" idiom used throughout this pipeline; dialogue
+// is additive-only-when-empty because lines can carry generated audio takes
+// that a silent overwrite would orphan (same rule applyAudioCuePlan in
+// lib/audio-cue-plan.ts follows for the same reason). ───────────────────────
 
 // Scoped-down copy of scene-audio.ts's loadAudioStyleContext, not imported —
 // same reasoning given there: this step doesn't need that file's other

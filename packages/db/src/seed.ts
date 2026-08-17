@@ -21,7 +21,6 @@ const defaultModels: Array<{
   { jobType: "VOICE", provider: "elevenlabs", modelId: "eleven_multilingual_v2", displayName: "Eleven Multilingual v2" },
   { jobType: "VIDEO_GENERATION", provider: "openrouter", modelId: "google/veo-3.1", displayName: "Veo 3.1" },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
-  { jobType: "AUDIO_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "MUSIC_GENERATION", provider: "elevenlabs", modelId: "music_v2", displayName: "Eleven Music v2" },
   { jobType: "SFX_GENERATION", provider: "elevenlabs", modelId: "eleven_text_to_sound_v2", displayName: "Eleven Sound Effects v2" },
   { jobType: "SHOT_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
@@ -31,6 +30,7 @@ const defaultModels: Array<{
   { jobType: "STORY_INGESTION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "BLUEPRINT_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "MOTION_PROMPT_DRAFTING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
+  { jobType: "AUDIO_CUE_PLANNING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
 ];
 
 // Phase 10 — these three job types moved fully off OpenRouter onto

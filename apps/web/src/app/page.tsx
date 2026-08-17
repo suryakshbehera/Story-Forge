@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { NewProjectDialog } from "@/components/new-project-dialog";
+import { ProjectCardMenu } from "@/components/project-card-menu";
 
 export default async function HomePage() {
   const projects = await prisma.project.findMany({
@@ -37,9 +38,12 @@ export default async function HomePage() {
                 <CardHeader>
                   <div className="flex items-start justify-between gap-2">
                     <CardTitle className="text-base">{project.name}</CardTitle>
-                    <Badge variant={project.type === "SERIES" ? "default" : "secondary"}>
-                      {project.type === "SERIES" ? "Series" : "Single Video"}
-                    </Badge>
+                    <div className="flex items-center gap-1">
+                      <Badge variant={project.type === "SERIES" ? "default" : "secondary"}>
+                        {project.type === "SERIES" ? "Series" : "Single Video"}
+                      </Badge>
+                      <ProjectCardMenu projectId={project.id} projectName={project.name} />
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent className="text-sm text-muted-foreground">

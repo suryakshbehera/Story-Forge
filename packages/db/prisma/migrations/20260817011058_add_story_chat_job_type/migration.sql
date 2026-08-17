@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "AiJobType" ADD VALUE 'STORY_CHAT';

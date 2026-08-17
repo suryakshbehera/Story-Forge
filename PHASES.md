@@ -593,48 +593,259 @@ value, a seed row, a code comment) but none of it is a commitment — no phase
 past Phase 6 has a written scope. Treat this as a reading order, not
 a promise — the actual next phase is whatever the project owner decides next.
 
-### Unplaced — Master AI orchestrator (proposed)
+Everything from here down came out of a 2026-08-16 planning conversation
+about scaling to **hundreds of episodes across multiple series**, framed
+around one constraint: stay simpler and more efficient, not more
+elaborate. Ordered as the sequence to build in, not by importance — each
+phase assumes the ones above it exist.
 
-`AiJobType.MASTER_AI` is registered in the model registry and Settings UI
-today but never called. It reads as a reserved slot for an orchestrating
-agent that could sit across several of the phases above (e.g. driving
-scene → image → voice → video as one pipeline) rather than a phase of its
-own — but that's a guess, not something the code states.
+### Phase 9 — One-Time Story Ingestion & Blueprint (proposed)
 
-### Discussed, not evidenced — design notes from 2026-08-15 conversation
+**Goal:** kill per-episode setup repetition, the actual bottleneck at
+hundreds-of-episodes scale — not any single generation step.
 
-The items below have no trace in the schema/code yet. They came out of a
-design discussion with the project owner, not from reading the codebase —
-recorded here as candidate scope for Phase 9+, not a commitment.
+- PDF/doc upload parses into Story Bible + Characters + Locations **once
+  per series**, not once per episode.
+- Series Blueprint: format shape (act structure, typical scene/shot count,
+  runtime, tone) defined once per series, so a new episode is drafted
+  against it instead of a blank page.
+- Tiered approval: split actions into cheap/reversible (draft text —
+  scripts, shot plans, cue sheets) which can auto-proceed, vs
+  costly/irreversible (actual image/video/audio renders) which still need
+  a manual click. Same spend-control principle as today, fewer gates to
+  click through.
 
-**Character/visual style consistency.** Two candidate fixes, not yet
-confirmed as implemented: (a) verify every image-generation call
-conditions on the tagged character's locked reference image, not just a
-text description — check `apps/web/src/lib/shot-images.ts`'s
-`IMAGE_PROMPTS` step; (b) add a project-level style prompt/seed anchor so
-every image call shares one style reference instead of drifting per
-generation.
+### Phase 10 — ElevenLabs Audio Provider (proposed)
 
-**Story chat AI.** A chat interface scoped to the current Story/Episode
-context (reusing the Context Engine), where the user can converse, paste
-in scene dialogue for feedback/rewrite, and apply each AI-proposed change
-via an explicit "Add to Story" button rather than auto-writing — fits the
-existing "AI prepares, user approves" pattern with no schema change,
-just a new chat surface + diff/apply action.
+**Goal:** replace Phase 7's unconfirmed `generateAudio()` (a workaround on
+OpenRouter's shared chat-completions audio modality) with ElevenLabs'
+purpose-built endpoints for narration, dialogue, music, and SFX.
 
-**Master AI as a studio hierarchy.** Two separable pieces of the
-Showrunner/Producer/Creative-Director org-chart the owner sketched:
-(a) retention/hook-writing instructions (3-second hook, strong emotional
-triggers) are just system-prompt content for the dialogue/scene-writing
-step — cheap to add now; (b) the full role hierarchy (Showrunner →
-Creative Head/Producer → Story/Visual/Audio → specialized roles like Art
-Director, Character Designer, Continuity Editor) maps onto the "Unplaced —
-Master AI orchestrator" entry above as a set of distinct
-prompt-plus-tool-scoped agents with a top-level orchestrator delegating
-between them. This is a large, multi-role build — needs its own plan
-(per-role prompts/tool scope, delegation logic, how a Continuity Editor
-role would enforce the character/visual consistency item above) before
-implementation starts.
+- `Character.voiceName` / `Project.narratorVoiceName` store ElevenLabs
+  voice IDs instead of free-text OpenRouter voice names.
+- New `elevenlabs.ts` client alongside `openrouter.ts`: TTS, Sound
+  Effects, Music.
+- No schema or pipeline reshape — this is a provider swap inside
+  `generateSpeech()`/`generateAudio()` call sites only. Image/video
+  generation stays on OpenRouter.
+
+**Why first, before Phase 11:** lowest risk of the audio changes, and an
+immediate quality/consistency win on its own — native voice IDs fit the
+"voice never re-picked per call" rule already in place
+([[voice-consistency-design]]) better than a hacked-together endpoint.
+
+### Phase 11 — Post-Assembly Audio Cue Plan (proposed)
+
+**Goal:** move audio planning from per-scene (blind to pacing) to one pass
+over the fully assembled silent video — how real post-production scores
+to a locked picture, and the fix for "audio review takes too long, once
+per scene."
+
+- **Reorder:** silent visual assembly (Phase 6, minus narration/dialogue/
+  music/sfx) now happens *before* audio planning, not after.
+- New job type (e.g. `AUDIO_CUE_PLANNING`): one AI pass reviews the
+  assembled episode video and outputs a single cue sheet — which shot/time
+  range gets narration, dialogue, music, SFX. Replaces today's per-scene
+  `musicPrompt`/`sfxPrompt` planning step.
+- **Video-input model — confirmed, not a risk.** OpenRouter has a
+  documented Video Inputs API (base64 data URL or public URL, same pattern
+  `generateVideo()` already uses for image inputs), routed to models that
+  support video understanding — Gemini 2.5 Flash/Pro and Gemini 3
+  Flash/Pro Preview all qualify, with enough context window (Gemini 3 Pro:
+  1M tokens) for a full episode's assembled cut. Verified 2026-08-16 via
+  OpenRouter's docs; build directly against `POST /api/v1/chat/completions`
+  with a video content part, same call shape used elsewhere in
+  `openrouter.ts`.
+- Generation stays **per-segment** (per shot/scene, matched to its known
+  duration, via ElevenLabs) — avoids per-call audio-length limits and
+  timing drift that one continuous blind-generated track would hit.
+- New final mix step: composite the generated segments onto the locked
+  picture per the cue sheet's timestamps. This is what Phase 6 originally
+  was, now split into "assemble picture" (early) + "mix sound onto locked
+  picture" (late).
+
+### Phase 12 — Master AI Orchestrator (proposed)
+
+**Goal:** the thin tool-calling layer over Scene/Shot/Image/Voice/Music/
+SFX that was deliberately deferred until those pipelines existed (see
+[[master-ai-sequencing]]) — they now do.
+
+- One review page per episode: Master AI drafts the whole episode (scenes
+  → shots → cue plan) in one pass; the producer reviews/edits once and
+  approves as a batch, instead of moving through separate pages per asset
+  type.
+- Parallel job queue — generate independent scenes/shots concurrently
+  (`workers/` is already reserved for this) instead of one at a time.
+- Still never spends past the approval gate — same "AI prepares, user
+  approves" rule, just fewer screens between drafting and approving.
+- Retention/hook-writing instructions (3-second hook, emotional triggers)
+  fold in here as system-prompt content on the scene/dialogue-writing
+  step — no separate build needed. The full Showrunner→Producer→
+  specialized-role hierarchy floated in an earlier conversation is *not*
+  in scope here — that's a bigger, separate build if ever pursued, kept
+  out to stay on the "simpler" side of the goal.
+
+### Phase 13 — Embeddings-Based Continuity Memory (proposed)
+
+**Goal:** let continuity hold up across hundreds of episodes without
+hand-locking everything — the rule-based Context Engine
+([[narrata-project-overview]]) doesn't scale past a handful of episodes on
+its own.
+
+- Embed Story Bible + character/location notes + past episode summaries
+  via OpenRouter's confirmed `/embeddings` endpoint (e.g.
+  `text-embedding-3-small`, `Qwen3-Embedding`).
+- Context Engine retrieves the top-K semantically relevant items per scene,
+  alongside (not instead of) today's locked-character/all-location/
+  prior-summary pull.
+- Auto-summarization: on episode finalize, auto-generate a short "what
+  changed" note (plot/character state), fed into the embedding store for
+  future episodes.
+
+### Phase 14 — Producer Controls at Scale (proposed)
+
+**Goal:** quality and cost control that doesn't require a full manual
+review of every scene of every episode.
+
+- Budget dashboard: running spend per episode/series — both OpenRouter and
+  ElevenLabs bill by usage, a real risk once generating hundreds of
+  episodes unattended.
+- Reuse, don't regenerate: locked character/location images and voices get
+  referenced across every episode of a series instead of recreated per
+  episode.
+- Spot-check review: full review on every Nth episode of a batch, a
+  lighter pass on the rest.
+- Batch assembly: once a season's episodes are approved, run final
+  assembly across all of them in one action, not one at a time.
+
+### Iterative Chunk-Based Scene Generation — 🚧 proposed, not built (2026-08-17)
+
+**Goal:** stop planning a whole episode's scenes in one upfront pass against
+a static written script — at ~8-second video-model clip lengths, generation
+is non-deterministic enough that scene 4's plan drifts from what scenes 1–3
+actually rendered. Plan and generate one chunk at a time instead, each one
+grounded in what the previous chunk's clip actually turned out to be.
+
+- Episode duration is divided into `~duration / 8s` chunks up front, but only
+  at a coarse beat level (what should happen at the start, roughly where it
+  should land by the end) — not full per-scene descriptions the way today's
+  one-shot `SCENE_PLANNING` (Phase 2) works.
+- Detailed planning happens one scene at a time: scene *N*'s description/
+  shots aren't drafted until scene *N-1*'s video clip is generated and
+  selected. Scene *N*'s planning call is grounded in what scene *N-1*'s clip
+  actually shows and says — the same video-understanding read (visual +
+  audio together) built for **AI-drafted Motion Prompt** above, generalized
+  from "draft one field" to "draft the whole next scene."
+- Not a new primitive: reuses `callChatModel()`'s `videos` param
+  (`apps/web/src/lib/ai/openrouter.ts`) added for `MOTION_PROMPT_DRAFTING`,
+  just called from a scene-planning-shaped prompt instead of a motion-prompt
+  one. Likely lands as `SCENE_PLANNING` gaining a per-chunk mode rather than
+  a new `AiJobType`, but that's an implementation detail to settle when this
+  is actually scoped.
+- Natural fit for Phase 12's Master AI Orchestrator, which already plans to
+  draft "scenes → shots → cue plan" per episode in one pass — the
+  orchestrator would run this chunk-by-chunk loop internally rather than one
+  flat upfront call, once it exists.
+- Real tradeoff, not free: one video-read call per scene chunk adds latency
+  and cost to the critical path (previous clip must finish generating before
+  the next scene can even be planned) in exchange for continuity. Today's
+  flat, all-upfront Scene Planning stays the default — this is an
+  alternative mode to opt into, not a replacement, until proven out.
+- **Not built.** No schema, enum, or code trace yet — this section exists so
+  the direction survives to the next design/implementation conversation.
+
+### Character/visual style consistency ✅ Resolved (2026-08-17)
+
+Both candidate fixes from the earlier note are now implemented:
+
+- **Image generation now conditions on locked reference images, not just
+  validates against them after the fact.** `generateImage()`
+  (`apps/web/src/lib/ai/openrouter.ts`) gained an `inputReferences` param,
+  sent as OpenRouter's confirmed `input_references` field
+  (`{ type: "image_url", image_url: { url } }`, base64 data URIs — verified
+  against `OpenRouterTeam/skills`' `openrouter-images` reference
+  implementation). `generateShotImage()` (`shot-images.ts`) now loads the
+  same locked-character/tagged-location reference images used for
+  `IMAGE_VALIDATION` and passes them into the generation call itself.
+- **Project-level style anchor.** New `Project.styleReferences` Asset
+  relation (`Asset.projectStyleId` FK, migration
+  `20260817010035_add_project_style_reference`) — one locked reference
+  image per project (first-uploaded convention, same as Character/Location
+  reference images), uploaded via a new "Visual Style Anchor" card
+  (`style-anchor-card.tsx`) on both the Story and Story Bible pages, routes
+  at `POST /api/projects/[id]/style-reference` and
+  `DELETE /api/projects/[id]/style-reference/[assetId]`. Included in every
+  shot image generation call's `inputReferences` alongside character/
+  location refs — not in `IMAGE_VALIDATION`, since it anchors overall look
+  rather than a named character/location's likeness.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`Project.styleReferences`,
+`Asset.projectStyleId`), [`apps/web/src/lib/shot-images.ts`](apps/web/src/lib/shot-images.ts),
+[`apps/web/src/lib/ai/openrouter.ts`](apps/web/src/lib/ai/openrouter.ts),
+[`apps/web/src/components/style-anchor-card.tsx`](apps/web/src/components/style-anchor-card.tsx).
+
+### AI-drafted Motion Prompt ✅ Resolved (2026-08-17)
+
+**Goal:** stop the motion prompt for an `IMAGE_TO_VIDEO` scene from being
+written blind — ground it in what the previous scene's clip *actually* shows
+and sounds like, not just what was planned, and in what the current scene's
+selected image actually contains.
+
+- New `AiJobType.MOTION_PROMPT_DRAFTING` (migration
+  `20260817032603_add_motion_prompt_drafting_job_type`), seeded to
+  `google/gemini-2.5-pro` — the model needs video-understanding support
+  (visual + audio together), same requirement noted for Phase 11's proposed
+  `AUDIO_CUE_PLANNING`. Gemini 2.5 Flash is a cheaper fallback swappable via
+  Settings → AI Models, same registry pattern as every other job.
+- **`callChatModel()`** (`apps/web/src/lib/ai/openrouter.ts`) gained a
+  `videos?: string[]` param — data URIs attached as `video_url` content
+  parts, mirroring the existing `images`/`image_url` handling. This is the
+  first real caller of the OpenRouter Video Inputs API that Phase 11's
+  planning note confirmed but never built against.
+- **`draftMotionPrompt()`** (`apps/web/src/lib/scene-video.ts`) — one
+  multimodal chat call combining two inputs: the current scene's selected
+  first-shot image (`image_url`) and the immediately preceding scene's
+  selected video clip (`video_url`, visual + audio together) if one exists;
+  falls back to the previous scene's plain-text `description` when no clip
+  has been generated yet (first scene, or video step not run). Returns a
+  draft string only — nothing is saved automatically, matching the
+  "AI drafts, user approves" rule every other drafting job follows here.
+- **New route**: `POST /api/scenes/[id]/motion-prompt/draft`.
+- **UI** (`scene-video-panel.tsx`) — a "Draft with AI" button + its own
+  `MOTION_PROMPT_DRAFTING` model picker directly under the Motion Prompt
+  textarea (`IMAGE_TO_VIDEO` scenes only, disabled until the scene has a
+  selected image); the draft lands in the textarea for review/edit, then
+  goes through the panel's existing Save button like a hand-written prompt.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`AiJobType.MOTION_PROMPT_DRAFTING`),
+[`apps/web/src/lib/ai/openrouter.ts`](apps/web/src/lib/ai/openrouter.ts),
+[`apps/web/src/lib/scene-video.ts`](apps/web/src/lib/scene-video.ts),
+[`apps/web/src/app/api/scenes/[id]/motion-prompt/draft/route.ts`](apps/web/src/app/api/scenes/[id]/motion-prompt/draft/route.ts),
+[`apps/web/src/components/scene-video-panel.tsx`](apps/web/src/components/scene-video-panel.tsx).
+
+### Story chat AI ✅ Resolved (2026-08-17)
+
+Implemented as described: a chat surface scoped to the current Story
+(Single Video) or Episode (Series), using `assembleContext()` as system
+context — same Context Engine every other generation call uses, now
+serving a conversational surface instead of a one-shot draft. No schema
+change beyond a new `AiJobType.STORY_CHAT` registry entry; chat history
+lives only in the client component's state and is resent each turn
+(`story-chat-panel.tsx`), never persisted server-side. Each assistant
+reply has an "Add to Story"/"Add to Episode Summary" button that appends
+it through the *existing* save routes (`PATCH /api/projects/[id]/story/content`,
+`PATCH /api/episodes/[id]`) — not a new write path, and not a diff/merge
+UI, just append-and-save, matching the "keep it simple" direction this
+round of fixes was scoped to.
+
+`callChatModel()` (`openrouter.ts`) gained an optional `history` param
+(prior turns inserted between the system prompt and the final user
+message) — every other job in that file stays single-shot and unaffected.
+
+**Evidence:** `packages/db/prisma/schema.prisma` (`AiJobType.STORY_CHAT`),
+[`apps/web/src/app/api/projects/[id]/story-chat/route.ts`](apps/web/src/app/api/projects/[id]/story-chat/route.ts),
+[`apps/web/src/components/story-chat-panel.tsx`](apps/web/src/components/story-chat-panel.tsx),
+[`apps/web/src/lib/ai/openrouter.ts`](apps/web/src/lib/ai/openrouter.ts).
 
 ### Not evidenced at all
 

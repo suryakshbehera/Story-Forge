@@ -10,6 +10,7 @@ import { mapFinalVideos } from "@/lib/video-assembly";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
+import { StoryChatPanel } from "@/components/story-chat-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft } from "lucide-react";
 
@@ -98,6 +99,21 @@ export default async function EpisodePage({
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Story Chat</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <StoryChatPanel
+            projectId={projectId}
+            episodeId={episodeId}
+            applyTarget={{ kind: "episode", episodeId }}
+            applyLabel="Episode Summary"
+            initialContent={episode.summary ?? ""}
+          />
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

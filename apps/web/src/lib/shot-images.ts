@@ -28,8 +28,10 @@ const SHOT_CONTEXT_INCLUDE = {
     include: {
       characters: { include: { referenceImages: true } },
       locations: { include: { referenceImages: true } },
-      story: true,
-      episode: { include: { season: { include: { project: { include: { storyBible: true } } } } } },
+      story: { include: { project: { include: { styleReferences: true } } } },
+      episode: {
+        include: { season: { include: { project: { include: { storyBible: true, styleReferences: true } } } } },
+      },
     },
   },
 } as const;
@@ -42,6 +44,15 @@ async function loadShotContext(shotId: string) {
 }
 
 type ShotContext = Awaited<ReturnType<typeof loadShotContext>>;
+
+// The project's visual-style anchor (see Project.styleReferences) — first
+// uploaded image, same convention as Character/Location reference images.
+// Works for both Single Video (via Story.project) and Series (via
+// Episode.season.project).
+function getProjectStyleReference(scene: ShotContext["scene"]): Asset | null {
+  const refs = scene.story?.project.styleReferences ?? scene.episode?.season.project.styleReferences ?? [];
+  return refs[0] ?? null;
+}
 
 // Loose visual-style hint pulled from whichever parent exists — Story (Single
 // Video) has no dedicated visualStyle field, only StoryBible (Series) does,
@@ -122,12 +133,8 @@ interface ValidationEntity {
   referenceImages: Asset[];
 }
 
-async function runValidation(
-  generatedImageDataUri: string,
-  entities: ValidationEntity[],
-  modelId: string
-): Promise<{ passed: boolean; notes: string }> {
-  const referenceImages = await Promise.all(
+async function loadReferenceDataUris(entities: ValidationEntity[]): Promise<string[]> {
+  return Promise.all(
     entities.map(async (e) => {
       const ref = e.referenceImages[0];
       const bytes = await storage.get(ref.storageKey);
@@ -135,7 +142,20 @@ async function runValidation(
       return `data:${ref.mimeType ?? "image/png"};base64,${bytes.toString("base64")}`;
     })
   );
+}
 
+async function loadAssetDataUri(asset: Asset): Promise<string | null> {
+  const bytes = await storage.get(asset.storageKey);
+  if (!bytes) return null;
+  return `data:${asset.mimeType ?? "image/png"};base64,${bytes.toString("base64")}`;
+}
+
+async function runValidation(
+  generatedImageDataUri: string,
+  entities: ValidationEntity[],
+  referenceDataUris: string[],
+  modelId: string
+): Promise<{ passed: boolean; notes: string }> {
   const userPrompt = `Reference images, in order: ${entities.map((e) => e.name).join(", ")}.\n\nDoes the generated shot image stay consistent with these references? Respond with the required JSON.`;
 
   const raw = await callChatModel({
@@ -143,7 +163,7 @@ async function runValidation(
     systemPrompt: IMAGE_VALIDATION_SYSTEM_PROMPT,
     userPrompt,
     jsonMode: true,
-    images: [generatedImageDataUri, ...referenceImages],
+    images: [generatedImageDataUri, ...referenceDataUris],
   });
 
   const parsed = validationResponseSchema.safeParse(JSON.parse(raw));
@@ -184,8 +204,28 @@ export async function generateShotImage({
   const shot = await loadShotContext(shotId);
   const styleContext = buildStyleContext(shot.scene);
 
+  // Same roster used for validation (locked characters + all tagged
+  // locations), but now also fed into generation itself as image-to-image
+  // conditioning — previously only used post-hoc to check the result,
+  // which meant generation had no way to actually match a character's
+  // locked look, only describe it in words.
+  const validationTargets: ValidationEntity[] = [
+    ...shot.scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
+    ...shot.scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
+  ];
+  const missingReferenceFor = validationTargets.filter((t) => t.referenceImages.length === 0).map((t) => t.name);
+  const validatable = validationTargets.filter((t) => t.referenceImages.length > 0);
+  const referenceDataUris = validatable.length > 0 ? await loadReferenceDataUris(validatable) : [];
+
+  // Project-level style anchor rides along with generation (not validation —
+  // it's an overall-look reference, not a named character/location to check
+  // likeness against).
+  const styleReferenceAsset = getProjectStyleReference(shot.scene);
+  const styleReferenceDataUri = styleReferenceAsset ? await loadAssetDataUri(styleReferenceAsset) : null;
+  const generationReferences = styleReferenceDataUri ? [styleReferenceDataUri, ...referenceDataUris] : referenceDataUris;
+
   const prompt = await buildImagePrompt(shot, styleContext, instructions, promptModelId);
-  const generated = await generateImage({ modelId: imageModelId, prompt });
+  const generated = await generateImage({ modelId: imageModelId, prompt, inputReferences: generationReferences });
 
   const buffer = Buffer.from(generated.base64, "base64");
   const ext = extFromMime(generated.mimeType);
@@ -193,21 +233,11 @@ export async function generateShotImage({
   const key = buildStorageKey("shots", shotId, fileName);
   await storage.put(key, buffer);
 
-  // Validation only applies to locked characters (mirrors assemble.ts's
-  // locked-only rule) and all tagged locations (no lock concept for
-  // locations) — tags stay scene-level, shots share their scene's roster.
-  const validationTargets: ValidationEntity[] = [
-    ...shot.scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
-    ...shot.scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
-  ];
-  const missingReferenceFor = validationTargets.filter((t) => t.referenceImages.length === 0).map((t) => t.name);
-  const validatable = validationTargets.filter((t) => t.referenceImages.length > 0);
-
   let validation: { passed: boolean; notes: string } | null = null;
   if (validatable.length > 0 && validationModelId) {
     try {
       const generatedDataUri = `data:${generated.mimeType};base64,${generated.base64}`;
-      validation = await runValidation(generatedDataUri, validatable, validationModelId);
+      validation = await runValidation(generatedDataUri, validatable, referenceDataUris, validationModelId);
     } catch {
       // Advisory only — a broken/unconfigured validation step never blocks
       // the generated image from being saved and selected.

@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ModelSelect } from "@/components/model-select";
-import { Clapperboard, Save, Trash2 } from "lucide-react";
+import { Clapperboard, Save, Sparkles, Trash2 } from "lucide-react";
 
 export interface SceneVideoClipItem {
   id: string;
@@ -50,6 +50,8 @@ export function SceneVideoPanel({
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(false);
   const [videoClips, setVideoClips] = useState(initialVideoClips);
+  const [draftModelId, setDraftModelId] = useState("");
+  const [drafting, setDrafting] = useState(false);
 
   const dirty =
     motionPrompt !== savedMotionPrompt || videoPrompt !== savedVideoPrompt || duration !== savedDuration;
@@ -109,6 +111,32 @@ export function SceneVideoPanel({
     }
   }
 
+  async function draftPrompt() {
+    if (!draftModelId) {
+      toast.error("Pick a motion prompt drafting model first.");
+      return;
+    }
+    setDrafting(true);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/motion-prompt/draft`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId: draftModelId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Drafting failed");
+      }
+      const { motionPrompt: draft } = await res.json();
+      setMotionPrompt(draft);
+      toast.success("Motion prompt drafted — review and save.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Drafting failed.");
+    } finally {
+      setDrafting(false);
+    }
+  }
+
   async function selectClip(assetId: string) {
     const res = await fetch(`/api/scenes/${sceneId}/video/${assetId}/select`, { method: "POST" });
     if (!res.ok) {
@@ -140,6 +168,23 @@ export function SceneVideoPanel({
             onChange={(e) => setMotionPrompt(e.target.value)}
             className="mt-1.5"
           />
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <ModelSelect jobType="MOTION_PROMPT_DRAFTING" value={draftModelId} onChange={setDraftModelId} />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={draftPrompt}
+              disabled={drafting || !hasSelectedImage}
+              title={!hasSelectedImage ? "Select a first-shot image above first" : undefined}
+            >
+              <Sparkles className="size-3.5" />
+              {drafting ? "Drafting…" : "Draft with AI"}
+            </Button>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Reads the previous scene&apos;s generated clip (video + audio) and this scene&apos;s selected image to draft
+            a continuity-aware motion prompt.
+          </p>
         </div>
       ) : (
         <div>

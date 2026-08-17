@@ -26,6 +26,11 @@ const defaultModels: Array<{
   { jobType: "SFX_GENERATION", provider: "openrouter", modelId: "openai/gpt-audio", displayName: "GPT Audio" },
   { jobType: "SHOT_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "DIALOGUE_DIRECTION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { jobType: "SCRIPT_DRAFTING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { jobType: "STORY_CHAT", provider: "openrouter", modelId: "anthropic/claude-sonnet-5", displayName: "Claude Sonnet 5" },
+  { jobType: "STORY_INGESTION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { jobType: "BLUEPRINT_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { jobType: "MOTION_PROMPT_DRAFTING", provider: "openrouter", modelId: "google/gemini-2.5-pro", displayName: "Gemini 2.5 Pro" },
 ];
 
 async function main() {

@@ -1,5 +1,5 @@
 import { prisma, type Asset } from "@/lib/db";
-import { generateVideo, OpenRouterError } from "@/lib/ai/openrouter";
+import { callChatModel, generateVideo, OpenRouterError } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
 
 export interface SerializedSceneVideoClip {
@@ -115,6 +115,81 @@ export async function generateSceneVideo({ sceneId, modelId }: GenerateSceneVide
   });
 
   return serializeSceneVideoClip(asset);
+}
+
+const MOTION_PROMPT_SYSTEM_PROMPT = `You are the Motion Prompt drafting step inside Narrata, a manual-first AI story/video production studio.
+Write a short camera/motion direction prompt for an image-to-video model, continuing smoothly from the previous scene and animating the attached current-scene image.
+Describe only camera movement, subject motion, and action beats — not dialogue or narration, those are separate tracks handled elsewhere.
+Respond with the motion prompt text only — no labels, quotation marks, or commentary.`;
+
+interface DraftMotionPromptParams {
+  sceneId: string;
+  modelId: string;
+}
+
+// Reads the previous scene's generated clip (visually and, via OpenRouter's
+// video-input content part, its audio too) plus the current scene's selected
+// starting frame, in one multimodal call — grounding the drafted motion
+// prompt in what actually happened last, not just what was planned. Falls
+// back to the previous scene's description text when it has no selected clip
+// yet (first scene, or video not generated yet). Returns a draft only — the
+// caller/UI decides whether to accept it into the editable motionPrompt
+// field, same "AI drafts, user approves" pattern as every other drafting job.
+export async function draftMotionPrompt({ sceneId, modelId }: DraftMotionPromptParams): Promise<string> {
+  const scene = await prisma.scene.findUniqueOrThrow({
+    where: { id: sceneId },
+    include: {
+      shots: { orderBy: { order: "asc" }, take: 1, include: { images: { where: { isSelected: true }, take: 1 } } },
+    },
+  });
+
+  if (scene.visualMode !== "IMAGE_TO_VIDEO") {
+    throw new OpenRouterError("Motion prompt drafting only applies to Image → Video scenes.");
+  }
+
+  const currentImage = scene.shots[0]?.images[0];
+  if (!currentImage) {
+    throw new OpenRouterError("Generate and select a first-shot image before drafting a motion prompt.");
+  }
+  const currentImageBytes = await storage.get(currentImage.storageKey);
+  if (!currentImageBytes) {
+    throw new OpenRouterError("The first shot's selected image is missing from storage.");
+  }
+  const currentImageDataUri = `data:${currentImage.mimeType ?? "image/png"};base64,${currentImageBytes.toString("base64")}`;
+
+  const parentWhere = scene.storyId ? { storyId: scene.storyId } : { episodeId: scene.episodeId! };
+  const previousScene = await prisma.scene.findFirst({
+    where: { ...parentWhere, order: scene.order - 1 },
+    include: { videoClips: { where: { isSelected: true }, take: 1 } },
+  });
+
+  let previousVideoDataUri: string | undefined;
+  const previousClip = previousScene?.videoClips[0];
+  if (previousClip) {
+    const clipBytes = await storage.get(previousClip.storageKey);
+    if (clipBytes) {
+      previousVideoDataUri = `data:${previousClip.mimeType ?? "video/mp4"};base64,${clipBytes.toString("base64")}`;
+    }
+  }
+
+  const previousContext = !previousScene
+    ? "This is the first scene — there is no preceding scene."
+    : previousVideoDataUri
+      ? "The attached video is the immediately preceding scene's generated clip — watch and listen to it (dialogue, sound, motion, camera, ending framing) before writing the motion prompt below, so this scene continues naturally from it."
+      : `The immediately preceding scene has no generated clip yet. Its description: "${previousScene.description}"`;
+
+  const userPrompt = `# Previous scene\n${previousContext}\n\n# Current scene\nDescription: ${scene.description}\nThe attached image is this scene's starting frame — motion should build on what's actually in it, not a generic description.\n\nWrite the motion prompt now.`;
+
+  const draft = await callChatModel({
+    modelId,
+    systemPrompt: MOTION_PROMPT_SYSTEM_PROMPT,
+    userPrompt,
+    images: [currentImageDataUri],
+    videos: previousVideoDataUri ? [previousVideoDataUri] : undefined,
+    temperature: 0.7,
+  });
+
+  return draft.trim();
 }
 
 export async function getSceneVideoClips(sceneId: string): Promise<SerializedSceneVideoClip[]> {

@@ -1,3 +1,8 @@
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface ChatModelParams {
   modelId: string;
   systemPrompt: string;
@@ -11,6 +16,17 @@ export interface ChatModelParams {
   // message as image_url content parts — for vision calls like
   // IMAGE_VALIDATION comparing a generated image against reference images.
   images?: string[];
+  // Data URIs (e.g. "data:video/mp4;base64,...") attached to the user
+  // message as video_url content parts — OpenRouter's Video Inputs API,
+  // confirmed via docs (Phase 11 planning note) but first actually used by
+  // MOTION_PROMPT_DRAFTING (see draftMotionPrompt in lib/scene-video.ts).
+  // Only providers/models with video-understanding support (e.g. Gemini 2.5
+  // Pro/Flash) accept this — pick one via the job's AiModelOption.
+  videos?: string[];
+  // Prior turns, inserted between the system prompt and the final
+  // userPrompt — for multi-turn callers like the Story Chat surface. Every
+  // other job in this file is single-shot and omits this.
+  history?: ChatMessage[];
 }
 
 export class OpenRouterError extends Error {}
@@ -36,16 +52,19 @@ export async function callChatModel({
   temperature = 0.8,
   jsonMode = false,
   images,
+  videos,
+  history,
 }: ChatModelParams): Promise<string> {
   const apiKey = requireApiKey();
 
-  const userContent =
-    images && images.length > 0
-      ? [
-          { type: "text", text: userPrompt },
-          ...images.map((url) => ({ type: "image_url", image_url: { url } })),
-        ]
-      : userPrompt;
+  const hasAttachments = (images && images.length > 0) || (videos && videos.length > 0);
+  const userContent = hasAttachments
+    ? [
+        { type: "text", text: userPrompt },
+        ...(images ?? []).map((url) => ({ type: "image_url", image_url: { url } })),
+        ...(videos ?? []).map((url) => ({ type: "video_url", video_url: { url } })),
+      ]
+    : userPrompt;
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -59,6 +78,7 @@ export async function callChatModel({
       ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       messages: [
         { role: "system", content: systemPrompt },
+        ...(history ?? []),
         { role: "user", content: userContent },
       ],
     }),
@@ -82,6 +102,10 @@ export interface GenerateImageParams {
   modelId: string;
   prompt: string;
   aspectRatio?: string;
+  // Locked character/location reference images (data URIs) to condition
+  // generation on — OpenRouter's image-to-image reference input, confirmed
+  // shape per OpenRouterTeam/skills' openrouter-images edit.ts.
+  inputReferences?: string[];
 }
 
 export interface GeneratedImage {
@@ -96,6 +120,7 @@ export async function generateImage({
   modelId,
   prompt,
   aspectRatio = "16:9",
+  inputReferences,
 }: GenerateImageParams): Promise<GeneratedImage> {
   const apiKey = requireApiKey();
 
@@ -109,6 +134,9 @@ export async function generateImage({
       model: modelId,
       prompt,
       aspect_ratio: aspectRatio,
+      ...(inputReferences && inputReferences.length > 0
+        ? { input_references: inputReferences.map((url) => ({ type: "image_url", image_url: { url } })) }
+        : {}),
     }),
   });
 

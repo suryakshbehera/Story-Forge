@@ -19,7 +19,7 @@ function section(title: string, lines: Array<string | null | undefined | false>)
 export async function assembleContext({ projectId, episodeId }: AssembleContextParams): Promise<string> {
   const project = await prisma.project.findUniqueOrThrow({
     where: { id: projectId },
-    include: { story: true, storyBible: true },
+    include: { story: true, storyBible: true, blueprint: true },
   });
 
   const sections: string[] = [
@@ -54,6 +54,22 @@ export async function assembleContext({ projectId, episodeId }: AssembleContextP
       b.timelineNotes && `Timeline notes: ${b.timelineNotes}`,
     ]);
     if (bibleSection) sections.push(bibleSection);
+  }
+
+  // Phase 9 — format shape new episodes should be drafted against. This is
+  // the entire mechanism by which the Blueprint reaches generation calls: no
+  // Scene/Shot Planning or Story Chat call site changes, they all just
+  // consume the assembled string.
+  if (project.blueprint) {
+    const bp = project.blueprint;
+    const blueprintSection = section("Series Blueprint", [
+      bp.actStructure && `Act structure: ${bp.actStructure}`,
+      bp.sceneShotGuidance && `Typical scene/shot guidance: ${bp.sceneShotGuidance}`,
+      bp.runtimeTarget && `Runtime target: ${bp.runtimeTarget}`,
+      bp.tone && `Format tone: ${bp.tone}`,
+      bp.content && `Details: ${bp.content}`,
+    ]);
+    if (blueprintSection) sections.push(blueprintSection);
   }
 
   // Locked characters are always in context regardless of relevance

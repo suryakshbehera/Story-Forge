@@ -129,6 +129,8 @@ export async function generateNarrationAudio({
     text: scene.narration,
     voiceId: project.narratorVoiceName,
     sceneId,
+    instructions: scene.narrationDeliveryNotes ?? undefined,
+    speed: scene.narrationSpeed ?? undefined,
   });
   const buffer = Buffer.from(generated.base64, "base64");
   const key = buildStorageKey("scenes", sceneId, "narration.mp3");
@@ -188,6 +190,66 @@ export async function deleteNarrationAudio(sceneId: string, assetId: string): Pr
   }
   await storage.remove(asset.storageKey);
   await prisma.asset.delete({ where: { id: assetId } });
+}
+
+const narrationDirectionResponseSchema = z.object({
+  deliveryNotes: z.string(),
+  speed: z.number().min(0.25).max(4).nullable().optional(),
+});
+
+// Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
+// appears below to satisfy the provider's json_object requirement. Mirrors
+// DIALOGUE_DIRECTION exactly, one level up: a single narration script
+// instead of an ordered list of lines, otherwise the same shape/behavior.
+const NARRATION_DIRECTION_SYSTEM_PROMPT = `You are the Narration Direction step of Narrata's Voice pipeline. Given a scene's narration script, direct how it should be delivered — emotion, tone, emphasis, pacing.
+
+Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
+{
+  "deliveryNotes": "concrete delivery direction for a text-to-speech model, e.g. 'measured, ominous, a long pause before the last sentence'",
+  "speed": 1.0
+}
+speed is a pace multiplier where 1.0 is normal, 0.25 is slowest, 4.0 is fastest — omit it to leave pace at the default.`;
+
+export interface NarrationDirection {
+  narrationDeliveryNotes: string | null;
+  narrationSpeed: number | null;
+}
+
+export async function generateNarrationDirection({
+  sceneId,
+  modelId,
+}: {
+  sceneId: string;
+  modelId: string;
+}): Promise<NarrationDirection> {
+  const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
+  if (!scene.narration?.trim()) {
+    throw new OpenRouterError("Write a narration script for this scene before directing it.");
+  }
+
+  const raw = await callChatModel({
+    modelId,
+    systemPrompt: NARRATION_DIRECTION_SYSTEM_PROMPT,
+    userPrompt: scene.narration,
+    jsonMode: true,
+  });
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    throw new OpenRouterError("AI returned invalid JSON.");
+  }
+  const parsed = narrationDirectionResponseSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new OpenRouterError("AI returned an unexpected shape.");
+  }
+
+  const narrationDeliveryNotes = parsed.data.deliveryNotes.trim() || null;
+  const narrationSpeed = parsed.data.speed ?? null;
+  await prisma.scene.update({ where: { id: sceneId }, data: { narrationDeliveryNotes, narrationSpeed } });
+
+  return { narrationDeliveryNotes, narrationSpeed };
 }
 
 // ── Dialogue lines — ordered, per-Character spoken lines within a Scene,

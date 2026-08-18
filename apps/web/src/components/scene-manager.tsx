@@ -54,6 +54,8 @@ export interface SceneItem {
   // Phase 8 — Scene stopped being the image unit; shots carry the visuals.
   shots: ShotItem[];
   narration: string | null;
+  narrationDeliveryNotes: string | null;
+  narrationSpeed: number | null;
   narrationAudio: AudioTake[];
   dialogueLines: DialogueLineItem[];
   motionPrompt: string | null;
@@ -97,6 +99,8 @@ function withVoiceDefaults(scene: SceneItem): SceneItem {
   return {
     ...scene,
     narration: scene.narration ?? null,
+    narrationDeliveryNotes: scene.narrationDeliveryNotes ?? null,
+    narrationSpeed: scene.narrationSpeed ?? null,
     narrationAudio: scene.narrationAudio ?? [],
     dialogueLines: scene.dialogueLines ?? [],
     videoClips: scene.videoClips ?? [],
@@ -704,6 +708,8 @@ function SceneRow({
           characters={characters.map((c) => ({ id: c.id, name: c.name, voiceName: c.voiceName ?? null }))}
           narratorVoiceName={narratorVoiceName}
           initialNarration={scene.narration ?? ""}
+          initialNarrationDeliveryNotes={scene.narrationDeliveryNotes}
+          initialNarrationSpeed={scene.narrationSpeed}
           initialNarrationAudio={scene.narrationAudio}
           initialDialogueLines={scene.dialogueLines}
         />

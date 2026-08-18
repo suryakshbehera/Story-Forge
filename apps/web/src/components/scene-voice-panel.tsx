@@ -51,6 +51,8 @@ export function SceneVoicePanel({
   characters,
   narratorVoiceName,
   initialNarration,
+  initialNarrationDeliveryNotes,
+  initialNarrationSpeed,
   initialNarrationAudio,
   initialDialogueLines,
 }: {
@@ -58,15 +60,28 @@ export function SceneVoicePanel({
   characters: VoiceCharacterOption[];
   narratorVoiceName: string | null;
   initialNarration: string;
+  initialNarrationDeliveryNotes: string | null;
+  initialNarrationSpeed: number | null;
   initialNarrationAudio: AudioTake[];
   initialDialogueLines: DialogueLineItem[];
 }) {
   const [narration, setNarration] = useState(initialNarration);
   const [savedNarration, setSavedNarration] = useState(initialNarration);
+  const [narrationDeliveryNotes, setNarrationDeliveryNotes] = useState(initialNarrationDeliveryNotes ?? "");
+  const [savedNarrationDeliveryNotes, setSavedNarrationDeliveryNotes] = useState(initialNarrationDeliveryNotes ?? "");
+  const [narrationSpeed, setNarrationSpeed] = useState(initialNarrationSpeed?.toString() ?? "");
+  const [savedNarrationSpeed, setSavedNarrationSpeed] = useState(initialNarrationSpeed?.toString() ?? "");
   const [savingNarration, setSavingNarration] = useState(false);
   const [narrationAudio, setNarrationAudio] = useState(initialNarrationAudio);
   const [narrationModelId, setNarrationModelId] = useState("");
   const [generatingNarration, setGeneratingNarration] = useState(false);
+  const [narrationDirectionModelId, setNarrationDirectionModelId] = useState("");
+  const [directingNarration, setDirectingNarration] = useState(false);
+
+  const narrationDirty =
+    narration !== savedNarration ||
+    narrationDeliveryNotes !== savedNarrationDeliveryNotes ||
+    narrationSpeed !== savedNarrationSpeed;
 
   const [dialogueLines, setDialogueLines] = useState(initialDialogueLines);
   const [directionModelId, setDirectionModelId] = useState("");
@@ -80,10 +95,16 @@ export function SceneVoicePanel({
       const res = await fetch(`/api/scenes/${sceneId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ narration: narration || null }),
+        body: JSON.stringify({
+          narration: narration || null,
+          narrationDeliveryNotes: narrationDeliveryNotes || null,
+          narrationSpeed: narrationSpeed ? Number(narrationSpeed) : null,
+        }),
       });
       if (!res.ok) throw new Error();
       setSavedNarration(narration);
+      setSavedNarrationDeliveryNotes(narrationDeliveryNotes);
+      setSavedNarrationSpeed(narrationSpeed);
       toast.success("Narration script saved.");
     } catch {
       toast.error("Couldn't save narration script.");
@@ -92,12 +113,41 @@ export function SceneVoicePanel({
     }
   }
 
+  async function directNarration() {
+    if (!narrationDirectionModelId) {
+      toast.error("Pick a Narration Direction model first.");
+      return;
+    }
+    setDirectingNarration(true);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/narration-direction/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId: narrationDirectionModelId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Direction failed");
+      }
+      const direction: { narrationDeliveryNotes: string | null; narrationSpeed: number | null } = await res.json();
+      setNarrationDeliveryNotes(direction.narrationDeliveryNotes ?? "");
+      setSavedNarrationDeliveryNotes(direction.narrationDeliveryNotes ?? "");
+      setNarrationSpeed(direction.narrationSpeed?.toString() ?? "");
+      setSavedNarrationSpeed(direction.narrationSpeed?.toString() ?? "");
+      toast.success("Narration directed — review the delivery below.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Direction failed.");
+    } finally {
+      setDirectingNarration(false);
+    }
+  }
+
   async function generateNarration() {
     if (!narrationModelId) {
       toast.error("Pick a voice model first.");
       return;
     }
-    if (narration !== savedNarration) {
+    if (narrationDirty) {
       toast.error("Save the narration script before generating audio.");
       return;
     }
@@ -260,12 +310,43 @@ export function SceneVoicePanel({
         <p className="mt-1 text-xs text-muted-foreground">
           Narrator voice: {narratorVoiceName ? <span className="font-medium">{narratorVoiceName}</span> : "not set — see Voice Settings above"}
         </p>
+
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <Label className="text-xs text-muted-foreground flex-1 min-w-[10rem]">Direct Narration</Label>
+          <ModelSelect jobType="NARRATION_DIRECTION" value={narrationDirectionModelId} onChange={setNarrationDirectionModelId} />
+          <Button size="sm" variant="outline" disabled={directingNarration || !savedNarration.trim()} onClick={directNarration}>
+            <Wand2 className="size-3.5" />
+            {directingNarration ? "Directing…" : "Direct Narration"}
+          </Button>
+        </div>
+        <div className="mt-1.5 grid gap-1.5">
+          <Label className="text-xs text-muted-foreground">Style / delivery (emotion, tone, emphasis — from Direct Narration above, or written by hand)</Label>
+          <Textarea
+            rows={1}
+            placeholder="e.g. measured, ominous, a long pause before the last sentence"
+            value={narrationDeliveryNotes}
+            onChange={(e) => setNarrationDeliveryNotes(e.target.value)}
+          />
+        </div>
+        <div className="mt-1.5 flex items-center gap-2">
+          <Label className="whitespace-nowrap text-xs text-muted-foreground">Rhythm / pace (0.25–4, blank = default)</Label>
+          <input
+            type="number"
+            min={0.25}
+            max={4}
+            step={0.05}
+            className="w-20 rounded-md border border-input bg-transparent px-2 py-1 text-sm"
+            value={narrationSpeed}
+            onChange={(e) => setNarrationSpeed(e.target.value)}
+          />
+        </div>
+
         <div className="mt-2 flex flex-wrap items-end gap-2">
           <Button
             size="sm"
             variant="outline"
             onClick={saveNarration}
-            disabled={savingNarration || narration === savedNarration}
+            disabled={savingNarration || !narrationDirty}
           >
             <Save className="size-3.5" />
             {savingNarration ? "Saving…" : "Save Script"}

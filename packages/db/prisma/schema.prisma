@@ -230,6 +230,15 @@ model Scene {
   // (mirrors Episode.summary: no AI-drafting step, only text-to-speech).
   narration String? @db.Text
 
+  // Delivery direction for `narration` — mirrors DialogueLine.deliveryNotes/
+  // speed exactly (same TTS instructions/speed passthrough in voice.ts, same
+  // AI-proposes-then-user-can-overwrite idiom via NARRATION_DIRECTION, one
+  // level up from DIALOGUE_DIRECTION's per-line version). Unlike `narration`
+  // itself, these two *do* have an AI-drafting step — narration text stays
+  // manual-only.
+  narrationDeliveryNotes String? @db.Text
+  narrationSpeed         Float?
+
   // Phase 5 — user-written camera/motion direction for IMAGE_TO_VIDEO scenes,
   // same manual-only pattern as narration (no AI-drafting step). Falls back
   // to `description` at generation time when unset.
@@ -645,6 +654,10 @@ enum AiJobType {
   // Phase 8 — drafts DialogueLine.deliveryNotes/speed for every line in a
   // scene in one call, so a conversation's delivery stays coherent.
   DIALOGUE_DIRECTION
+  // Mirrors DIALOGUE_DIRECTION one level up: drafts Scene.narrationDeliveryNotes/
+  // narrationSpeed from the scene's own narration text — see
+  // generateNarrationDirection in lib/voice.ts.
+  NARRATION_DIRECTION
   // Drafts Scene.narration plus, only when the scene currently has none, new
   // DialogueLine rows for characters already attached to the scene — same
   // "AI proposes, user can overwrite/edit" shape as AUDIO_PLANNING, one level

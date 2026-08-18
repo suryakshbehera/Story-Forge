@@ -12,6 +12,8 @@ const patchSchema = z.object({
     .enum(["STATIC", "ZOOM_IN", "ZOOM_OUT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN"])
     .optional(),
   narration: z.string().optional().nullable(),
+  narrationDeliveryNotes: z.string().optional().nullable(),
+  narrationSpeed: z.number().min(0.25).max(4).optional().nullable(),
   motionPrompt: z.string().optional().nullable(),
   videoPrompt: z.string().optional().nullable(),
   videoDurationSeconds: z.number().int().positive().optional().nullable(),

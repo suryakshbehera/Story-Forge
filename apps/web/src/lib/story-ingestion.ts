@@ -50,6 +50,7 @@ const ingestionResponseSchema = z.object({
       closingStyle: nullableText(),
       content: z.string().min(1),
     })
+    .nullable()
     .optional(),
   storyBible: z
     .object({
@@ -62,6 +63,7 @@ const ingestionResponseSchema = z.object({
       timelineNotes: nullableText(),
       content: z.string().min(1),
     })
+    .nullable()
     .optional(),
   blueprint: z
     .object({
@@ -71,16 +73,99 @@ const ingestionResponseSchema = z.object({
       tone: nullableText(),
       content: z.string().min(1),
     })
+    .nullable()
     .optional(),
   characters: z.array(characterSchema).default([]),
   locations: z.array(locationSchema).default([]),
 });
 
+// Structured Outputs schema (OpenAI-compatible `json_schema` strict mode,
+// passed through by OpenRouter) mirroring ingestionResponseSchema above.
+// Passed to callChatModel's jsonSchema param instead of jsonMode's looser
+// json_object — constrains the model to the exact flat shape token-by-token
+// rather than merely telling it the shape in prose, which is what let a
+// model close the "storyBible" object one brace late and silently nest
+// "blueprint"/"characters"/"locations" a level deeper (zod's lenient
+// top-level parsing then dropped them to their .default([])/undefined
+// instead of erroring — see the STORY_INGESTION ingestion-panel bug this
+// was added to fix). Strict mode requires every property to be listed in
+// "required" and forbids extra properties at every level; optionality is
+// expressed as a nullable type (["string","null"]) instead of omission.
+const nullableStringSchema = { type: ["string", "null"] } as const;
+
+function requireAll(properties: Record<string, unknown>) {
+  return { type: "object", properties, required: Object.keys(properties), additionalProperties: false } as const;
+}
+
+const characterJsonSchema = requireAll({
+  name: { type: "string" },
+  identity: nullableStringSchema,
+  appearance: nullableStringSchema,
+  personality: nullableStringSchema,
+  clothing: nullableStringSchema,
+  background: nullableStringSchema,
+  characterArc: nullableStringSchema,
+});
+
+const locationJsonSchema = requireAll({
+  name: { type: "string" },
+  description: nullableStringSchema,
+  architecture: nullableStringSchema,
+  environment: nullableStringSchema,
+  timeWeather: nullableStringSchema,
+  visualStyle: nullableStringSchema,
+});
+
+function nullableObject(schema: ReturnType<typeof requireAll>) {
+  return { anyOf: [schema, { type: "null" }] } as const;
+}
+
+const ingestionJsonSchema = requireAll({
+  story: nullableObject(
+    requireAll({
+      topic: nullableStringSchema,
+      premise: nullableStringSchema,
+      genre: nullableStringSchema,
+      tone: nullableStringSchema,
+      language: nullableStringSchema,
+      duration: nullableStringSchema,
+      narrationStyle: nullableStringSchema,
+      openingStyle: nullableStringSchema,
+      closingStyle: nullableStringSchema,
+      content: { type: "string" },
+    })
+  ),
+  storyBible: nullableObject(
+    requireAll({
+      premise: nullableStringSchema,
+      genre: nullableStringSchema,
+      tone: nullableStringSchema,
+      language: nullableStringSchema,
+      worldRules: nullableStringSchema,
+      visualStyle: nullableStringSchema,
+      timelineNotes: nullableStringSchema,
+      content: { type: "string" },
+    })
+  ),
+  blueprint: nullableObject(
+    requireAll({
+      actStructure: nullableStringSchema,
+      sceneShotGuidance: nullableStringSchema,
+      runtimeTarget: nullableStringSchema,
+      tone: nullableStringSchema,
+      content: { type: "string" },
+    })
+  ),
+  characters: { type: "array", items: characterJsonSchema },
+  locations: { type: "array", items: locationJsonSchema },
+});
+
 export type IngestionPreview = z.infer<typeof ingestionResponseSchema>;
 export { ingestionResponseSchema };
 
-// Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
-// appears below to satisfy the provider's json_object requirement.
+// Requires strict JSON output via jsonSchema (see callChatModel) — the word
+// "JSON" appears below since the provider's structured-output mode still
+// expects it mentioned in-prompt.
 const CHARACTERS_LOCATIONS_SHAPE = `  "characters": [
     {
       "name": "character name",
@@ -113,6 +198,16 @@ A producer has uploaded a source document (a bible, pitch doc, character sheet, 
   }. Read it and extract everything below as strict JSON — no prose, no markdown code fences, no commentary.
 
 Fill every field you can support from the document. If the document is silent on a field, use your best judgment from context (genre/tone/premise) rather than leaving obvious fields empty — like a writer drafting a first pass, not a form-filler. "content" fields are full prose write-ups (a few paragraphs each), not one-line summaries.
+
+Characters and Locations matter as much as the ${
+    projectType === "SINGLE" ? "Story" : "Story Bible/Blueprint"
+  } write-up — a document with a named cast and named settings should never come back with empty characters/locations arrays. Extract every character and location the document describes or clearly implies, each with as many of its fields filled in as the document supports, not just a bare name.
+
+The response must have exactly these five top-level keys: "story", "storyBible", "blueprint", "characters", "locations". ${
+    projectType === "SINGLE"
+      ? 'Set "storyBible" and "blueprint" to null — this is a single video, not a series.'
+      : 'Set "story" to null — this is a series, not a single video.'
+  }
 
 The JSON must match this shape exactly:
 {
@@ -173,7 +268,7 @@ export async function parseStoryDocument({
     modelId,
     systemPrompt: buildIngestionSystemPrompt(projectType),
     userPrompt,
-    jsonMode: true,
+    jsonSchema: { name: "story_ingestion", schema: ingestionJsonSchema },
   });
 
   let parsedJson: unknown;

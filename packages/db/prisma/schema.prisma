@@ -60,6 +60,15 @@ model Project {
   // styleReferences above.
   sourceDocuments Asset[] @relation("ProjectSourceDocument")
 
+  // Thumbnail shown on the project card so projects are recognizable at a
+  // glance in the dashboard grid. Purely cosmetic (not fed into generation,
+  // unlike styleReferences) — own relation for that reason. Modeled as a
+  // to-many relation for the same "Asset owns the FK back to its parent"
+  // convention as every other relation on this model, but the API enforces
+  // a single-image invariant (replacing the old cover on new upload) since
+  // a card only ever shows one image.
+  coverImage Asset[] @relation("ProjectCoverImage")
+
   @@map("projects")
 }
 
@@ -558,6 +567,10 @@ model Asset {
   // Phase 9 — uploaded source document (PDF/DOCX) — see Project.sourceDocuments.
   projectSourceId String?
   projectSource   Project? @relation("ProjectSourceDocument", fields: [projectSourceId], references: [id], onDelete: Cascade)
+
+  // Project card thumbnail — see Project.coverImage.
+  projectCoverId String?
+  projectCover   Project? @relation("ProjectCoverImage", fields: [projectCoverId], references: [id], onDelete: Cascade)
 
   // Generation metadata — meaningful for AI-produced assets (GENERATED_IMAGE,
   // AUDIO_NARRATION, AUDIO_DIALOGUE). isSelected mirrors Version.isSelected:

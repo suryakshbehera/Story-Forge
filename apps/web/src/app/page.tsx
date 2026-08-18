@@ -4,11 +4,15 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { NewProjectDialog } from "@/components/new-project-dialog";
 import { ProjectCardMenu } from "@/components/project-card-menu";
+import { ProjectCoverImage } from "@/components/project-cover-image";
 
 export default async function HomePage() {
   const projects = await prisma.project.findMany({
     orderBy: { updatedAt: "desc" },
-    include: { _count: { select: { characters: true, locations: true, seasons: true } } },
+    include: {
+      _count: { select: { characters: true, locations: true, seasons: true } },
+      coverImage: { select: { storageKey: true }, take: 1 },
+    },
   });
 
   return (
@@ -35,6 +39,10 @@ export default async function HomePage() {
           {projects.map((project) => (
             <Link key={project.id} href={`/projects/${project.id}`}>
               <Card className="h-full transition-colors hover:border-foreground/30">
+                <ProjectCoverImage
+                  projectId={project.id}
+                  storageKey={project.coverImage[0]?.storageKey ?? null}
+                />
                 <CardHeader>
                   <div className="flex items-start justify-between gap-2">
                     <CardTitle className="text-base">{project.name}</CardTitle>

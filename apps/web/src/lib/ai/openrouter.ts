@@ -27,6 +27,19 @@ export interface ChatModelParams {
   // userPrompt — for multi-turn callers like the Story Chat surface. Every
   // other job in this file is single-shot and omits this.
   history?: ChatMessage[];
+  // Structured Outputs (OpenAI-compatible `json_schema` response_format,
+  // passed through by OpenRouter for supporting models) — stronger than
+  // jsonMode's `json_object`: json_object only guarantees syntactically
+  // valid JSON, not that keys land at the right nesting level. Use this
+  // instead of jsonMode when the response has a specific multi-field shape
+  // the caller will destructure (e.g. story-ingestion.ts's flat top-level
+  // story/characters/locations) — a model that's merely told the shape in
+  // prose can (and, per the STORY_INGESTION bug this was added for,
+  // sometimes does) close an object one brace too late and silently nest
+  // later sibling keys one level deeper, where zod's lenient parsing then
+  // drops them instead of erroring. Mutually exclusive with jsonMode; when
+  // set, jsonMode is ignored.
+  jsonSchema?: { name: string; schema: Record<string, unknown> };
 }
 
 export class OpenRouterError extends Error {}
@@ -88,6 +101,7 @@ export async function callChatModel({
   images,
   videos,
   history,
+  jsonSchema,
 }: ChatModelParams): Promise<string> {
   const apiKey = requireApiKey();
 
@@ -111,7 +125,16 @@ export async function callChatModel({
       body: JSON.stringify({
         model: modelId,
         temperature,
-        ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+        ...(jsonSchema
+          ? {
+              response_format: {
+                type: "json_schema",
+                json_schema: { name: jsonSchema.name, strict: true, schema: jsonSchema.schema },
+              },
+            }
+          : jsonMode
+            ? { response_format: { type: "json_object" } }
+            : {}),
         messages: [
           { role: "system", content: systemPrompt },
           ...(history ?? []),

@@ -8,7 +8,7 @@
 # size but removes an entire class of "works locally, missing file in prod"
 # failures for very little that actually matters on Railway.
 
-FROM node:20-bookworm-slim AS base
+FROM node:22-bookworm-slim AS base
 RUN corepack enable && corepack prepare pnpm@11.21.0 --activate
 # openssl — Prisma's Linux query-engine binary dynamically links libssl;
 # bookworm-slim doesn't ship it by default.

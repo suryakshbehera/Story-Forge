@@ -14,6 +14,13 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// Every page reads live Prisma state (projects, scenes, generated assets) —
+// nothing here is ever meaningfully static. Without this, `next build` tries
+// to prerender pages like "/" at build time, which fails outright in Docker
+// since DATABASE_URL only exists at container runtime, not during the image
+// build.
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "Narrata",
   description: "Manual-first AI story/video production studio",

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
 import { ElevenLabsError } from "@/lib/ai/elevenlabs";
+import { SarvamError } from "@/lib/ai/sarvam";
 import { generateDialogueAudio } from "@/lib/voice";
 
 const bodySchema = z.object({
@@ -21,11 +22,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const audio = await generateDialogueAudio({ dialogueLineId, modelId: model.modelId });
+    const audio = await generateDialogueAudio({ dialogueLineId, modelId: model.modelId, provider: model.provider });
     return NextResponse.json(audio, { status: 201 });
   } catch (error) {
-    if (error instanceof ElevenLabsError) {
+    if (error instanceof ElevenLabsError || error instanceof SarvamError) {
       return NextResponse.json({ error: error.message }, { status: 502 });
+    }
+    if (error instanceof Error) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
     throw error;
   }

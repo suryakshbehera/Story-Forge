@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { prisma, type Asset } from "@/lib/db";
 import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
-import { generateSpeech, ElevenLabsError } from "@/lib/ai/elevenlabs";
+import { generateSpeech as generateElevenLabsSpeech, ElevenLabsError } from "@/lib/ai/elevenlabs";
+import { generateSpeech as generateSarvamSpeech, SarvamError } from "@/lib/ai/sarvam";
+import { sarvamLanguageCode } from "@/lib/languages";
 import { storage, buildStorageKey } from "@/lib/storage";
 
 export interface SerializedAudioTake {
@@ -33,6 +35,66 @@ async function resolveSceneProjectId(sceneId: string): Promise<string> {
   return projectId;
 }
 
+// Story.language / StoryBible.language — the same field STORY_WRITING/
+// SCENE_PLANNING/etc. already read via assembleContext() to decide what
+// language to actually write narration/dialogue text in (confirmed live
+// 2026-08-18: narration for an Odia-language project is genuine Odia
+// script). Reused here for the same project, not re-asked, so a Sarvam call
+// can't drift from the language its own text was written in.
+async function resolveSceneLanguage(sceneId: string): Promise<string | null> {
+  const scene = await prisma.scene.findUniqueOrThrow({
+    where: { id: sceneId },
+    include: {
+      story: true,
+      episode: { include: { season: { include: { project: { include: { storyBible: true } } } } } },
+    },
+  });
+  return scene.story?.language ?? scene.episode?.season.project.storyBible?.language ?? null;
+}
+
+// VOICE has two providers (see lib/ai/elevenlabs.ts, lib/ai/sarvam.ts) —
+// ElevenLabs for the languages it covers, Sarvam for Indic languages
+// ElevenLabs' TTS doesn't (added 2026-08-18 specifically because Odia is one
+// of them). `provider` comes from the selected AiModelOption row, never
+// guessed — an unrecognized provider errors clearly rather than silently
+// misrouting to ElevenLabs with a modelId it doesn't understand (exactly
+// what happened before this dispatch existed: Phase 10 hardcoded ElevenLabs
+// for every VOICE call regardless of which row was actually selected).
+async function generateSpeechForProvider({
+  provider,
+  modelId,
+  text,
+  voiceId,
+  sceneId,
+  instructions,
+  speed,
+}: {
+  provider: string;
+  modelId: string;
+  text: string;
+  voiceId: string;
+  sceneId: string;
+  instructions?: string;
+  speed?: number;
+}): Promise<{ base64: string; mimeType: string }> {
+  if (provider === "sarvam") {
+    const language = await resolveSceneLanguage(sceneId);
+    const languageCode = sarvamLanguageCode(language);
+    if (!languageCode) {
+      throw new SarvamError(
+        language
+          ? `Sarvam doesn't support "${language}" — set a Sarvam-supported language on the Story/Series, or pick a different Voice provider.`
+          : "Set a Language on this Story/Series (Story/Series settings) before generating Sarvam voice audio."
+      );
+    }
+    return generateSarvamSpeech({ modelId, text, voiceId, languageCode, speed });
+  }
+  if (provider === "elevenlabs") {
+    return generateElevenLabsSpeech({ modelId, text, voiceId, instructions, speed });
+  }
+  throw new Error(`Unsupported Voice provider "${provider}" — pick an ElevenLabs or Sarvam model in Settings → AI Models.`);
+}
+
 // ── Narration — one voiceover script per Scene (Scene.narration, manually
 // written, mirroring Episode.summary), with generated audio takes attached
 // via Asset.narrationSceneId. Voice is always the project's narratorVoiceName
@@ -42,9 +104,11 @@ async function resolveSceneProjectId(sceneId: string): Promise<string> {
 export async function generateNarrationAudio({
   sceneId,
   modelId,
+  provider,
 }: {
   sceneId: string;
   modelId: string;
+  provider: string;
 }): Promise<SerializedAudioTake> {
   const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
   if (!scene.narration?.trim()) {
@@ -59,7 +123,13 @@ export async function generateNarrationAudio({
     );
   }
 
-  const generated = await generateSpeech({ modelId, text: scene.narration, voiceId: project.narratorVoiceName });
+  const generated = await generateSpeechForProvider({
+    provider,
+    modelId,
+    text: scene.narration,
+    voiceId: project.narratorVoiceName,
+    sceneId,
+  });
   const buffer = Buffer.from(generated.base64, "base64");
   const key = buildStorageKey("scenes", sceneId, "narration.mp3");
   await storage.put(key, buffer);
@@ -454,9 +524,11 @@ export async function moveDialogueLine(id: string, direction: "up" | "down"): Pr
 export async function generateDialogueAudio({
   dialogueLineId,
   modelId,
+  provider,
 }: {
   dialogueLineId: string;
   modelId: string;
+  provider: string;
 }): Promise<SerializedAudioTake> {
   const line = await prisma.dialogueLine.findUniqueOrThrow({
     where: { id: dialogueLineId },
@@ -473,10 +545,12 @@ export async function generateDialogueAudio({
     );
   }
 
-  const generated = await generateSpeech({
+  const generated = await generateSpeechForProvider({
+    provider,
     modelId,
     text: line.text,
     voiceId: line.character.voiceName,
+    sceneId: line.sceneId,
     instructions: line.deliveryNotes ?? undefined,
     speed: line.speed ?? undefined,
   });

@@ -11,6 +11,10 @@ const defaultModels: Array<{
   provider: string;
   modelId: string;
   displayName: string;
+  // Omit for the normal case (becomes the job's default). Only needed when
+  // adding a second option for a job that already has a default — e.g.
+  // Sarvam alongside ElevenLabs for VOICE, see below.
+  isDefault?: boolean;
 }> = [
   { jobType: "MASTER_AI", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "STORY_WRITING", provider: "openrouter", modelId: "anthropic/claude-sonnet-5", displayName: "Claude Sonnet 5" },
@@ -19,6 +23,11 @@ const defaultModels: Array<{
   { jobType: "IMAGE_GENERATION", provider: "openrouter", modelId: "openai/gpt-5.4-image-2", displayName: "GPT-5.4 Image 2" },
   { jobType: "IMAGE_VALIDATION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "VOICE", provider: "elevenlabs", modelId: "eleven_multilingual_v2", displayName: "Eleven Multilingual v2" },
+  // Not the default — ElevenLabs stays the default VOICE choice; pick this
+  // explicitly per generation call for a Story/Series whose Language is one
+  // ElevenLabs' TTS doesn't cover (confirmed 2026-08-18: Odia is one of
+  // them). See lib/ai/sarvam.ts and lib/languages.ts's sarvamLanguageCode().
+  { jobType: "VOICE", provider: "sarvam", modelId: "bulbul:v3", displayName: "Sarvam Bulbul v3", isDefault: false },
   { jobType: "VIDEO_GENERATION", provider: "openrouter", modelId: "google/veo-3.1", displayName: "Veo 3.1" },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
   { jobType: "MUSIC_GENERATION", provider: "elevenlabs", modelId: "music_v2", displayName: "Eleven Music v2" },
@@ -64,7 +73,7 @@ async function main() {
         provider: model.provider,
         modelId: model.modelId,
         displayName: model.displayName,
-        isDefault: true,
+        isDefault: model.isDefault ?? true,
         isEnabled: true,
       },
     });

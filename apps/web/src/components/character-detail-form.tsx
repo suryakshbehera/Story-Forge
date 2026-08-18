@@ -122,7 +122,7 @@ export function CharacterDetailForm({
           onChange={(e) => update("characterArc", e.target.value)}
         />
       </Field>
-      <Field label={`Voice (ElevenLabs voice ID, e.g. "21m00Tcm4TlvDq8ikWAM")`}>
+      <Field label={`Voice (ElevenLabs voice ID, or Sarvam speaker name e.g. "shubh" — must match whichever provider you pick when generating)`}>
         <Input value={fields.voiceName} onChange={(e) => update("voiceName", e.target.value)} />
       </Field>
       <p className="-mt-2 text-xs text-muted-foreground">

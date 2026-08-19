@@ -69,6 +69,20 @@ model Project {
   // a card only ever shows one image.
   coverImage Asset[] @relation("ProjectCoverImage")
 
+  // Nullable rather than required: pre-auth Project rows already exist in
+  // production with no owner, and at `prisma migrate deploy` time (which
+  // runs before the boot-time bootstrap script upserts the admin user) a
+  // NOT NULL FK would have nothing valid to point at yet. The bootstrap
+  // script backfills any ownerId IS NULL row to the admin's id right after
+  // upserting the admin, before `pnpm start` accepts traffic — see
+  // packages/db/src/bootstrap-admin.ts. proxy.ts treats ownerId === null as
+  // admin-only-accessible as a safe default; this state should never be
+  // visible to end users in practice, but code must not crash if it is.
+  // onDelete SetNull (not Cascade) so deleting a user account doesn't
+  // silently destroy their whole project tree — there's no undo for that.
+  ownerId String?
+  owner   User?   @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
   @@map("projects")
 }
 

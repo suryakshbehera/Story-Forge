@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { prisma, type Asset } from "@/lib/db";
-import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
+import { callChatModel, generateSpeech as generateOpenRouterSpeech, OpenRouterError } from "@/lib/ai/openrouter";
 import { generateSpeech as generateElevenLabsSpeech, ElevenLabsError } from "@/lib/ai/elevenlabs";
 import { generateSpeech as generateSarvamSpeech, SarvamError } from "@/lib/ai/sarvam";
 import { sarvamLanguageCode } from "@/lib/languages";
@@ -52,14 +52,19 @@ async function resolveSceneLanguage(sceneId: string): Promise<string | null> {
   return scene.story?.language ?? scene.episode?.season.project.storyBible?.language ?? null;
 }
 
-// VOICE has two providers (see lib/ai/elevenlabs.ts, lib/ai/sarvam.ts) —
-// ElevenLabs for the languages it covers, Sarvam for Indic languages
-// ElevenLabs' TTS doesn't (added 2026-08-18 specifically because Odia is one
-// of them). `provider` comes from the selected AiModelOption row, never
-// guessed — an unrecognized provider errors clearly rather than silently
-// misrouting to ElevenLabs with a modelId it doesn't understand (exactly
-// what happened before this dispatch existed: Phase 10 hardcoded ElevenLabs
-// for every VOICE call regardless of which row was actually selected).
+// VOICE has three providers (see lib/ai/elevenlabs.ts, lib/ai/sarvam.ts,
+// lib/ai/openrouter.ts's generateSpeech) — ElevenLabs for the languages it
+// covers, Sarvam for Indic languages ElevenLabs' TTS doesn't (added
+// 2026-08-18 specifically because Odia is one of them), OpenRouter for
+// whatever OpenAI-compatible TTS model/voice the user points an AiModelOption
+// row at (added 2026-08-19 on request — OpenRouter has its own documented
+// POST /api/v1/audio/speech endpoint, unlike the abandoned music/SFX
+// chat-completions workaround). `provider` comes from the selected
+// AiModelOption row, never guessed — an unrecognized provider errors clearly
+// rather than silently misrouting to ElevenLabs with a modelId it doesn't
+// understand (exactly what happened before this dispatch existed: Phase 10
+// hardcoded ElevenLabs for every VOICE call regardless of which row was
+// actually selected).
 async function generateSpeechForProvider({
   provider,
   modelId,
@@ -92,7 +97,10 @@ async function generateSpeechForProvider({
   if (provider === "elevenlabs") {
     return generateElevenLabsSpeech({ modelId, text, voiceId, instructions, speed });
   }
-  throw new Error(`Unsupported Voice provider "${provider}" — pick an ElevenLabs or Sarvam model in Settings → AI Models.`);
+  if (provider === "openrouter") {
+    return generateOpenRouterSpeech({ modelId, text, voiceId, instructions, speed });
+  }
+  throw new Error(`Unsupported Voice provider "${provider}" — pick an ElevenLabs, Sarvam, or OpenRouter model in Settings → AI Models.`);
 }
 
 // ── Narration — one voiceover script per Scene (Scene.narration, manually

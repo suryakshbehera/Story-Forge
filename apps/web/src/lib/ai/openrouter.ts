@@ -343,7 +343,76 @@ export async function generateVideo({
   return { base64: buffer.toString("base64"), mimeType };
 }
 
-// generateSpeech (VOICE) and generateAudio (MUSIC_GENERATION/SFX_GENERATION)
-// used to live here — see apps/web/src/lib/ai/elevenlabs.ts. Phase 10 moved
-// all three job types off this OpenRouter workaround onto ElevenLabs'
-// purpose-built endpoints.
+// generateAudio (MUSIC_GENERATION/SFX_GENERATION) used to live here too — see
+// apps/web/src/lib/ai/elevenlabs.ts. Phase 10 moved those two job types off
+// this file's chat-completions workaround onto ElevenLabs' purpose-built
+// endpoints; that workaround is gone for good (no confirmed dedicated
+// music/SFX endpoint exists on OpenRouter). VOICE's generateSpeech below is
+// different: OpenRouter has an actual documented POST /api/v1/audio/speech
+// endpoint (OpenAI-compatible, confirmed via openrouter.ai/docs 2026-08-19),
+// so re-adding it here as a third VOICE provider alongside ElevenLabs/Sarvam
+// isn't reviving the old workaround.
+
+export interface GenerateSpeechParams {
+  modelId: string; // OpenRouter TTS model slug, e.g. "openai/gpt-4o-mini-tts-2025-12-15"
+  text: string;
+  voiceId: string; // provider-specific voice id, e.g. "alloy" — Character.voiceName / Project.narratorVoiceName
+  // Passed through as OpenRouter's provider-specific `instructions` field —
+  // confirmed via OpenRouter's audio API announcement: "OpenAI's speech
+  // models accept an `instructions` field for tone control." Models/providers
+  // that don't support it are expected to just ignore it (same passthrough
+  // behavior OpenRouter documents for other provider-specific options), so no
+  // per-model branching here.
+  instructions?: string;
+  speed?: number; // playback multiplier, OpenRouter default 1.0
+}
+
+export interface GeneratedSpeech {
+  base64: string;
+  mimeType: string;
+}
+
+// VOICE — OpenRouter's dedicated Audio Speech API, not chat completions.
+export async function generateSpeech({
+  modelId,
+  text,
+  voiceId,
+  instructions,
+  speed,
+}: GenerateSpeechParams): Promise<GeneratedSpeech> {
+  const apiKey = requireApiKey();
+
+  const response = await fetchWithTimeout(
+    "https://openrouter.ai/api/v1/audio/speech",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        input: text,
+        voice: voiceId,
+        response_format: "mp3",
+        ...(speed !== undefined ? { speed } : {}),
+        ...(instructions?.trim() ? { instructions } : {}),
+      }),
+    },
+    60_000
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${body}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.byteLength === 0) {
+    throw new OpenRouterError("OpenRouter returned no audio data.");
+  }
+  const contentType = response.headers.get("content-type");
+  const mimeType = contentType && contentType.startsWith("audio/") ? contentType.split(";")[0].trim() : "audio/mpeg";
+
+  return { base64: buffer.toString("base64"), mimeType };
+}

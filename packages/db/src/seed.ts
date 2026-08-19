@@ -28,6 +28,16 @@ const defaultModels: Array<{
   // ElevenLabs' TTS doesn't cover (confirmed 2026-08-18: Odia is one of
   // them). See lib/ai/sarvam.ts and lib/languages.ts's sarvamLanguageCode().
   { jobType: "VOICE", provider: "sarvam", modelId: "bulbul:v3", displayName: "Sarvam Bulbul v3", isDefault: false },
+  // Not the default either — third VOICE option, added 2026-08-19 on
+  // request. See lib/ai/openrouter.ts's generateSpeech (POST
+  // /api/v1/audio/speech, OpenAI-compatible) and lib/voice.ts's dispatch.
+  {
+    jobType: "VOICE",
+    provider: "openrouter",
+    modelId: "openai/gpt-4o-mini-tts-2025-12-15",
+    displayName: "GPT-4o Mini TTS (OpenRouter)",
+    isDefault: false,
+  },
   { jobType: "VIDEO_GENERATION", provider: "openrouter", modelId: "google/veo-3.1", displayName: "Veo 3.1" },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
   { jobType: "MUSIC_GENERATION", provider: "elevenlabs", modelId: "music_v2", displayName: "Eleven Music v2" },

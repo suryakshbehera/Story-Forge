@@ -17,6 +17,8 @@ const patchSchema = z.object({
   motionPrompt: z.string().optional().nullable(),
   videoPrompt: z.string().optional().nullable(),
   videoDurationSeconds: z.number().int().positive().optional().nullable(),
+  videoResolution: z.string().optional().nullable(),
+  videoGenerateAudio: z.boolean().optional(),
   musicPrompt: z.string().optional().nullable(),
   sfxPrompt: z.string().optional().nullable(),
   musicVolume: z.number().min(0).max(1).optional(),

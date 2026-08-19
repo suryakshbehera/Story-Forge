@@ -10,17 +10,21 @@ import {
 } from "@/components/ui/select";
 import type { AiJobType } from "db";
 
-interface ModelOption {
+export interface ModelOption {
   id: string;
   displayName: string;
   modelId: string;
   isDefault: boolean;
+  // Only meaningfully populated for VIDEO_GENERATION rows — see
+  // video-model-config.ts. Raw Json from the API, parsed by the caller.
+  config?: unknown;
 }
 
 export function ModelSelect({
   jobType,
   value,
   onChange,
+  onModelsChange,
 }: {
   jobType: AiJobType;
   // Always a defined string ("" = nothing selected yet) — Base UI's Select
@@ -29,6 +33,10 @@ export function ModelSelect({
   // uncontrolled (undefined) to controlled once the default model loads.
   value: string;
   onChange: (modelId: string) => void;
+  // Fired whenever the fetched model list changes — lets callers (e.g. the
+  // scene video panel) read the currently selected model's `config` for
+  // segment-duration/resolution suggestions without re-fetching themselves.
+  onModelsChange?: (models: ModelOption[]) => void;
 }) {
   const [models, setModels] = useState<ModelOption[] | null>(null);
 
@@ -39,6 +47,7 @@ export function ModelSelect({
       .then((data: ModelOption[]) => {
         if (cancelled) return;
         setModels(data);
+        onModelsChange?.(data);
         if (!value) {
           const fallback = data.find((m) => m.isDefault) ?? data[0];
           if (fallback) onChange(fallback.id);

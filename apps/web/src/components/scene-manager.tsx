@@ -61,6 +61,8 @@ export interface SceneItem {
   motionPrompt: string | null;
   videoPrompt: string | null;
   videoDurationSeconds: number | null;
+  videoResolution: string | null;
+  videoGenerateAudio: boolean;
   videoClips: SceneVideoClipItem[];
   musicPrompt: string | null;
   sfxPrompt: string | null;
@@ -699,6 +701,8 @@ function SceneRow({
             initialMotionPrompt={scene.motionPrompt ?? ""}
             initialVideoPrompt={scene.videoPrompt ?? ""}
             initialVideoDurationSeconds={scene.videoDurationSeconds}
+            initialVideoResolution={scene.videoResolution}
+            initialVideoGenerateAudio={scene.videoGenerateAudio}
             initialVideoClips={scene.videoClips}
           />
         )}

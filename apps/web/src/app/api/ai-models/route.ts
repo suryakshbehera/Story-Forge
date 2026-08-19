@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { prisma, type AiJobType } from "@/lib/db";
+import { prisma, Prisma, type AiJobType } from "@/lib/db";
 
 const JOB_TYPES = [
   "MASTER_AI",
@@ -48,6 +48,10 @@ const createSchema = z.object({
   displayName: z.string().min(1),
   isDefault: z.boolean().optional(),
   isEnabled: z.boolean().optional(),
+  // Free-form per-job config — e.g. VideoModelConfig (video-model-config.ts)
+  // for VIDEO_GENERATION models. Untyped here since AiModelOption.config is
+  // itself untyped Json; the admin UI is responsible for shaping it per job.
+  config: z.record(z.string(), z.unknown()).optional().nullable(),
 });
 
 export async function POST(req: NextRequest) {
@@ -68,6 +72,7 @@ export async function POST(req: NextRequest) {
         displayName: body.displayName,
         isDefault: body.isDefault ?? false,
         isEnabled: body.isEnabled ?? true,
+        config: body.config == null ? undefined : (body.config as Prisma.InputJsonValue),
       },
     });
   });

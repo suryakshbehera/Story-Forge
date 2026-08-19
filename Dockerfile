@@ -37,9 +37,15 @@ COPY --from=build /app /app
 WORKDIR /app/apps/web
 
 EXPOSE 3002
-# Applies any pending migrations against DATABASE_URL before serving — the
-# prod DB starts with no tables at all, so skipping this makes the very
-# first request 500. Safe to run on every restart (`migrate deploy` is a
-# no-op once everything's applied); a second concurrent instance racing this
-# would need something more careful, but that's not this deploy's shape.
-CMD ["sh", "-c", "pnpm --filter db exec prisma migrate deploy && pnpm start"]
+# 1. Applies any pending migrations against DATABASE_URL before serving —
+#    the prod DB starts with no tables at all, so skipping this makes the
+#    very first request 500. Safe to run on every restart (`migrate deploy`
+#    is a no-op once everything's applied); a second concurrent instance
+#    racing this would need something more careful, but that's not this
+#    deploy's shape.
+# 2. Upserts the ADMIN_EMAIL/ADMIN_PASSWORD admin account and backfills any
+#    pre-auth Project rows with no owner to that admin — see
+#    packages/db/src/bootstrap-admin.ts. Must run after migrate (needs the
+#    users/projects tables to exist) and before `pnpm start` (so no request
+#    is ever served before an admin account exists to log in with).
+CMD ["sh", "-c", "pnpm --filter db exec prisma migrate deploy && pnpm --filter db exec tsx src/bootstrap-admin.ts && pnpm start"]

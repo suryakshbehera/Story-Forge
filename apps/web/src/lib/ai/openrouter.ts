@@ -243,6 +243,13 @@ export interface GenerateVideoParams {
   // the seeded default, supports both). Omitted for single-shot scenes.
   lastFrameDataUri?: string;
   durationSeconds?: number;
+  // Native audio generation toggle — OpenRouter's confirmed `generate_audio`
+  // field (defaults true for models that support it upstream, so this is
+  // sent explicitly rather than omitted whenever the caller has an opinion).
+  generateAudio?: boolean;
+  // e.g. "480p"/"720p" — model-dependent, omitted when the caller has no
+  // preference so the provider's own default applies.
+  resolution?: string;
 }
 
 export interface GeneratedVideo {
@@ -288,6 +295,8 @@ export async function generateVideo({
   imageDataUri,
   lastFrameDataUri,
   durationSeconds,
+  generateAudio,
+  resolution,
 }: GenerateVideoParams): Promise<GeneratedVideo> {
   const apiKey = requireApiKey();
 
@@ -303,6 +312,8 @@ export async function generateVideo({
         model: modelId,
         prompt,
         ...(durationSeconds ? { duration: durationSeconds } : {}),
+        ...(generateAudio !== undefined ? { generate_audio: generateAudio } : {}),
+        ...(resolution ? { resolution } : {}),
         ...(imageDataUri
           ? {
               frame_images: [

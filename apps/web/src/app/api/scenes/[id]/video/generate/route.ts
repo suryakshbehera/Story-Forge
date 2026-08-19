@@ -3,9 +3,12 @@ import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
 import { OpenRouterError } from "@/lib/ai/openrouter";
 import { generateSceneVideo } from "@/lib/scene-video";
+import { parseVideoModelConfig } from "@/lib/video-model-config";
 
 const bodySchema = z.object({
   modelId: z.string().optional(),
+  resolution: z.string().optional(),
+  generateAudio: z.boolean().optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -21,8 +24,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const clip = await generateSceneVideo({ sceneId, modelId: model.modelId });
-    return NextResponse.json(clip, { status: 201 });
+    const clips = await generateSceneVideo({
+      sceneId,
+      modelId: model.modelId,
+      modelConfig: parseVideoModelConfig(model.config),
+      resolution: body.resolution,
+      generateAudio: body.generateAudio,
+    });
+    return NextResponse.json(clips, { status: 201 });
   } catch (error) {
     if (error instanceof OpenRouterError) {
       return NextResponse.json({ error: error.message }, { status: 502 });

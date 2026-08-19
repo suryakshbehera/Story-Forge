@@ -1,18 +1,59 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ModelSelect } from "@/components/model-select";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ModelSelect, type ModelOption } from "@/components/model-select";
 import { Clapperboard, Save, Sparkles, Trash2 } from "lucide-react";
+import { parseVideoModelConfig } from "@/lib/video-model-config";
+import { planVideoSegments } from "@/lib/video-segmentation";
 
 export interface SceneVideoClipItem {
   id: string;
   url: string;
   isSelected: boolean;
+  batchId?: string | null;
+  segmentOrder?: number | null;
+}
+
+interface VideoTake {
+  key: string;
+  clips: SceneVideoClipItem[];
+  isSelected: boolean;
+}
+
+function groupIntoTakes(clips: SceneVideoClipItem[]): VideoTake[] {
+  const byBatch = new Map<string, SceneVideoClipItem[]>();
+  const takes: VideoTake[] = [];
+  for (const clip of clips) {
+    if (!clip.batchId) {
+      takes.push({ key: clip.id, clips: [clip], isSelected: clip.isSelected });
+      continue;
+    }
+    const existing = byBatch.get(clip.batchId);
+    if (existing) {
+      existing.push(clip);
+    } else {
+      const group: SceneVideoClipItem[] = [clip];
+      byBatch.set(clip.batchId, group);
+      takes.push({ key: clip.batchId, clips: group, isSelected: clip.isSelected });
+    }
+  }
+  for (const take of takes) {
+    take.clips.sort((a, b) => (a.segmentOrder ?? 0) - (b.segmentOrder ?? 0));
+  }
+  return takes;
 }
 
 // Motion prompt/video prompt/duration are user-written, never AI-drafted —
@@ -30,6 +71,8 @@ export function SceneVideoPanel({
   initialMotionPrompt,
   initialVideoPrompt,
   initialVideoDurationSeconds,
+  initialVideoResolution,
+  initialVideoGenerateAudio,
   initialVideoClips,
 }: {
   sceneId: string;
@@ -38,6 +81,8 @@ export function SceneVideoPanel({
   initialMotionPrompt: string;
   initialVideoPrompt: string;
   initialVideoDurationSeconds: number | null;
+  initialVideoResolution: string | null;
+  initialVideoGenerateAudio: boolean;
   initialVideoClips: SceneVideoClipItem[];
 }) {
   const [motionPrompt, setMotionPrompt] = useState(initialMotionPrompt);
@@ -46,16 +91,47 @@ export function SceneVideoPanel({
   const [savedVideoPrompt, setSavedVideoPrompt] = useState(initialVideoPrompt);
   const [duration, setDuration] = useState(initialVideoDurationSeconds?.toString() ?? "");
   const [savedDuration, setSavedDuration] = useState(initialVideoDurationSeconds?.toString() ?? "");
+  const [resolution, setResolution] = useState(initialVideoResolution ?? "");
+  const [savedResolution, setSavedResolution] = useState(initialVideoResolution ?? "");
+  const [generateAudio, setGenerateAudio] = useState(initialVideoGenerateAudio);
+  const [savedGenerateAudio, setSavedGenerateAudio] = useState(initialVideoGenerateAudio);
   const [saving, setSaving] = useState(false);
   const [modelId, setModelId] = useState("");
+  const [models, setModels] = useState<ModelOption[]>([]);
   const [generating, setGenerating] = useState(false);
   const [videoClips, setVideoClips] = useState(initialVideoClips);
   const [draftModelId, setDraftModelId] = useState("");
   const [drafting, setDrafting] = useState(false);
+  const [voiceDurationSeconds, setVoiceDurationSeconds] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/scenes/${sceneId}/voice-duration`)
+      .then((res) => res.json())
+      .then((data: { seconds: number | null }) => {
+        if (!cancelled) setVoiceDurationSeconds(data.seconds);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [sceneId]);
 
   const dirty =
-    motionPrompt !== savedMotionPrompt || videoPrompt !== savedVideoPrompt || duration !== savedDuration;
+    motionPrompt !== savedMotionPrompt ||
+    videoPrompt !== savedVideoPrompt ||
+    duration !== savedDuration ||
+    resolution !== savedResolution ||
+    generateAudio !== savedGenerateAudio;
   const canGenerate = mode === "TEXT_TO_VIDEO" || hasSelectedImage;
+
+  const selectedModel = models.find((m) => m.id === modelId);
+  const modelConfig = parseVideoModelConfig(selectedModel?.config);
+  const targetDuration = duration ? Number(duration) : voiceDurationSeconds;
+  const segmentPlan = useMemo(
+    () => (targetDuration && targetDuration > 0 ? planVideoSegments(targetDuration, modelConfig) : null),
+    [targetDuration, modelConfig]
+  );
 
   async function save() {
     setSaving(true);
@@ -67,12 +143,16 @@ export function SceneVideoPanel({
           motionPrompt: motionPrompt || null,
           videoPrompt: videoPrompt || null,
           videoDurationSeconds: duration ? Number(duration) : null,
+          videoResolution: resolution || null,
+          videoGenerateAudio: generateAudio,
         }),
       });
       if (!res.ok) throw new Error();
       setSavedMotionPrompt(motionPrompt);
       setSavedVideoPrompt(videoPrompt);
       setSavedDuration(duration);
+      setSavedResolution(resolution);
+      setSavedGenerateAudio(generateAudio);
       toast.success("Motion settings saved.");
     } catch {
       toast.error("Couldn't save motion settings.");
@@ -101,9 +181,9 @@ export function SceneVideoPanel({
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? "Generation failed");
       }
-      const clip: SceneVideoClipItem = await res.json();
-      setVideoClips((prev) => [clip, ...prev.map((c) => ({ ...c, isSelected: false }))]);
-      toast.success("Video clip generated.");
+      const clips: SceneVideoClipItem[] = await res.json();
+      setVideoClips((prev) => [...clips, ...prev.map((c) => ({ ...c, isSelected: false }))]);
+      toast.success(clips.length > 1 ? `${clips.length} video segments generated.` : "Video clip generated.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
     } finally {
@@ -137,24 +217,30 @@ export function SceneVideoPanel({
     }
   }
 
-  async function selectClip(assetId: string) {
-    const res = await fetch(`/api/scenes/${sceneId}/video/${assetId}/select`, { method: "POST" });
+  async function selectTake(clipId: string) {
+    const res = await fetch(`/api/scenes/${sceneId}/video/${clipId}/select`, { method: "POST" });
     if (!res.ok) {
-      toast.error("Couldn't select clip.");
+      toast.error("Couldn't select this take.");
       return;
     }
-    setVideoClips((prev) => prev.map((c) => ({ ...c, isSelected: c.id === assetId })));
+    const selectedBatch: SceneVideoClipItem[] = await res.json();
+    const selectedIds = new Set(selectedBatch.map((c) => c.id));
+    setVideoClips((prev) => prev.map((c) => ({ ...c, isSelected: selectedIds.has(c.id) })));
   }
 
-  async function deleteClip(assetId: string) {
-    if (!confirm("Delete this video clip? This can't be undone.")) return;
-    const res = await fetch(`/api/scenes/${sceneId}/video/${assetId}`, { method: "DELETE" });
+  async function deleteTake(take: VideoTake) {
+    if (!confirm("Delete this take? This can't be undone.")) return;
+    const res = await fetch(`/api/scenes/${sceneId}/video/${take.clips[0].id}`, { method: "DELETE" });
     if (!res.ok) {
-      toast.error("Couldn't delete clip.");
+      toast.error("Couldn't delete take.");
       return;
     }
-    setVideoClips((prev) => prev.filter((c) => c.id !== assetId));
+    const idsToRemove = new Set(take.clips.map((c) => c.id));
+    setVideoClips((prev) => prev.filter((c) => !idsToRemove.has(c.id)));
   }
+
+  const takes = groupIntoTakes(videoClips);
+  const resolutionOptions = modelConfig?.resolutions ?? [];
 
   return (
     <div className="flex flex-col gap-3 border-t pt-3">
@@ -198,28 +284,63 @@ export function SceneVideoPanel({
           />
         </div>
       )}
-      <div className="flex items-end gap-3">
+      <div className="flex flex-wrap items-end gap-3">
         <div>
-          <Label className="text-xs text-muted-foreground">Duration (seconds)</Label>
+          <Label className="text-xs text-muted-foreground">Duration (seconds, optional override)</Label>
           <Input
             type="number"
             min={1}
             className="mt-1.5 w-24"
+            placeholder="auto"
             value={duration}
             onChange={(e) => setDuration(e.target.value)}
           />
         </div>
+        {resolutionOptions.length > 0 && (
+          <div>
+            <Label className="text-xs text-muted-foreground">Resolution</Label>
+            <Select
+              value={resolution || resolutionOptions[0]}
+              onValueChange={(v) => v && setResolution(v)}
+              items={Object.fromEntries(resolutionOptions.map((r) => [r, r]))}
+            >
+              <SelectTrigger className="mt-1.5 w-28">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {resolutionOptions.map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+        <label className="mb-1.5 flex items-center gap-2 text-sm">
+          <Switch checked={generateAudio} onCheckedChange={setGenerateAudio} />
+          Native audio
+        </label>
         <Button size="sm" variant="outline" onClick={save} disabled={!dirty || saving}>
           <Save className="size-3.5" />
           {saving ? "Saving…" : "Save"}
         </Button>
       </div>
 
+      {segmentPlan && (
+        <p className="text-xs text-muted-foreground">
+          Suggested: {segmentPlan.durations.length} clip{segmentPlan.durations.length > 1 ? "s" : ""} (
+          {segmentPlan.durations.map((d) => `${Math.round(d * 10) / 10}s`).join(" + ")} = {Math.round(segmentPlan.totalSeconds * 10) / 10}s)
+          {selectedModel ? ` for ${selectedModel.displayName}` : ""}, based on{" "}
+          {duration ? "the duration above" : `~${Math.round((voiceDurationSeconds ?? 0) * 10) / 10}s of scene audio`}.
+        </p>
+      )}
+
       {!canGenerate ? (
         <p className="text-xs text-muted-foreground">Generate and select a scene image above first.</p>
       ) : (
         <div className="flex flex-wrap items-end gap-2">
-          <ModelSelect jobType="VIDEO_GENERATION" value={modelId} onChange={setModelId} />
+          <ModelSelect jobType="VIDEO_GENERATION" value={modelId} onChange={setModelId} onModelsChange={setModels} />
           <Button size="sm" onClick={generate} disabled={generating || dirty}>
             <Clapperboard className="size-3.5" />
             {generating ? "Generating…" : "Generate Video"}
@@ -227,18 +348,24 @@ export function SceneVideoPanel({
         </div>
       )}
 
-      {videoClips.length > 0 && (
+      {takes.length > 0 && (
         <div className="flex flex-col gap-1.5">
-          {videoClips.map((clip) => (
-            <div key={clip.id} className={`flex items-center gap-2 rounded-md border p-1.5 ${clip.isSelected ? "border-foreground" : ""}`}>
-              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-              <video controls src={clip.url} className="h-24 w-40 rounded object-cover" />
-              <Button size="sm" variant={clip.isSelected ? "default" : "outline"} onClick={() => selectClip(clip.id)} disabled={clip.isSelected}>
-                {clip.isSelected ? "Selected" : "Use this clip"}
-              </Button>
-              <Button size="icon-sm" variant="ghost" onClick={() => deleteClip(clip.id)} className="ml-auto text-destructive">
-                <Trash2 className="size-3.5" />
-              </Button>
+          {takes.map((take) => (
+            <div key={take.key} className={`flex flex-col gap-1.5 rounded-md border p-1.5 ${take.isSelected ? "border-foreground" : ""}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                {take.clips.map((clip, i) => (
+                  <video key={clip.id} controls src={clip.url} className="h-24 w-40 rounded object-cover" title={take.clips.length > 1 ? `Segment ${i + 1}` : undefined} />
+                ))}
+                <Button size="sm" variant={take.isSelected ? "default" : "outline"} onClick={() => selectTake(take.clips[0].id)} disabled={take.isSelected}>
+                  {take.isSelected ? "Selected" : "Use this take"}
+                </Button>
+                <Button size="icon-sm" variant="ghost" onClick={() => deleteTake(take)} className="ml-auto text-destructive">
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </div>
+              {take.clips.length > 1 && (
+                <p className="text-xs text-muted-foreground">{take.clips.length} frame-chained segments, in order.</p>
+              )}
             </div>
           ))}
         </div>

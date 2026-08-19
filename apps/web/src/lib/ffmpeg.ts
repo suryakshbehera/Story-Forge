@@ -48,6 +48,14 @@ export async function hasAudioStream(filePath: string): Promise<boolean> {
   }
 }
 
+// Grabs a generated clip's final frame as a PNG — used to seed the next
+// segment's first_frame in frame-chained multi-segment video generation
+// (see generateSceneVideo in scene-video.ts), so the sequence continues
+// visually instead of resetting to the scene's original starting image.
+export async function extractLastFrame(videoPath: string, outPath: string): Promise<void> {
+  await runFfmpeg(["-sseof", "-1", "-i", videoPath, "-update", "1", "-frames:v", "1", outPath]);
+}
+
 export async function probeDuration(filePath: string): Promise<number> {
   try {
     const { stdout } = await execFileAsync(

@@ -1,10 +1,12 @@
 import { prisma } from "@/lib/db";
 import { AiModelsManager } from "@/components/ai-models-manager";
+import { parseVideoModelConfig } from "@/lib/video-model-config";
 
 export default async function AiModelsSettingsPage() {
-  const models = await prisma.aiModelOption.findMany({
+  const rows = await prisma.aiModelOption.findMany({
     orderBy: [{ jobType: "asc" }, { isDefault: "desc" }, { displayName: "asc" }],
   });
+  const models = rows.map((m) => ({ ...m, config: parseVideoModelConfig(m.config) }));
 
   return (
     <div className="flex flex-col gap-4">

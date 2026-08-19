@@ -5,9 +5,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { NewProjectDialog } from "@/components/new-project-dialog";
 import { ProjectCardMenu } from "@/components/project-card-menu";
 import { ProjectCoverImage } from "@/components/project-cover-image";
+import { getCurrentUser } from "@/lib/auth";
 
 export default async function HomePage() {
+  const user = await getCurrentUser();
   const projects = await prisma.project.findMany({
+    where: user!.role === "ADMIN" ? {} : { ownerId: user!.id },
     orderBy: { updatedAt: "desc" },
     include: {
       _count: { select: { characters: true, locations: true, seasons: true } },

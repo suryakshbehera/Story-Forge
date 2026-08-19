@@ -1,4 +1,4 @@
-import { PrismaClient, AiJobType } from "@prisma/client";
+import { PrismaClient, AiJobType, Prisma } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
@@ -15,6 +15,8 @@ const defaultModels: Array<{
   // adding a second option for a job that already has a default — e.g.
   // Sarvam alongside ElevenLabs for VOICE, see below.
   isDefault?: boolean;
+  // VIDEO_GENERATION only — see apps/web/src/lib/video-model-config.ts.
+  config?: Record<string, unknown>;
 }> = [
   { jobType: "MASTER_AI", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "STORY_WRITING", provider: "openrouter", modelId: "anthropic/claude-sonnet-5", displayName: "Claude Sonnet 5" },
@@ -38,7 +40,16 @@ const defaultModels: Array<{
     displayName: "GPT-4o Mini TTS (OpenRouter)",
     isDefault: false,
   },
-  { jobType: "VIDEO_GENERATION", provider: "openrouter", modelId: "google/veo-3.1", displayName: "Veo 3.1" },
+  {
+    jobType: "VIDEO_GENERATION",
+    provider: "openrouter",
+    modelId: "google/veo-3.1",
+    displayName: "Veo 3.1",
+    // Confirmed via OpenRouter's docs during Phase 11 planning — Veo 3.1
+    // Lite's example duration list is [4, 6, 8]; 720p is Veo 3.1's default
+    // resolution. Drives the multi-segment suggestion in scene-video.ts.
+    config: { durationMode: "fixed", fixedDurations: [4, 6, 8], resolutions: ["720p"], supportsNativeAudio: true },
+  },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
   { jobType: "MUSIC_GENERATION", provider: "elevenlabs", modelId: "music_v2", displayName: "Eleven Music v2" },
   { jobType: "SFX_GENERATION", provider: "elevenlabs", modelId: "eleven_text_to_sound_v2", displayName: "Eleven Sound Effects v2" },
@@ -86,6 +97,7 @@ async function main() {
         displayName: model.displayName,
         isDefault: model.isDefault ?? true,
         isEnabled: true,
+        config: model.config as Prisma.InputJsonValue | undefined,
       },
     });
   }

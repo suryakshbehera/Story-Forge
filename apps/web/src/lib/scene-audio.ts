@@ -35,7 +35,7 @@ function extFromMime(mimeType: string): string {
 // underlying model defaulted to its own multi-minute clip length regardless
 // of how short the scene actually was. Returns null (no hint passed) if the
 // scene has no voice audio yet — e.g. music generated before narration.
-async function getSceneVoiceDurationSeconds(sceneId: string): Promise<number | null> {
+export async function getSceneVoiceDurationSeconds(sceneId: string): Promise<number | null> {
   const scene = await prisma.scene.findUniqueOrThrow({
     where: { id: sceneId },
     include: {

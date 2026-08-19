@@ -267,8 +267,18 @@ model Scene {
   // to `description` at generation time when unset.
   motionPrompt String? @db.Text
   // Desired clip length in seconds, user-set. Provider-specific bounds are
-  // enforced at generation time, not in the schema.
+  // enforced at generation time, not in the schema. When unset, generation
+  // falls back to the scene's actual narration+dialogue audio length (see
+  // getSceneVoiceDurationSeconds in scene-audio.ts) as the target duration.
   videoDurationSeconds Int?
+  // Resolution override (e.g. "720p"); falls back to the chosen model's
+  // default resolution (AiModelOption.config.resolutions[0]) when unset.
+  videoResolution String?
+  // Whether to request the model's own native audio track alongside the
+  // video (OpenRouter's generate_audio param). Off by default: narration,
+  // music, and sfx are always generated separately and layered in at
+  // assembly time (see video-assembly.ts), so native audio is opt-in extra.
+  videoGenerateAudio Boolean @default(false)
 
   // Phase 5 — user-written prompt for TEXT_TO_VIDEO scenes, generated with no
   // source image at all. Kept separate from motionPrompt (which describes
@@ -563,6 +573,16 @@ model Asset {
   sourceImage   Asset?  @relation("VideoSourceImage", fields: [sourceImageId], references: [id], onDelete: SetNull)
   clipsFromThisImage Asset[] @relation("VideoSourceImage")
 
+  // Multi-segment video generation — one "Generate Video" call can produce
+  // several frame-chained clips (each continuing from the previous one's
+  // last frame) when the scene's target duration exceeds what the chosen
+  // model can produce in a single segment. All clips from one call share a
+  // videoBatchId and are ordered by videoSegmentOrder; isSelected applies to
+  // the whole batch at once (every clip in the selected batch is isSelected).
+  // Both null on legacy single-clip rows, which keep working unchanged.
+  videoBatchId      String?
+  videoSegmentOrder Int?
+
   // Phase 6 — assembled final-video attempts, kept on their own FK/relation
   // for the same reason videoSceneId is (see Scene.videoClips comment).
   // Dual-optional, mirroring Scene's storyId/episodeId pattern: a FINAL_VIDEO
@@ -742,4 +762,77 @@ model AiModelOption {
   updatedAt DateTime @updatedAt
 
   @@map("ai_model_options")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Auth — email/password accounts with two roles. USER accounts self-service
+// signup via a static admin code or a one-time invite link (see Invite
+// below); ADMIN accounts are never created through the app itself, only by
+// the boot-time bootstrap script reading ADMIN_EMAIL/ADMIN_PASSWORD — see
+// packages/db/src/bootstrap-admin.ts. An admin can read/write every Project;
+// a USER only their own (Project.ownerId) — enforced centrally in
+// apps/web/src/proxy.ts rather than in each of the ~78 API routes.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  USER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(USER)
+
+  ownedProjects Project[]
+  sessions      Session[]
+
+  // Invites this user (as an admin) has generated — not invites redeemed by
+  // them, hence the separate named relation from Invite.usedBy below.
+  invitesCreated  Invite[] @relation("InviteCreatedBy")
+  invitesRedeemed Invite[] @relation("InviteUsedBy")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+// Server-side session record backing the httpOnly session cookie.
+// `tokenHash` is a sha256 hex digest of the raw token — the raw token itself
+// only ever lives in the cookie, never persisted, so a DB read/leak alone
+// can't be replayed as a live session. Fixed expiresAt at creation (30
+// days), no sliding renewal — simplest thing that works for V1.
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+
+  @@map("sessions")
+}
+
+// A one-time signup link an admin generates from Settings → People. `code`
+// is the random token embedded in the shareable /signup?invite=<code> URL;
+// sending that link is a manual, out-of-band step (copy/paste — no email
+// infra in this app). usedById is nullable+unique so an invite can be
+// redeemed at most once, backstopping the same check the signup route makes
+// against concurrent redemption.
+model Invite {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  note        String?
+  createdById String
+  createdBy   User      @relation("InviteCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  usedById    String?   @unique
+  usedBy      User?     @relation("InviteUsedBy", fields: [usedById], references: [id], onDelete: SetNull)
+  expiresAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("invites")
 }

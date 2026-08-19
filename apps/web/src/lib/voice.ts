@@ -13,6 +13,16 @@ export interface SerializedAudioTake {
   createdAt: Date;
 }
 
+// Audio takes are usually mp3 (ElevenLabs/Sarvam always, OpenRouter for most
+// models) but OpenRouter falls back to wav for models that only support PCM
+// output (see lib/ai/openrouter.ts's generateSpeech) — the stored filename's
+// extension should match rather than always claiming .mp3, since the actual
+// Content-Type served back (apps/web/src/app/api/storage/[...key]/route.ts)
+// already comes from Asset.mimeType, not the filename.
+function audioExtension(mimeType: string): string {
+  return mimeType === "audio/wav" ? "wav" : "mp3";
+}
+
 export function serializeAudioTake(asset: Asset): SerializedAudioTake {
   return {
     id: asset.id,
@@ -141,7 +151,8 @@ export async function generateNarrationAudio({
     speed: scene.narrationSpeed ?? undefined,
   });
   const buffer = Buffer.from(generated.base64, "base64");
-  const key = buildStorageKey("scenes", sceneId, "narration.mp3");
+  const fileName = `narration.${audioExtension(generated.mimeType)}`;
+  const key = buildStorageKey("scenes", sceneId, fileName);
   await storage.put(key, buffer);
 
   const asset = await prisma.$transaction(async (tx) => {
@@ -153,7 +164,7 @@ export async function generateNarrationAudio({
       data: {
         type: "AUDIO_NARRATION",
         storageKey: key,
-        fileName: "narration.mp3",
+        fileName,
         mimeType: generated.mimeType,
         sizeBytes: buffer.byteLength,
         narrationSceneId: sceneId,
@@ -625,7 +636,8 @@ export async function generateDialogueAudio({
     speed: line.speed ?? undefined,
   });
   const buffer = Buffer.from(generated.base64, "base64");
-  const key = buildStorageKey("dialogue-lines", dialogueLineId, "line.mp3");
+  const fileName = `line.${audioExtension(generated.mimeType)}`;
+  const key = buildStorageKey("dialogue-lines", dialogueLineId, fileName);
   await storage.put(key, buffer);
 
   const asset = await prisma.$transaction(async (tx) => {
@@ -637,7 +649,7 @@ export async function generateDialogueAudio({
       data: {
         type: "AUDIO_DIALOGUE",
         storageKey: key,
-        fileName: "line.mp3",
+        fileName,
         mimeType: generated.mimeType,
         sizeBytes: buffer.byteLength,
         dialogueLineId,

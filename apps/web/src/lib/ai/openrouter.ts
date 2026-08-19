@@ -383,17 +383,12 @@ export interface GeneratedSpeech {
   mimeType: string;
 }
 
-// VOICE — OpenRouter's dedicated Audio Speech API, not chat completions.
-export async function generateSpeech({
-  modelId,
-  text,
-  voiceId,
-  instructions,
-  speed,
-}: GenerateSpeechParams): Promise<GeneratedSpeech> {
-  const apiKey = requireApiKey();
-
-  const response = await fetchWithTimeout(
+async function requestSpeech(
+  apiKey: string,
+  responseFormat: "mp3" | "pcm",
+  { modelId, text, voiceId, instructions, speed }: GenerateSpeechParams
+): Promise<Response> {
+  return fetchWithTimeout(
     "https://openrouter.ai/api/v1/audio/speech",
     {
       method: "POST",
@@ -405,25 +400,90 @@ export async function generateSpeech({
         model: modelId,
         input: text,
         voice: voiceId,
-        response_format: "mp3",
+        response_format: responseFormat,
         ...(speed !== undefined ? { speed } : {}),
         ...(instructions?.trim() ? { instructions } : {}),
       }),
     },
     60_000
   );
+}
+
+// Only mp3/pcm are documented response_format values, and support is
+// per-model, not universal — confirmed live 2026-08-19: Gemini TTS models
+// reject response_format=mp3 with a 400 ("Gemini TTS only supports
+// response_format=pcm") while OpenAI's models accept mp3 fine. Rather than
+// hardcode a per-model table, try mp3 first (matches the mp3 output
+// ElevenLabs/Sarvam already produce) and fall back to pcm only on that
+// specific rejection.
+function isUnsupportedFormatError(status: number, body: string): boolean {
+  return status === 400 && /response_format/i.test(body);
+}
+
+// Wraps raw PCM in a standard 44-byte WAV header so it's a playable file
+// instead of headerless raw samples. sampleRate/channels come from the
+// response's own Content-Type (OpenRouter echoes them back, e.g.
+// "audio/pcm;rate=24000;channels=1" — confirmed via OpenRouter's docs
+// 2026-08-19) rather than being assumed, since that varies by model; bit
+// depth isn't echoed anywhere so 16-bit (the documented Gemini TTS output,
+// and PCM's usual default) is assumed.
+function wrapPcmAsWav(pcm: Buffer, sampleRate: number, channels: number, bitsPerSample = 16): Buffer {
+  const blockAlign = channels * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+function parsePcmContentType(contentType: string | null): { sampleRate: number; channels: number } {
+  const rate = contentType?.match(/rate=(\d+)/)?.[1];
+  const channels = contentType?.match(/channels=(\d+)/)?.[1];
+  return { sampleRate: rate ? parseInt(rate, 10) : 24000, channels: channels ? parseInt(channels, 10) : 1 };
+}
+
+// VOICE — OpenRouter's dedicated Audio Speech API, not chat completions.
+export async function generateSpeech(params: GenerateSpeechParams): Promise<GeneratedSpeech> {
+  const apiKey = requireApiKey();
+
+  let response = await requestSpeech(apiKey, "mp3", params);
+  let responseFormat: "mp3" | "pcm" = "mp3";
 
   if (!response.ok) {
     const body = await response.text();
-    throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${body}`);
+    if (!isUnsupportedFormatError(response.status, body)) {
+      throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${body}`);
+    }
+    response = await requestSpeech(apiKey, "pcm", params);
+    responseFormat = "pcm";
+    if (!response.ok) {
+      const retryBody = await response.text();
+      throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${retryBody}`);
+    }
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
   if (buffer.byteLength === 0) {
     throw new OpenRouterError("OpenRouter returned no audio data.");
   }
+
+  if (responseFormat === "pcm") {
+    const { sampleRate, channels } = parsePcmContentType(response.headers.get("content-type"));
+    return { base64: wrapPcmAsWav(buffer, sampleRate, channels).toString("base64"), mimeType: "audio/wav" };
+  }
+
   const contentType = response.headers.get("content-type");
   const mimeType = contentType && contentType.startsWith("audio/") ? contentType.split(";")[0].trim() : "audio/mpeg";
-
   return { base64: buffer.toString("base64"), mimeType };
 }

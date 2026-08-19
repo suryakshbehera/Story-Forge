@@ -18,6 +18,12 @@ const FPS = 30;
 const AUDIO_RATE = 44100;
 const DEFAULT_ILLUSTRATION_SECONDS = 5;
 const DURATION_TOLERANCE_SECONDS = 0.15;
+// Crossfade length between consecutive scenes in the real final render —
+// clamped per-pair to each neighbor's own duration (see
+// crossfadeConcatSegments) so a very short scene can't demand an overlap
+// longer than the scene itself.
+const SCENE_TRANSITION_SECONDS = 0.4;
+const MIN_TRANSITION_SECONDS = 0.05;
 
 interface VisualTarget {
   width: number;
@@ -427,6 +433,64 @@ async function concatSegments(segmentPaths: string[], workDir: string, outPath: 
   await runFfmpeg(["-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outPath]);
 }
 
+// Same job as concatSegments, but joins every pair of consecutive segments
+// with a short audio+video crossfade (ffmpeg's xfade/acrossfade) instead of
+// a hard cut. Every segment already shares FULL_RES's exact
+// resolution/fps/pix_fmt and AUDIO_RATE's exact sample rate/channel layout
+// (buildSceneSegment/muxSceneSegment guarantee it), which xfade/acrossfade
+// require — mismatched inputs would fail or behave oddly. Unlike
+// concatSegments this always re-encodes (xfade can't stream-copy), which is
+// the real reason the two stay separate functions: assembleSilentPicture
+// doesn't need this — it's read by a video-understanding model that cares
+// about pacing/content, not transition polish — and re-encoding a 9-minute
+// cue-plan render wasn't worth adding on that path.
+async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, outPath: string): Promise<void> {
+  if (segmentPaths.length === 1) {
+    await fs.copyFile(segmentPaths[0], outPath);
+    return;
+  }
+
+  const durations = await Promise.all(segmentPaths.map((p) => probeDuration(p)));
+
+  const filterParts: string[] = [];
+  let videoLabel = "0:v";
+  let audioLabel = "0:a";
+  let runningDuration = durations[0];
+
+  for (let i = 1; i < segmentPaths.length; i++) {
+    // Clamp so the overlap never exceeds half of either neighboring
+    // segment's own length — otherwise xfade's offset could land before the
+    // start of the running stream.
+    const d = Math.max(
+      Math.min(SCENE_TRANSITION_SECONDS, runningDuration / 2, durations[i] / 2),
+      MIN_TRANSITION_SECONDS
+    );
+    const offset = Math.max(runningDuration - d, 0);
+    const vOut = `v${i}`;
+    const aOut = `a${i}`;
+    filterParts.push(
+      `[${videoLabel}][${i}:v]xfade=transition=fade:duration=${d.toFixed(3)}:offset=${offset.toFixed(3)}[${vOut}]`
+    );
+    filterParts.push(`[${audioLabel}][${i}:a]acrossfade=d=${d.toFixed(3)}[${aOut}]`);
+    videoLabel = vOut;
+    audioLabel = aOut;
+    runningDuration = runningDuration + durations[i] - d;
+  }
+
+  const inputArgs = segmentPaths.flatMap((p) => ["-i", p]);
+  await runFfmpeg([
+    ...inputArgs,
+    "-filter_complex", filterParts.join(";"),
+    "-map", `[${videoLabel}]`,
+    "-map", `[${audioLabel}]`,
+    "-pix_fmt", "yuv420p",
+    "-c:v", "libx264",
+    "-c:a", "aac",
+    "-ar", String(AUDIO_RATE),
+    outPath,
+  ]);
+}
+
 // Shared by assembleVideo and assembleSilentPicture below — every scene
 // needs a selected visual (image per shot, or a clip) before either can
 // build anything; reports every unready scene at once rather than stopping
@@ -542,7 +606,7 @@ export async function assembleVideo({
     }
 
     const finalPath = path.join(workDir, "final.mp4");
-    await concatSegments(segmentPaths, workDir, finalPath);
+    await crossfadeConcatSegments(segmentPaths, workDir, finalPath);
 
     const buffer = await fs.readFile(finalPath);
     const key = buildStorageKey(parentType === "story" ? "stories" : "episodes", parentId, "final.mp4");

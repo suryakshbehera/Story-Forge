@@ -22,7 +22,13 @@ import { SESSION_COOKIE_NAME, getUserFromToken } from "@/lib/auth";
 
 const PUBLIC_PATHS = ["/login", "/signup", "/api/auth/login", "/api/auth/signup"];
 
-const ADMIN_ONLY_PREFIXES = ["/settings", "/api/ai-models", "/api/admin"];
+const ADMIN_ONLY_PREFIXES = ["/settings", "/api/admin"];
+
+// AI model reads power every ModelSelect dropdown across the app (scene
+// generation, video, voice, ...) — every authenticated user needs those so
+// they see the admin's configured defaults, not an empty "not configured"
+// state. Only mutating the registry (POST/PATCH/DELETE) is admin-only.
+const ADMIN_WRITE_ONLY_PREFIXES = ["/api/ai-models"];
 
 // Routes intentionally NOT in RESOLVERS below (login-only gate, no
 // per-project ownership check):
@@ -148,7 +154,11 @@ export default async function proxy(request: NextRequest): Promise<NextResponse>
     return deny(request, pathname, 401);
   }
 
-  if (ADMIN_ONLY_PREFIXES.some((prefix) => pathname.startsWith(prefix)) && user.role !== "ADMIN") {
+  const isAdminOnlyPath = ADMIN_ONLY_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+  const isAdminWriteOnlyPath =
+    request.method !== "GET" && ADMIN_WRITE_ONLY_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+
+  if ((isAdminOnlyPath || isAdminWriteOnlyPath) && user.role !== "ADMIN") {
     return deny(request, pathname, 403);
   }
 

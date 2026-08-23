@@ -116,6 +116,12 @@ model Story {
   // Asset relation on this model.
   finalVideos Asset[] @relation("StoryFinalVideo")
 
+  // Assemble-without-Audio — the same per-scene visual stitch as finalVideos,
+  // but silent and rendered as its own persisted, user-reviewable take
+  // (previously an ephemeral, low-res proxy rebuilt on every Audio Cue Plan
+  // draft — see Asset.storySilentVideoId).
+  silentVideos Asset[] @relation("StorySilentVideo")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -211,6 +217,9 @@ model Episode {
 
   // Phase 6 — same reasoning as Story.finalVideos above.
   finalVideos Asset[] @relation("EpisodeFinalVideo")
+
+  // Same reasoning as Story.silentVideos above.
+  silentVideos Asset[] @relation("EpisodeSilentVideo")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -369,16 +378,18 @@ model Shot {
 
   // Only meaningful for ILLUSTRATION scenes — each shot's image is held via
   // Ken Burns for its own slice of the scene's audio duration, then
-  // concatenated in order. For IMAGE_TO_VIDEO scenes, shots feed continuity
-  // frames into ONE scene-level video generation instead (first shot's image
-  // as first_frame, last shot's image as last_frame) rather than each
-  // getting its own clip — see generateSceneVideo() in scene-video.ts. TEXT_
-  // TO_VIDEO scenes don't use shots at all (no source image to speak of).
+  // concatenated in order. For IMAGE_TO_VIDEO scenes, each consecutive shot
+  // pair (shot[i]->shot[i+1]) generates its own clip instead, using the
+  // pair's two images as start/end keyframes — see generateSceneVideo() in
+  // scene-video.ts. TEXT_TO_VIDEO scenes don't use shots at all (no source
+  // image to speak of).
   cameraMovement CameraMovement @default(STATIC)
 
-  // Optional explicit length; shots left unset evenly split whatever
-  // duration remains of the scene's total audio after explicit ones are
-  // subtracted out.
+  // Optional explicit length. ILLUSTRATION: shots left unset evenly split
+  // whatever duration remains of the scene's total audio after explicit ones
+  // are subtracted out. IMAGE_TO_VIDEO: read as "how long the clip leaving
+  // this shot should run" (the pair shot[i]->shot[i+1]); shots left unset
+  // evenly split the scene's target duration across its pairs.
   durationSeconds Int?
 
   images Asset[] @relation("ShotImages")
@@ -520,6 +531,10 @@ enum AssetType {
   MUSIC
   // Phase 6 — a fully assembled Story/Episode render (ffmpeg-stitched scenes).
   FINAL_VIDEO
+  // Assemble-without-Audio — every scene's selected visual stitched together
+  // with no voice/music/sfx layered in, at full resolution. Persisted and
+  // user-reviewable, unlike the ephemeral proxy it replaces.
+  SILENT_VIDEO
   // Phase 9 — an uploaded PDF/DOCX parsed into StoryBible + Characters +
   // Locations + SeriesBlueprint. Kept after parsing for traceability/re-runs.
   SOURCE_DOCUMENT
@@ -583,6 +598,15 @@ model Asset {
   videoBatchId      String?
   videoSegmentOrder Int?
 
+  // Which consecutive shot pair (0-based: 0 = shot[0]->shot[1], etc.) this
+  // clip belongs to, for IMAGE_TO_VIDEO scenes generating one clip per shot
+  // pair. Several clips can share the same videoPairIndex when a pair's own
+  // target duration needs more than one duration-chained sub-segment (see
+  // planVideoSegments) — videoSegmentOrder still orders all of them
+  // correctly for assembly regardless. Null on TEXT_TO_VIDEO clips and
+  // legacy single-clip/whole-scene rows predating per-pair generation.
+  videoPairIndex Int?
+
   // Phase 6 — assembled final-video attempts, kept on their own FK/relation
   // for the same reason videoSceneId is (see Scene.videoClips comment).
   // Dual-optional, mirroring Scene's storyId/episodeId pattern: a FINAL_VIDEO
@@ -593,6 +617,14 @@ model Asset {
 
   episodeVideoId String?
   episodeVideo   Episode? @relation("EpisodeFinalVideo", fields: [episodeVideoId], references: [id], onDelete: Cascade)
+
+  // Assemble-without-Audio attempts — same dual-optional pattern as
+  // storyVideoId/episodeVideoId above, for SILENT_VIDEO assets.
+  storySilentVideoId String?
+  storySilentVideo   Story? @relation("StorySilentVideo", fields: [storySilentVideoId], references: [id], onDelete: Cascade)
+
+  episodeSilentVideoId String?
+  episodeSilentVideo   Episode? @relation("EpisodeSilentVideo", fields: [episodeSilentVideoId], references: [id], onDelete: Cascade)
 
   // Project-level style anchor image — see Project.styleReferences.
   projectStyleId String?

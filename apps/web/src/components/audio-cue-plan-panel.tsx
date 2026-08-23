@@ -26,15 +26,25 @@ interface CuePlanEntry {
   sfxPrompt: string;
 }
 
-// Phase 11 — drafts a whole-story/episode cue plan by watching the fully
-// assembled silent picture (assembleSilentPicture), then lets the producer
-// review/edit every scene's proposed narration/dialogue/music/sfx before
-// applying it into the same Scene.narration/DialogueLine/musicPrompt/
-// sfxPrompt fields the Voice/Audio panels below already read from — this
-// panel doesn't generate any audio itself, it only improves what feeds
-// those existing generation steps. Positioned above Final Assembly: draft →
-// review → apply → (use the Voice/Audio panels per scene) → assemble.
-export function AudioCuePlanPanel({ parentType, parentId }: { parentType: "story" | "episode"; parentId: string }) {
+// Phase 11 — drafts a whole-story/episode cue plan by watching the selected
+// Assemble-without-Audio take (see SilentAssemblyPanel above this one on the
+// page), then lets the producer review/edit every scene's proposed
+// narration/dialogue/music/sfx before applying it into the same
+// Scene.narration/DialogueLine/musicPrompt/sfxPrompt fields the Voice/Audio
+// panels below already read from — this panel doesn't generate any audio
+// itself, it only improves what feeds those existing generation steps.
+// Positioned between Assemble without Audio and Final Assembly: assemble
+// silent picture → draft cue plan → review → apply → (use the Voice/Audio
+// panels per scene) → assemble with audio.
+export function AudioCuePlanPanel({
+  parentType,
+  parentId,
+  hasSelectedSilentVideo,
+}: {
+  parentType: "story" | "episode";
+  parentId: string;
+  hasSelectedSilentVideo: boolean;
+}) {
   const [modelId, setModelId] = useState("");
   const [drafting, setDrafting] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -43,6 +53,10 @@ export function AudioCuePlanPanel({ parentType, parentId }: { parentType: "story
   const base = parentType === "story" ? `/api/stories/${parentId}/audio-cue-plan` : `/api/episodes/${parentId}/audio-cue-plan`;
 
   async function draft() {
+    if (!hasSelectedSilentVideo) {
+      toast.error("Assemble and select a silent picture above first.");
+      return;
+    }
     if (!modelId) {
       toast.error("Pick an Audio Cue Planning model first.");
       return;
@@ -115,13 +129,16 @@ export function AudioCuePlanPanel({ parentType, parentId }: { parentType: "story
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-muted-foreground">
-        Watches the fully assembled, still-silent picture and proposes narration, dialogue, music, and sfx per scene, grounded in what
+        Watches the selected silent picture above and proposes narration, dialogue, music, and sfx per scene, grounded in what
         actually happens on screen — review and edit below, then apply. Replaces planning each scene&apos;s music/sfx blind, one at a
         time.
       </p>
+      {!hasSelectedSilentVideo && (
+        <p className="text-xs text-muted-foreground">Assemble a silent picture above first.</p>
+      )}
       <div className="flex flex-wrap items-end gap-2">
         <ModelSelect jobType="AUDIO_CUE_PLANNING" value={modelId} onChange={setModelId} />
-        <Button size="sm" onClick={draft} disabled={drafting}>
+        <Button size="sm" onClick={draft} disabled={drafting || !hasSelectedSilentVideo}>
           <Wand2 className="size-3.5" />
           {drafting ? "Drafting…" : "Draft Cue Plan"}
         </Button>

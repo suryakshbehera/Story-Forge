@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
-import { assembleSilentPicture, type SceneManifestEntry } from "@/lib/video-assembly";
+import { getSelectedSilentPicture, type SceneManifestEntry } from "@/lib/video-assembly";
 import type { ScenesParentType } from "@/lib/scenes";
 
 // Phase 11 — AUDIO_CUE_PLANNING. One whole-story/episode pass that watches
-// the fully assembled, still-silent picture (assembleSilentPicture) and
-// proposes narration/dialogue/musicPrompt/sfxPrompt per scene, grounded in
+// the selected Assemble-without-Audio take (see silent-assembly-panel.tsx /
+// generateSilentAssembly in lib/video-assembly.ts) and proposes
+// narration/dialogue/musicPrompt/sfxPrompt per scene, grounded in
 // what actually happens on screen rather than each scene's written
 // description in isolation. Supersedes the old per-scene AUDIO_PLANNING
 // step for music/sfx; also allowed to redraft narration/dialogue text
@@ -109,10 +110,17 @@ export async function draftAudioCuePlan({
   parentId: string;
   modelId: string;
 }): Promise<AudioCuePlanEntry[]> {
-  const [{ base64, mimeType, manifest }, style] = await Promise.all([
-    assembleSilentPicture(parentType, parentId),
+  const [silentPicture, style] = await Promise.all([
+    getSelectedSilentPicture(parentType, parentId),
     loadCuePlanStyleContext(parentType, parentId),
   ]);
+  if (!silentPicture) {
+    // A plain Error, not OpenRouterError — this is a missing-prerequisite
+    // condition (400), not an AI-upstream failure (502), even though the UI
+    // already gates the Draft button on this and shouldn't normally hit it.
+    throw new Error("Assemble and select a silent picture (Assemble without Audio) before drafting a cue plan.");
+  }
+  const { base64, mimeType, manifest } = silentPicture;
 
   const userPrompt = [style && `# Style\n${style}`, `# Scene manifest\n${buildManifestText(manifest)}`].filter(Boolean).join("\n\n");
 

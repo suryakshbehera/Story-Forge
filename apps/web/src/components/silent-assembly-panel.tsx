@@ -1,0 +1,109 @@
+"use client";
+
+import { useState } from "react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { ModelSelect } from "@/components/model-select";
+import { Clapperboard, Trash2 } from "lucide-react";
+
+export interface SilentVideoItem {
+  id: string;
+  url: string;
+  isSelected: boolean;
+}
+
+// parentType/parentId route to /api/stories/[id]/silent-video/... or
+// /api/episodes/[id]/silent-video/... — same dual-parent pattern as
+// VideoAssemblyPanel's parentType prop.
+export function SilentAssemblyPanel({
+  parentType,
+  parentId,
+  initialSilentVideos,
+}: {
+  parentType: "story" | "episode";
+  parentId: string;
+  initialSilentVideos: SilentVideoItem[];
+}) {
+  const [modelId, setModelId] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [silentVideos, setSilentVideos] = useState(initialSilentVideos);
+
+  const base = parentType === "story" ? `/api/stories/${parentId}/silent-video` : `/api/episodes/${parentId}/silent-video`;
+
+  async function generate() {
+    if (!modelId) {
+      toast.error("Pick a video model first.");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const res = await fetch(`${base}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Assembly failed");
+      }
+      const video: SilentVideoItem = await res.json();
+      setSilentVideos((prev) => [video, ...prev.map((v) => ({ ...v, isSelected: false }))]);
+      toast.success("Silent picture assembled.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Assembly failed.");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function selectVideo(assetId: string) {
+    const res = await fetch(`${base}/${assetId}/select`, { method: "POST" });
+    if (!res.ok) {
+      toast.error("Couldn't select this take.");
+      return;
+    }
+    setSilentVideos((prev) => prev.map((v) => ({ ...v, isSelected: v.id === assetId })));
+  }
+
+  async function deleteVideo(assetId: string) {
+    if (!confirm("Delete this silent assembly? This can't be undone.")) return;
+    const res = await fetch(`${base}/${assetId}`, { method: "DELETE" });
+    if (!res.ok) {
+      toast.error("Couldn't delete this take.");
+      return;
+    }
+    setSilentVideos((prev) => prev.filter((v) => v.id !== assetId));
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted-foreground">
+        Stitches every scene&apos;s selected image/clip, in order, with no narration/dialogue/music/sfx — a picture-only
+        preview to review before drafting an Audio Cue Plan below. Each scene needs a selected visual first.
+      </p>
+      <div className="flex flex-wrap items-end gap-3">
+        <ModelSelect jobType="VIDEO" value={modelId} onChange={setModelId} />
+        <Button size="sm" onClick={generate} disabled={generating}>
+          <Clapperboard className="size-3.5" />
+          {generating ? "Assembling…" : "Assemble Silent Picture"}
+        </Button>
+      </div>
+
+      {silentVideos.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          {silentVideos.map((video) => (
+            <div key={video.id} className={`flex items-center gap-2 rounded-md border p-1.5 ${video.isSelected ? "border-foreground" : ""}`}>
+              <video controls muted src={video.url} className="h-24 w-40 rounded object-cover" />
+              <Button size="sm" variant={video.isSelected ? "default" : "outline"} onClick={() => selectVideo(video.id)} disabled={video.isSelected}>
+                {video.isSelected ? "Selected" : "Use this take"}
+              </Button>
+              <Button size="icon-sm" variant="ghost" onClick={() => deleteVideo(video.id)} className="ml-auto text-destructive">
+                <Trash2 className="size-3.5" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

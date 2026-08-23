@@ -33,17 +33,6 @@ interface VisualTarget {
 
 const FULL_RES: VisualTarget = { width: WIDTH, height: HEIGHT, fps: FPS };
 
-// The AI-facing silent picture (assembleSilentPicture, for Audio Cue
-// Planning) doesn't need — or benefit from — full-resolution/framerate: a
-// video-understanding model reads scene content/pacing/mood from it, not
-// fine detail, and Ken Burns' zoompan cost scales with output pixel count ×
-// frame count. Cuts both the ffmpeg encode time (the dominant cost of
-// drafting a cue plan on a real episode, observed live: ~9 minutes for a
-// 10-scene/33-shot episode at full res) and the base64 upload size, without
-// touching the real final render at all — assembleVideo always passes
-// FULL_RES explicitly, never this.
-const CUE_PLAN_RES: VisualTarget = { width: 640, height: 360, fps: 8 };
-
 function scalePadFilter({ width, height, fps }: VisualTarget): string {
   return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps}`;
 }
@@ -111,6 +100,14 @@ function belongsToParent(asset: Asset, parentType: ScenesParentType, parentId: s
   return parentType === "story" ? asset.storyVideoId === parentId : asset.episodeVideoId === parentId;
 }
 
+function parentSilentVideoWhere(parentType: ScenesParentType, parentId: string): Prisma.AssetWhereInput {
+  return parentType === "story" ? { storySilentVideoId: parentId } : { episodeSilentVideoId: parentId };
+}
+
+function belongsToSilentParent(asset: Asset, parentType: ScenesParentType, parentId: string): boolean {
+  return parentType === "story" ? asset.storySilentVideoId === parentId : asset.episodeSilentVideoId === parentId;
+}
+
 const ASSEMBLY_SCENE_INCLUDE = {
   shots: {
     orderBy: { order: "asc" as const },
@@ -126,14 +123,14 @@ const ASSEMBLY_SCENE_INCLUDE = {
     orderBy: { order: "asc" as const },
     include: {
       audio: { where: { isSelected: true }, take: 1 },
-      // Only needed by assembleSilentPicture's cue-plan manifest below
+      // Only needed by generateSilentAssembly's cue-plan manifest below
       // (buildSceneVoiceTrack ignores it) — included here rather than a
       // second scene include so both passes share one query shape.
       character: { select: { name: true } },
     },
   },
   // Same reasoning as dialogueLines.character above — only read by
-  // assembleSilentPicture, for the cue-planning prompt's per-scene roster.
+  // generateSilentAssembly, for the cue-planning prompt's per-scene roster.
   characters: { select: { name: true } },
   music: { where: { isSelected: true }, take: 1 },
   sfx: { where: { isSelected: true }, take: 1 },
@@ -440,10 +437,10 @@ async function concatSegments(segmentPaths: string[], workDir: string, outPath: 
 // (buildSceneSegment/muxSceneSegment guarantee it), which xfade/acrossfade
 // require — mismatched inputs would fail or behave oddly. Unlike
 // concatSegments this always re-encodes (xfade can't stream-copy), which is
-// the real reason the two stay separate functions: assembleSilentPicture
-// doesn't need this — it's read by a video-understanding model that cares
-// about pacing/content, not transition polish — and re-encoding a 9-minute
-// cue-plan render wasn't worth adding on that path.
+// the real reason the two stay separate functions: generateSilentAssembly
+// keeps plain hard cuts so its per-scene manifest's startSeconds/
+// durationSeconds (assumed non-overlapping) stay exactly correct — crossfade
+// transitions are reserved for the real Final Assembly render alone.
 async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, outPath: string): Promise<void> {
   if (segmentPaths.length === 1) {
     await fs.copyFile(segmentPaths[0], outPath);
@@ -491,7 +488,7 @@ async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, 
   ]);
 }
 
-// Shared by assembleVideo and assembleSilentPicture below — every scene
+// Shared by assembleVideo and generateSilentAssembly below — every scene
 // needs a selected visual (image per shot, or a clip) before either can
 // build anything; reports every unready scene at once rather than stopping
 // at the first.
@@ -532,19 +529,47 @@ export interface SceneManifestEntry {
   sfxPrompt: string | null;
 }
 
-export interface SilentPicture {
-  base64: string;
-  mimeType: string;
-  manifest: SceneManifestEntry[];
+export interface SerializedSilentVideo {
+  id: string;
+  url: string;
+  isSelected: boolean;
+  createdAt: Date;
 }
 
-// Phase 11 — the picture, assembled alone (no narration/dialogue/music/sfx),
-// for the Audio Cue Plan step (lib/audio-cue-plan.ts) to watch. Reuses
-// buildVisualSegment directly — the same native/explicit-duration segment
-// buildSceneSegment builds as its first step for the real final assembly —
-// so the timeline a cue plan is drafted against is exactly the timeline the
-// real assembly will produce, not a separate approximation of it.
-export async function assembleSilentPicture(parentType: ScenesParentType, parentId: string): Promise<SilentPicture> {
+export function serializeSilentVideo(asset: Asset): SerializedSilentVideo {
+  return {
+    id: asset.id,
+    url: storage.url(asset.storageKey),
+    isSelected: asset.isSelected,
+    createdAt: asset.createdAt,
+  };
+}
+
+interface GenerateSilentAssemblyParams {
+  parentType: ScenesParentType;
+  parentId: string;
+  modelId: string;
+}
+
+// Every scene's selected visual, stitched together with no narration/
+// dialogue/music/sfx — a persisted, user-reviewable "picture only" take
+// (Assemble without Audio), same take-history/isSelected pattern as
+// assembleVideo below. Reuses buildVisualSegment directly at FULL_RES — the
+// same native/explicit-duration segment buildSceneSegment builds as its
+// first step for the real final assembly — so the timeline a cue plan is
+// later drafted against (lib/audio-cue-plan.ts reads the selected take's
+// video + manifest via getSelectedSilentPicture below) is exactly the
+// timeline the real assembly will produce, not a separate approximation of
+// it. The per-scene manifest is stored on the created Asset's own metadata
+// field rather than recomputed later, so a cue-plan draft is grounded in
+// scene state as of this generation — re-run this step if scenes/shots
+// change afterward, same "re-run if you've edited things" expectation as
+// Final Assembly itself.
+export async function generateSilentAssembly({
+  parentType,
+  parentId,
+  modelId,
+}: GenerateSilentAssemblyParams): Promise<SerializedSilentVideo> {
   const scenes = await loadReadyScenes(parentType, parentId);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-silent-"));
@@ -553,7 +578,7 @@ export async function assembleSilentPicture(parentType: ScenesParentType, parent
     const segmentPaths: string[] = [];
     let cursor = 0;
     for (const [index, scene] of scenes.entries()) {
-      const { path: visualPath } = await buildVisualSegment(scene, workDir, index, CUE_PLAN_RES);
+      const { path: visualPath } = await buildVisualSegment(scene, workDir, index, FULL_RES);
       const durationSeconds = await probeDuration(visualPath);
       segmentPaths.push(visualPath);
       manifest.push({
@@ -574,10 +599,98 @@ export async function assembleSilentPicture(parentType: ScenesParentType, parent
     const finalPath = path.join(workDir, "silent.mp4");
     await concatSegments(segmentPaths, workDir, finalPath);
     const buffer = await fs.readFile(finalPath);
-    return { base64: buffer.toString("base64"), mimeType: "video/mp4", manifest };
+    const key = buildStorageKey(parentType === "story" ? "stories" : "episodes", parentId, "silent.mp4");
+    await storage.put(key, buffer);
+
+    const parentField = parentType === "story" ? { storySilentVideoId: parentId } : { episodeSilentVideoId: parentId };
+    const asset = await prisma.$transaction(async (tx) => {
+      await tx.asset.updateMany({
+        where: { ...parentSilentVideoWhere(parentType, parentId), isSelected: true },
+        data: { isSelected: false },
+      });
+      return tx.asset.create({
+        data: {
+          type: "SILENT_VIDEO",
+          storageKey: key,
+          fileName: "silent.mp4",
+          mimeType: "video/mp4",
+          sizeBytes: buffer.byteLength,
+          metadata: manifest as unknown as Prisma.InputJsonValue,
+          ...parentField,
+          isSelected: true,
+          modelId,
+          createdBy: "AI",
+        },
+      });
+    });
+
+    return serializeSilentVideo(asset);
   } finally {
     await fs.rm(workDir, { recursive: true, force: true });
   }
+}
+
+export async function getSilentVideos(parentType: ScenesParentType, parentId: string): Promise<SerializedSilentVideo[]> {
+  const assets = await prisma.asset.findMany({
+    where: parentSilentVideoWhere(parentType, parentId),
+    orderBy: { createdAt: "desc" },
+  });
+  return assets.map(serializeSilentVideo);
+}
+
+export async function selectSilentVideo(
+  parentType: ScenesParentType,
+  parentId: string,
+  assetId: string
+): Promise<SerializedSilentVideo> {
+  return prisma.$transaction(async (tx) => {
+    const asset = await tx.asset.findUniqueOrThrow({ where: { id: assetId } });
+    if (!belongsToSilentParent(asset, parentType, parentId)) {
+      throw new Error(`Silent assembly does not belong to this ${parentType}.`);
+    }
+    await tx.asset.updateMany({
+      where: { ...parentSilentVideoWhere(parentType, parentId), isSelected: true },
+      data: { isSelected: false },
+    });
+    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    return serializeSilentVideo(updated);
+  });
+}
+
+export async function deleteSilentVideo(parentType: ScenesParentType, parentId: string, assetId: string): Promise<void> {
+  const asset = await prisma.asset.findUniqueOrThrow({ where: { id: assetId } });
+  if (!belongsToSilentParent(asset, parentType, parentId)) {
+    throw new Error(`Silent assembly does not belong to this ${parentType}.`);
+  }
+  await storage.remove(asset.storageKey);
+  await prisma.asset.delete({ where: { id: assetId } });
+}
+
+// Mirrors mapFinalVideos below — for the story/episode pages' initial SSR load.
+export function mapSilentVideos<T extends { silentVideos: Asset[] }>(parent: T) {
+  return { ...parent, silentVideos: parent.silentVideos.map(serializeSilentVideo) };
+}
+
+// Reads the selected SILENT_VIDEO take for lib/audio-cue-plan.ts to draft
+// against, instead of rebuilding the picture from scratch on every draft
+// click. null means nothing has been assembled/selected yet — the caller
+// surfaces a clear "assemble one first" error, same idiom as generation
+// steps elsewhere that require a prior selected input.
+export async function getSelectedSilentPicture(
+  parentType: ScenesParentType,
+  parentId: string
+): Promise<{ base64: string; mimeType: string; manifest: SceneManifestEntry[] } | null> {
+  const asset = await prisma.asset.findFirst({
+    where: { ...parentSilentVideoWhere(parentType, parentId), isSelected: true },
+  });
+  if (!asset) return null;
+  const bytes = await storage.get(asset.storageKey);
+  if (!bytes) return null;
+  return {
+    base64: bytes.toString("base64"),
+    mimeType: asset.mimeType ?? "video/mp4",
+    manifest: (asset.metadata as unknown as SceneManifestEntry[] | null) ?? [],
+  };
 }
 
 interface AssembleVideoParams {

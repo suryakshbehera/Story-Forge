@@ -4,8 +4,9 @@ import { SCENE_INCLUDE, mapScenesShots } from "@/lib/scenes";
 import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
-import { mapFinalVideos } from "@/lib/video-assembly";
+import { mapFinalVideos, mapSilentVideos } from "@/lib/video-assembly";
 import { SceneManager } from "@/components/scene-manager";
+import { SilentAssemblyPanel } from "@/components/silent-assembly-panel";
 import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -46,9 +47,15 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
     prisma.location.findMany({ where: { projectId: id }, orderBy: { name: "asc" } }),
     prisma.story.findUniqueOrThrow({
       where: { id: project.story.id },
-      include: { finalVideos: { orderBy: { createdAt: "desc" } } },
+      include: {
+        finalVideos: { orderBy: { createdAt: "desc" } },
+        silentVideos: { orderBy: { createdAt: "desc" } },
+      },
     }),
   ]);
+
+  const { silentVideos } = mapSilentVideos(story);
+  const hasSelectedSilentVideo = silentVideos.some((v) => v.isSelected);
 
   return (
     <div className="flex flex-col gap-4">
@@ -64,10 +71,19 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
 
       <Card>
         <CardHeader>
+          <CardTitle className="text-base">Assemble without Audio</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SilentAssemblyPanel parentType="story" parentId={project.story.id} initialSilentVideos={silentVideos} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle className="text-base">Audio Cue Plan</CardTitle>
         </CardHeader>
         <CardContent>
-          <AudioCuePlanPanel parentType="story" parentId={project.story.id} />
+          <AudioCuePlanPanel parentType="story" parentId={project.story.id} hasSelectedSilentVideo={hasSelectedSilentVideo} />
         </CardContent>
       </Card>
 

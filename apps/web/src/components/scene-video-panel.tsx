@@ -25,6 +25,7 @@ export interface SceneVideoClipItem {
   isSelected: boolean;
   batchId?: string | null;
   segmentOrder?: number | null;
+  pairIndex?: number | null;
 }
 
 interface VideoTake {
@@ -56,6 +57,19 @@ function groupIntoTakes(clips: SceneVideoClipItem[]): VideoTake[] {
   return takes;
 }
 
+// Clips are already sorted by segmentOrder within a take. Consecutive clips
+// sharing a pairIndex are duration-chained sub-segments of the same shot
+// pair (rare — only when a pair's own target duration exceeds what the
+// model can produce in one call), so only the first gets the plain label.
+function clipLabel(clips: SceneVideoClipItem[], i: number): string | undefined {
+  if (clips.length <= 1) return undefined;
+  const clip = clips[i];
+  if (clip.pairIndex == null) return `Segment ${i + 1}`;
+  const isContinuation = i > 0 && clips[i - 1].pairIndex === clip.pairIndex;
+  const pairLabel = `Shot ${clip.pairIndex + 1}→${clip.pairIndex + 2}`;
+  return isContinuation ? `${pairLabel} (cont.)` : pairLabel;
+}
+
 // Motion prompt/video prompt are user-written, never AI-drafted — same
 // pattern as Scene.narration in scene-voice-panel.tsx. Duration has an
 // optional AI suggestion (recommendVideoDuration in lib/scene-video.ts) but
@@ -72,6 +86,8 @@ export function SceneVideoPanel({
   sceneId,
   mode,
   hasSelectedImage,
+  shotCount,
+  allShotsHaveImages,
   initialMotionPrompt,
   initialVideoPrompt,
   initialVideoDurationSeconds,
@@ -82,6 +98,10 @@ export function SceneVideoPanel({
   sceneId: string;
   mode: "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
   hasSelectedImage: boolean;
+  // Every shot becomes a keyframe under per-shot-pair generation, not just
+  // the first — see the pair-count preview and canGenerate below.
+  shotCount: number;
+  allShotsHaveImages: boolean;
   initialMotionPrompt: string;
   initialVideoPrompt: string;
   initialVideoDurationSeconds: number | null;
@@ -130,14 +150,15 @@ export function SceneVideoPanel({
     duration !== savedDuration ||
     resolution !== savedResolution ||
     generateAudio !== savedGenerateAudio;
-  const canGenerate = mode === "TEXT_TO_VIDEO" || hasSelectedImage;
+  const canGenerate = mode === "TEXT_TO_VIDEO" || allShotsHaveImages;
+  const pairCount = Math.max(shotCount - 1, shotCount === 1 ? 1 : 0);
 
   const selectedModel = models.find((m) => m.id === modelId);
   const modelConfig = parseVideoModelConfig(selectedModel?.config);
   const targetDuration = duration ? Number(duration) : voiceDurationSeconds;
   const segmentPlan = useMemo(
-    () => (targetDuration && targetDuration > 0 ? planVideoSegments(targetDuration, modelConfig) : null),
-    [targetDuration, modelConfig]
+    () => (mode === "TEXT_TO_VIDEO" && targetDuration && targetDuration > 0 ? planVideoSegments(targetDuration, modelConfig) : null),
+    [mode, targetDuration, modelConfig]
   );
 
   async function save() {
@@ -190,7 +211,13 @@ export function SceneVideoPanel({
       }
       const clips: SceneVideoClipItem[] = await res.json();
       setVideoClips((prev) => [...clips, ...prev.map((c) => ({ ...c, isSelected: false }))]);
-      toast.success(clips.length > 1 ? `${clips.length} video segments generated.` : "Video clip generated.");
+      toast.success(
+        mode === "IMAGE_TO_VIDEO" && clips.length > 1
+          ? `${clips.length} clip${clips.length > 1 ? "s" : ""} generated across ${pairCount} shot pair${pairCount > 1 ? "s" : ""}.`
+          : clips.length > 1
+            ? `${clips.length} video segments generated.`
+            : "Video clip generated."
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
     } finally {
@@ -373,6 +400,14 @@ export function SceneVideoPanel({
 
       {durationReason && <p className="text-xs text-muted-foreground">AI: {durationReason}</p>}
 
+      {mode === "IMAGE_TO_VIDEO" && shotCount > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {shotCount === 1
+            ? "1 shot → 1 clip (single-image animation, no end keyframe)."
+            : `${shotCount} shots → ${pairCount} clip${pairCount > 1 ? "s" : ""}, one per consecutive shot pair.`}
+        </p>
+      )}
+
       {segmentPlan && (
         <p className="text-xs text-muted-foreground">
           Suggested: {segmentPlan.durations.length} clip{segmentPlan.durations.length > 1 ? "s" : ""} (
@@ -383,7 +418,11 @@ export function SceneVideoPanel({
       )}
 
       {!canGenerate ? (
-        <p className="text-xs text-muted-foreground">Generate and select a scene image above first.</p>
+        <p className="text-xs text-muted-foreground">
+          {mode === "IMAGE_TO_VIDEO"
+            ? "Generate and select an image for every shot above first."
+            : "Generate and select a scene image above first."}
+        </p>
       ) : (
         <div className="flex flex-wrap items-end gap-2">
           <ModelSelect jobType="VIDEO_GENERATION" value={modelId} onChange={setModelId} onModelsChange={setModels} />
@@ -400,7 +439,7 @@ export function SceneVideoPanel({
             <div key={take.key} className={`flex flex-col gap-1.5 rounded-md border p-1.5 ${take.isSelected ? "border-foreground" : ""}`}>
               <div className="flex flex-wrap items-center gap-2">
                 {take.clips.map((clip, i) => (
-                  <video key={clip.id} controls src={clip.url} className="h-24 w-40 rounded object-cover" title={take.clips.length > 1 ? `Segment ${i + 1}` : undefined} />
+                  <video key={clip.id} controls src={clip.url} className="h-24 w-40 rounded object-cover" title={clipLabel(take.clips, i)} />
                 ))}
                 <Button size="sm" variant={take.isSelected ? "default" : "outline"} onClick={() => selectTake(take.clips[0].id)} disabled={take.isSelected}>
                   {take.isSelected ? "Selected" : "Use this take"}
@@ -410,7 +449,11 @@ export function SceneVideoPanel({
                 </Button>
               </div>
               {take.clips.length > 1 && (
-                <p className="text-xs text-muted-foreground">{take.clips.length} frame-chained segments, in order.</p>
+                <p className="text-xs text-muted-foreground">
+                  {mode === "IMAGE_TO_VIDEO"
+                    ? `${take.clips.length} clips across shot pairs, in order.`
+                    : `${take.clips.length} frame-chained segments, in order.`}
+                </p>
               )}
             </div>
           ))}

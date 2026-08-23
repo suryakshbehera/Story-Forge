@@ -698,6 +698,8 @@ function SceneRow({
             sceneId={scene.id}
             mode={scene.visualMode}
             hasSelectedImage={scene.shots[0]?.images.some((img) => img.isSelected) ?? false}
+            shotCount={scene.shots.length}
+            allShotsHaveImages={scene.shots.length > 0 && scene.shots.every((s) => s.images.some((img) => img.isSelected))}
             initialMotionPrompt={scene.motionPrompt ?? ""}
             initialVideoPrompt={scene.videoPrompt ?? ""}
             initialVideoDurationSeconds={scene.videoDurationSeconds}

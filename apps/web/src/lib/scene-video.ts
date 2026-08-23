@@ -21,6 +21,9 @@ export interface SerializedSceneVideoClip {
   // generateSceneVideo below. Both null on legacy single-clip rows.
   batchId: string | null;
   segmentOrder: number | null;
+  // Which consecutive shot pair this clip belongs to (0-based). Null for
+  // TEXT_TO_VIDEO clips and legacy rows predating per-pair generation.
+  pairIndex: number | null;
 }
 
 export function serializeSceneVideoClip(asset: Asset): SerializedSceneVideoClip {
@@ -31,6 +34,7 @@ export function serializeSceneVideoClip(asset: Asset): SerializedSceneVideoClip 
     createdAt: asset.createdAt,
     batchId: asset.videoBatchId,
     segmentOrder: asset.videoSegmentOrder,
+    pairIndex: asset.videoPairIndex,
   };
 }
 
@@ -51,15 +55,20 @@ interface GenerateSceneVideoParams {
   generateAudio?: boolean;
 }
 
-// Generates however many clips the scene's target duration needs on the
-// chosen model (see planVideoSegments), frame-chained: each segment after
-// the first is seeded with the previous segment's own last frame (extracted
-// via ffmpeg) rather than the scene's original starting image, so the
-// sequence continues visually instead of resetting. The scene's true
-// last-shot image (if any) stays the continuity anchor on every segment, so
-// each leg still aims toward the real ending frame. Generation is
-// necessarily sequential, not parallel, since each call depends on the
-// previous one's output.
+// IMAGE_TO_VIDEO scenes generate one clip per consecutive shot pair
+// (shot[i]->shot[i+1]), so every shot's image is an actual keyframe instead
+// of just the first and last mattering. A 1-shot scene is a single
+// degenerate "pair" with no end keyframe (plain image animation, as before).
+// TEXT_TO_VIDEO scenes don't use shots at all and keep their own flat,
+// duration-segmented loop. Either way, segments within one leg (a pair, or
+// the whole TEXT_TO_VIDEO clip) beyond what the model can produce in one
+// call are frame-chained: each one after the first is seeded with the
+// previous call's own last frame (extracted via ffmpeg). All clips from one
+// "Generate Video" click share a videoBatchId and a single ascending
+// videoSegmentOrder across every pair, so assembly (which just concatenates
+// a scene's selected clips in videoSegmentOrder) needs no awareness of
+// pairs at all. Generation is necessarily sequential, not parallel, since
+// each call can depend on the previous one's output.
 export async function generateSceneVideo({
   sceneId,
   modelId,
@@ -81,54 +90,19 @@ export async function generateSceneVideo({
   const resolvedResolution = resolution ?? scene.videoResolution ?? modelConfig?.resolutions?.[0] ?? undefined;
   const resolvedGenerateAudio = generateAudio ?? scene.videoGenerateAudio;
 
-  let firstFrameDataUri: string | undefined;
-  let lastFrameDataUri: string | undefined;
-  let sourceImage: Asset | undefined;
-  let prompt: string;
+  type SceneShot = (typeof scene.shots)[number];
 
-  if (scene.visualMode === "IMAGE_TO_VIDEO") {
-    // Phase 8 — shots are continuity input for ONE scene-level video, not
-    // individual clips: the first shot's image anchors the start, and (when
-    // the scene has more than one shot) the last shot's image anchors the
-    // end, so the generated clip transitions through the shots in between
-    // rather than each shot generating its own separate clip.
-    const firstShot = scene.shots[0];
-    sourceImage = firstShot?.images[0];
-    if (!sourceImage) {
-      throw new OpenRouterError("Generate and select a first-shot image before generating a video clip.");
+  async function loadShotImageDataUri(shot: SceneShot): Promise<string> {
+    const image = shot.images[0];
+    if (!image) {
+      throw new OpenRouterError(`Shot ${shot.order} needs a selected image before generating a video clip.`);
     }
-    const imageBytes = await storage.get(sourceImage.storageKey);
-    if (!imageBytes) {
-      throw new OpenRouterError("The first shot's selected image is missing from storage.");
+    const bytes = await storage.get(image.storageKey);
+    if (!bytes) {
+      throw new OpenRouterError(`Shot ${shot.order}'s selected image is missing from storage.`);
     }
-    firstFrameDataUri = `data:${sourceImage.mimeType ?? "image/png"};base64,${imageBytes.toString("base64")}`;
-
-    if (scene.shots.length > 1) {
-      const lastShot = scene.shots[scene.shots.length - 1];
-      const lastImage = lastShot.images[0];
-      if (lastImage) {
-        const lastBytes = await storage.get(lastImage.storageKey);
-        if (lastBytes) {
-          lastFrameDataUri = `data:${lastImage.mimeType ?? "image/png"};base64,${lastBytes.toString("base64")}`;
-        }
-      }
-    }
-
-    const shotDescriptions = scene.shots.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
-    prompt =
-      scene.motionPrompt?.trim() ||
-      (shotDescriptions ? `${scene.description}\n\nShot progression:\n${shotDescriptions}` : scene.description);
-  } else {
-    prompt = scene.videoPrompt?.trim() || scene.description;
+    return `data:${image.mimeType ?? "image/png"};base64,${bytes.toString("base64")}`;
   }
-
-  // Target duration: an explicit manual override wins; otherwise fall back
-  // to the scene's actual narration+dialogue length (ffprobe'd real audio,
-  // not an estimate). No signal at all (no override, no voice audio yet)
-  // means we can't plan segments meaningfully, so generation stays a single
-  // unconstrained-duration clip — today's pre-multi-segment behavior.
-  const targetDuration = scene.videoDurationSeconds ?? (await getSceneVoiceDurationSeconds(sceneId));
-  const segmentDurations = targetDuration ? planVideoSegments(targetDuration, modelConfig).durations : [undefined];
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-video-segment-"));
   try {
@@ -141,51 +115,129 @@ export async function generateSceneVideo({
 
     const batchId = randomUUID();
     const created: Asset[] = [];
-    let chainedFirstFrame = firstFrameDataUri;
+    let globalOrder = 0;
 
-    for (const [index, segmentDuration] of segmentDurations.entries()) {
-      const generated = await generateVideo({
-        modelId,
-        prompt,
-        imageDataUri: chainedFirstFrame,
-        lastFrameDataUri,
-        durationSeconds: segmentDuration,
-        generateAudio: resolvedGenerateAudio,
-        resolution: resolvedResolution,
-      });
-
-      const buffer = Buffer.from(generated.base64, "base64");
-      const ext = extFromMime(generated.mimeType);
-      const fileName = `scene-video-segment${index}.${ext}`;
+    async function storeClip(
+      buffer: Buffer,
+      mimeType: string,
+      fields: { prompt: string; sourceImageId?: string; videoPairIndex?: number }
+    ): Promise<Buffer> {
+      const ext = extFromMime(mimeType);
+      const order = globalOrder++;
+      const fileName = `scene-video-segment${order}.${ext}`;
       const key = buildStorageKey("scenes", sceneId, `${batchId}-${fileName}`);
       await storage.put(key, buffer);
-
       const asset = await prisma.asset.create({
         data: {
           type: "VIDEO_CLIP",
           storageKey: key,
           fileName,
-          mimeType: generated.mimeType,
+          mimeType,
           sizeBytes: buffer.byteLength,
           videoSceneId: sceneId,
-          sourceImageId: index === 0 ? sourceImage?.id : undefined,
           isSelected: true,
-          prompt,
           modelId,
           createdBy: "AI",
           videoBatchId: batchId,
-          videoSegmentOrder: index,
+          videoSegmentOrder: order,
+          ...fields,
         },
       });
       created.push(asset);
+      return buffer;
+    }
 
-      if (index < segmentDurations.length - 1) {
-        const rawPath = path.join(workDir, `segment${index}.${ext}`);
-        await fs.writeFile(rawPath, buffer);
-        const framePath = path.join(workDir, `segment${index}-lastframe.png`);
-        await extractLastFrame(rawPath, framePath);
-        const frameBytes = await fs.readFile(framePath);
-        chainedFirstFrame = `data:image/png;base64,${frameBytes.toString("base64")}`;
+    async function chainNextFrame(buffer: Buffer, mimeType: string, label: string): Promise<string> {
+      const ext = extFromMime(mimeType);
+      const rawPath = path.join(workDir, `${label}.${ext}`);
+      await fs.writeFile(rawPath, buffer);
+      const framePath = path.join(workDir, `${label}-lastframe.png`);
+      await extractLastFrame(rawPath, framePath);
+      const frameBytes = await fs.readFile(framePath);
+      return `data:image/png;base64,${frameBytes.toString("base64")}`;
+    }
+
+    if (scene.visualMode === "IMAGE_TO_VIDEO") {
+      if (scene.shots.length === 0) {
+        throw new OpenRouterError("Add at least one shot with a selected image before generating a video clip.");
+      }
+      scene.shots.forEach((shot, i) => {
+        if (!shot.images[0]) {
+          throw new OpenRouterError(`Shot ${i + 1} needs a selected image before generating a video clip.`);
+        }
+      });
+
+      // Target duration: an explicit manual override wins; otherwise fall
+      // back to the scene's actual narration+dialogue length (ffprobe'd real
+      // audio, not an estimate). Split evenly across pairs unless a pair's
+      // own starting shot has an explicit durationSeconds override.
+      const sceneTargetDuration = scene.videoDurationSeconds ?? (await getSceneVoiceDurationSeconds(sceneId));
+
+      const pairs: { startShot: SceneShot; endShot: SceneShot | undefined }[] =
+        scene.shots.length === 1
+          ? [{ startShot: scene.shots[0], endShot: undefined }]
+          : scene.shots.slice(0, -1).map((startShot, i) => ({ startShot, endShot: scene.shots[i + 1] }));
+
+      for (const [pairIndex, pair] of pairs.entries()) {
+        const startDataUri = await loadShotImageDataUri(pair.startShot);
+        const endDataUri = pair.endShot ? await loadShotImageDataUri(pair.endShot) : undefined;
+        const pairPrompt =
+          scene.motionPrompt?.trim() ||
+          (pair.endShot
+            ? `${scene.description}\n\nTransition: from "${pair.startShot.description}" to "${pair.endShot.description}"`
+            : scene.description);
+
+        const pairTarget =
+          pair.startShot.durationSeconds ?? (sceneTargetDuration ? sceneTargetDuration / pairs.length : undefined);
+        const subSegmentDurations = pairTarget ? planVideoSegments(pairTarget, modelConfig).durations : [undefined];
+
+        let chainedFrame = startDataUri;
+        for (const [subIndex, subDuration] of subSegmentDurations.entries()) {
+          const isLastSub = subIndex === subSegmentDurations.length - 1;
+          const generated = await generateVideo({
+            modelId,
+            prompt: pairPrompt,
+            imageDataUri: chainedFrame,
+            lastFrameDataUri: isLastSub ? endDataUri : undefined,
+            durationSeconds: subDuration,
+            generateAudio: resolvedGenerateAudio,
+            resolution: resolvedResolution,
+          });
+
+          const buffer = Buffer.from(generated.base64, "base64");
+          await storeClip(buffer, generated.mimeType, {
+            prompt: pairPrompt,
+            sourceImageId: subIndex === 0 ? pair.startShot.images[0]?.id : undefined,
+            videoPairIndex: pairIndex,
+          });
+
+          if (!isLastSub) {
+            chainedFrame = await chainNextFrame(buffer, generated.mimeType, `pair${pairIndex}-seg${subIndex}`);
+          }
+        }
+      }
+    } else {
+      const prompt = scene.videoPrompt?.trim() || scene.description;
+      const targetDuration = scene.videoDurationSeconds ?? (await getSceneVoiceDurationSeconds(sceneId));
+      const segmentDurations = targetDuration ? planVideoSegments(targetDuration, modelConfig).durations : [undefined];
+
+      let chainedFrame: string | undefined;
+      for (const [index, segmentDuration] of segmentDurations.entries()) {
+        const generated = await generateVideo({
+          modelId,
+          prompt,
+          imageDataUri: chainedFrame,
+          durationSeconds: segmentDuration,
+          generateAudio: resolvedGenerateAudio,
+          resolution: resolvedResolution,
+        });
+
+        const buffer = Buffer.from(generated.base64, "base64");
+        await storeClip(buffer, generated.mimeType, { prompt });
+
+        if (index < segmentDurations.length - 1) {
+          chainedFrame = await chainNextFrame(buffer, generated.mimeType, `segment${index}`);
+        }
       }
     }
 
@@ -341,10 +393,20 @@ export async function recommendVideoDuration({ sceneId, modelId }: RecommendVide
     throw new OpenRouterError("AI returned an unexpected shape.");
   }
 
-  return {
-    durationSeconds: Math.round(parsed.data.durationSeconds),
-    reason: parsed.data.reason,
-  };
+  // The floor above is a prompt instruction, not a guarantee — models do
+  // ignore it (seen in practice: 14s suggested against 33s of already-
+  // recorded narration). Enforce it in code too, same as the
+  // generation-time fallback already treats voice length as authoritative
+  // (see getSceneVoiceDurationSeconds's callers). Rounds the floor up so the
+  // clip fully covers the audio rather than landing a fraction short of it.
+  const floor = voiceDurationSeconds ? Math.ceil(voiceDurationSeconds) : 0;
+  const durationSeconds = Math.max(Math.round(parsed.data.durationSeconds), floor);
+  const reason =
+    durationSeconds > Math.round(parsed.data.durationSeconds)
+      ? `${parsed.data.reason} (raised from the AI's ${Math.round(parsed.data.durationSeconds)}s to cover the ${floor}s of existing narration/dialogue audio.)`
+      : parsed.data.reason;
+
+  return { durationSeconds, reason };
 }
 
 export async function getSceneVideoClips(sceneId: string): Promise<SerializedSceneVideoClip[]> {

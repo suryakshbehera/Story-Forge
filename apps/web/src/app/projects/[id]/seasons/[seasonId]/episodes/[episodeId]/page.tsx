@@ -6,9 +6,10 @@ import { SCENE_INCLUDE, mapScenesShots } from "@/lib/scenes";
 import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
-import { mapFinalVideos } from "@/lib/video-assembly";
+import { mapFinalVideos, mapSilentVideos } from "@/lib/video-assembly";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
+import { SilentAssemblyPanel } from "@/components/silent-assembly-panel";
 import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
 import { StoryChatPanel } from "@/components/story-chat-panel";
@@ -56,9 +57,15 @@ export default async function EpisodePage({
     prisma.location.findMany({ where: { projectId }, orderBy: { name: "asc" } }),
     prisma.episode.findUniqueOrThrow({
       where: { id: episodeId },
-      include: { finalVideos: { orderBy: { createdAt: "desc" } } },
+      include: {
+        finalVideos: { orderBy: { createdAt: "desc" } },
+        silentVideos: { orderBy: { createdAt: "desc" } },
+      },
     }),
   ]);
+
+  const { silentVideos } = mapSilentVideos(episodeVideo);
+  const hasSelectedSilentVideo = silentVideos.some((v) => v.isSelected);
 
   return (
     <div className="flex flex-col gap-4">
@@ -135,10 +142,19 @@ export default async function EpisodePage({
 
       <Card>
         <CardHeader>
+          <CardTitle className="text-base">Assemble without Audio</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SilentAssemblyPanel parentType="episode" parentId={episodeId} initialSilentVideos={silentVideos} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle className="text-base">Audio Cue Plan</CardTitle>
         </CardHeader>
         <CardContent>
-          <AudioCuePlanPanel parentType="episode" parentId={episodeId} />
+          <AudioCuePlanPanel parentType="episode" parentId={episodeId} hasSelectedSilentVideo={hasSelectedSilentVideo} />
         </CardContent>
       </Card>
 

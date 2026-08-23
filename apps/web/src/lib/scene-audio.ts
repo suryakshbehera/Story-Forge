@@ -3,8 +3,63 @@ import os from "os";
 import path from "path";
 import { prisma, type Asset } from "@/lib/db";
 import { generateMusic, generateSoundEffect, ElevenLabsError } from "@/lib/ai/elevenlabs";
+import { generateAudioClip } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { probeDuration } from "@/lib/ffmpeg";
+
+// Music/SFX have two providers now (see lib/ai/elevenlabs.ts's generateMusic/
+// generateSoundEffect and lib/ai/openrouter.ts's generateAudioClip) —
+// ElevenLabs' purpose-built endpoints, or an OpenRouter audio-generating model
+// like Google's Lyria 3. `provider` comes from the selected AiModelOption row,
+// never guessed — same reasoning as VOICE's generateSpeechForProvider in
+// lib/voice.ts, including the same failure mode this fixes: previously both
+// job types called ElevenLabs unconditionally regardless of which row was
+// actually selected, so picking an OpenRouter model here just sent its
+// modelId to ElevenLabs' API, which rejected it.
+async function generateSfxForProvider({
+  provider,
+  modelId,
+  prompt,
+  durationSeconds,
+}: {
+  provider: string;
+  modelId: string;
+  prompt: string;
+  durationSeconds?: number;
+}): Promise<{ base64: string; mimeType: string }> {
+  if (provider === "elevenlabs") {
+    return generateSoundEffect({ modelId, prompt, durationSeconds });
+  }
+  if (provider === "openrouter") {
+    return generateAudioClip({ modelId, prompt });
+  }
+  throw new Error(`Unsupported SFX Generation provider "${provider}" — pick an ElevenLabs or OpenRouter model in Settings → AI Models.`);
+}
+
+// Music's ElevenLabs call, unlike SFX's, never takes modelId (see
+// generateMusic's own comment in elevenlabs.ts — its model_id only
+// distinguishes v1/v2, always sends music_v2 regardless of the selected row).
+// That quirk is ElevenLabs-specific, so it's kept local to this branch rather
+// than changing generateMusic's signature.
+async function generateMusicForProvider({
+  provider,
+  modelId,
+  prompt,
+  durationSeconds,
+}: {
+  provider: string;
+  modelId: string;
+  prompt: string;
+  durationSeconds?: number;
+}): Promise<{ base64: string; mimeType: string }> {
+  if (provider === "elevenlabs") {
+    return generateMusic({ prompt, durationSeconds });
+  }
+  if (provider === "openrouter") {
+    return generateAudioClip({ modelId, prompt });
+  }
+  throw new Error(`Unsupported Music Generation provider "${provider}" — pick an ElevenLabs or OpenRouter model in Settings → AI Models.`);
+}
 
 export interface SerializedAudioAsset {
   id: string;
@@ -70,14 +125,27 @@ export async function getSceneVoiceDurationSeconds(sceneId: string): Promise<num
 // pattern as narrationAudio), generated from Scene.musicPrompt (the Audio
 // Plan, possibly hand-edited since) or uploaded directly. ──────────────────
 
-export async function generateSceneMusic({ sceneId, modelId }: { sceneId: string; modelId: string }): Promise<SerializedAudioAsset> {
+export async function generateSceneMusic({
+  sceneId,
+  modelId,
+  provider,
+}: {
+  sceneId: string;
+  modelId: string;
+  provider: string;
+}): Promise<SerializedAudioAsset> {
   const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
   if (!scene.musicPrompt?.trim()) {
     throw new ElevenLabsError("Generate an Audio Plan first, or write a music prompt manually.");
   }
 
   const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
-  const generated = await generateMusic({ prompt: scene.musicPrompt, durationSeconds: durationSeconds ?? undefined });
+  const generated = await generateMusicForProvider({
+    provider,
+    modelId,
+    prompt: scene.musicPrompt,
+    durationSeconds: durationSeconds ?? undefined,
+  });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `music.${extFromMime(generated.mimeType)}`;
   const key = buildStorageKey("scenes", sceneId, fileName);
@@ -146,14 +214,27 @@ export async function deleteSceneMusic(sceneId: string, assetId: string): Promis
 
 // ── SFX — same shape as Music above, independent slot/prompt/model. ────────
 
-export async function generateSceneSfx({ sceneId, modelId }: { sceneId: string; modelId: string }): Promise<SerializedAudioAsset> {
+export async function generateSceneSfx({
+  sceneId,
+  modelId,
+  provider,
+}: {
+  sceneId: string;
+  modelId: string;
+  provider: string;
+}): Promise<SerializedAudioAsset> {
   const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
   if (!scene.sfxPrompt?.trim()) {
     throw new ElevenLabsError("Generate an Audio Plan first, or write an sfx prompt manually.");
   }
 
   const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
-  const generated = await generateSoundEffect({ modelId, prompt: scene.sfxPrompt, durationSeconds: durationSeconds ?? undefined });
+  const generated = await generateSfxForProvider({
+    provider,
+    modelId,
+    prompt: scene.sfxPrompt,
+    durationSeconds: durationSeconds ?? undefined,
+  });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `sfx.${extFromMime(generated.mimeType)}`;
   const key = buildStorageKey("scenes", sceneId, fileName);

@@ -21,11 +21,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const sfx = await generateSceneSfx({ sceneId, modelId: model.modelId });
+    const sfx = await generateSceneSfx({ sceneId, modelId: model.modelId, provider: model.provider });
     return NextResponse.json(sfx, { status: 201 });
   } catch (error) {
     if (error instanceof ElevenLabsError) {
       return NextResponse.json({ error: error.message }, { status: 502 });
+    }
+    if (error instanceof Error) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
     throw error;
   }

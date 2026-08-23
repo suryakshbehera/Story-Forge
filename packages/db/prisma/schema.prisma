@@ -745,6 +745,14 @@ enum AiJobType {
   // riskier create-new-type/swap/drop-old-type migration) but nothing calls
   // it anymore.
   AUDIO_CUE_PLANNING
+  // Drafts Scene.videoDurationSeconds: a text-only reasoning call over the
+  // scene's description/motion prompt/narration (plus the existing
+  // voice-audio-length hint from getSceneVoiceDurationSeconds, when there's
+  // already narration/dialogue) that recommends how many seconds the clip
+  // should run and why. Same "AI proposes into the editable field, user
+  // reviews and saves" shape as MOTION_PROMPT_DRAFTING one field over — see
+  // recommendVideoDuration in lib/scene-video.ts.
+  DURATION_RECOMMENDATION
 }
 
 model AiModelOption {

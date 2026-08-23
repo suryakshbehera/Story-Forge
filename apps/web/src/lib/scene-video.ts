@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
+import { z } from "zod";
 import { prisma, type Asset } from "@/lib/db";
 import { callChatModel, generateVideo, OpenRouterError } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
@@ -270,6 +271,80 @@ export async function draftMotionPrompt({ sceneId, modelId }: DraftMotionPromptP
   });
 
   return draft.trim();
+}
+
+const DURATION_RECOMMENDATION_SYSTEM_PROMPT = `You are the Duration Recommendation step inside Narrata, a manual-first AI story/video production studio.
+Read the scene below and recommend how many seconds its generated video clip should run.
+
+Judge pacing like an editor: a quick action beat or a single line of dialogue runs shorter; a slow establishing shot, a wide emotional beat, or a scene carrying more spoken content runs longer. If a "Spoken audio" length is given, treat it as a floor the clip must cover, not a ceiling — pad for visual breathing room (a beat before/after the line) rather than cutting it flush.
+
+Respond with strict JSON only — no prose, no markdown code fences, no commentary. The JSON must match this shape exactly:
+{
+  "durationSeconds": a whole number of seconds, typically between 2 and 30,
+  "reason": "one short sentence explaining the pacing call"
+}`;
+
+const durationRecommendationSchema = z.object({
+  durationSeconds: z.number().positive(),
+  reason: z.string().min(1),
+});
+
+export interface DurationRecommendation {
+  durationSeconds: number;
+  reason: string;
+}
+
+interface RecommendVideoDurationParams {
+  sceneId: string;
+  modelId: string;
+}
+
+// Text-only reasoning call (no image/video input, unlike draftMotionPrompt
+// above) — feeds the recommended seconds into the same editable `duration`
+// field the panel already has, same "AI proposes, user reviews and saves"
+// idiom as the rest of this file. voiceDurationSeconds (from
+// getSceneVoiceDurationSeconds, already used as the *generation-time*
+// fallback when duration is left blank) is passed here too, as a floor hint
+// rather than the answer itself — a scene can run longer than its dialogue
+// for visual pacing, just never shorter.
+export async function recommendVideoDuration({ sceneId, modelId }: RecommendVideoDurationParams): Promise<DurationRecommendation> {
+  const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
+
+  const voiceDurationSeconds = await getSceneVoiceDurationSeconds(sceneId);
+  const motionOrVideoPrompt =
+    scene.visualMode === "TEXT_TO_VIDEO" ? scene.videoPrompt : scene.motionPrompt;
+
+  const promptLines = [
+    `Description: ${scene.description}`,
+    motionOrVideoPrompt?.trim() ? `Motion/video prompt: ${motionOrVideoPrompt.trim()}` : null,
+    scene.narration?.trim() ? `Narration: ${scene.narration.trim()}` : null,
+    voiceDurationSeconds ? `Spoken audio: ${Math.round(voiceDurationSeconds * 10) / 10}s of recorded narration/dialogue already exists for this scene.` : null,
+  ].filter((line): line is string => line !== null);
+
+  const raw = await callChatModel({
+    modelId,
+    systemPrompt: DURATION_RECOMMENDATION_SYSTEM_PROMPT,
+    userPrompt: `# Scene\n${promptLines.join("\n")}\n\nRecommend the duration now.`,
+    jsonMode: true,
+    temperature: 0.4,
+  });
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    throw new OpenRouterError("AI returned invalid JSON.");
+  }
+
+  const parsed = durationRecommendationSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new OpenRouterError("AI returned an unexpected shape.");
+  }
+
+  return {
+    durationSeconds: Math.round(parsed.data.durationSeconds),
+    reason: parsed.data.reason,
+  };
 }
 
 export async function getSceneVideoClips(sceneId: string): Promise<SerializedSceneVideoClip[]> {

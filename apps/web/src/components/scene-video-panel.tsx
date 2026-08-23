@@ -56,8 +56,12 @@ function groupIntoTakes(clips: SceneVideoClipItem[]): VideoTake[] {
   return takes;
 }
 
-// Motion prompt/video prompt/duration are user-written, never AI-drafted —
-// same pattern as Scene.narration in scene-voice-panel.tsx. IMAGE_TO_VIDEO
+// Motion prompt/video prompt are user-written, never AI-drafted — same
+// pattern as Scene.narration in scene-voice-panel.tsx. Duration has an
+// optional AI suggestion (recommendVideoDuration in lib/scene-video.ts) but
+// stays a plain editable field otherwise — the AI only proposes a value into
+// it, same "draft, don't auto-apply" idiom as the motion prompt draft button
+// below. IMAGE_TO_VIDEO
 // generation always reads the *saved* scene image (isSelected) as the
 // starting frame; this panel never lets the user override that per-call.
 // TEXT_TO_VIDEO has no source image at all — motionPrompt and videoPrompt
@@ -103,6 +107,9 @@ export function SceneVideoPanel({
   const [draftModelId, setDraftModelId] = useState("");
   const [drafting, setDrafting] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState<number | null>(null);
+  const [durationModelId, setDurationModelId] = useState("");
+  const [suggestingDuration, setSuggestingDuration] = useState(false);
+  const [durationReason, setDurationReason] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -217,6 +224,33 @@ export function SceneVideoPanel({
     }
   }
 
+  async function suggestDuration() {
+    if (!durationModelId) {
+      toast.error("Pick a duration recommendation model first.");
+      return;
+    }
+    setSuggestingDuration(true);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/video-duration/suggest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId: durationModelId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Suggestion failed");
+      }
+      const { durationSeconds, reason }: { durationSeconds: number; reason: string } = await res.json();
+      setDuration(durationSeconds.toString());
+      setDurationReason(reason);
+      toast.success(`AI recommends ~${durationSeconds}s — review and save.`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Suggestion failed.");
+    } finally {
+      setSuggestingDuration(false);
+    }
+  }
+
   async function selectTake(clipId: string) {
     const res = await fetch(`/api/scenes/${sceneId}/video/${clipId}/select`, { method: "POST" });
     if (!res.ok) {
@@ -287,14 +321,24 @@ export function SceneVideoPanel({
       <div className="flex flex-wrap items-end gap-3">
         <div>
           <Label className="text-xs text-muted-foreground">Duration (seconds, optional override)</Label>
-          <Input
-            type="number"
-            min={1}
-            className="mt-1.5 w-24"
-            placeholder="auto"
-            value={duration}
-            onChange={(e) => setDuration(e.target.value)}
-          />
+          <div className="mt-1.5 flex items-center gap-2">
+            <Input
+              type="number"
+              min={1}
+              className="w-24"
+              placeholder="auto"
+              value={duration}
+              onChange={(e) => {
+                setDuration(e.target.value);
+                setDurationReason("");
+              }}
+            />
+            <ModelSelect jobType="DURATION_RECOMMENDATION" value={durationModelId} onChange={setDurationModelId} />
+            <Button size="sm" variant="outline" onClick={suggestDuration} disabled={suggestingDuration}>
+              <Sparkles className="size-3.5" />
+              {suggestingDuration ? "Suggesting…" : "Suggest with AI"}
+            </Button>
+          </div>
         </div>
         {resolutionOptions.length > 0 && (
           <div>
@@ -326,6 +370,8 @@ export function SceneVideoPanel({
           {saving ? "Saving…" : "Save"}
         </Button>
       </div>
+
+      {durationReason && <p className="text-xs text-muted-foreground">AI: {durationReason}</p>}
 
       {segmentPlan && (
         <p className="text-xs text-muted-foreground">

@@ -356,13 +356,119 @@ export async function generateVideo({
 
 // generateAudio (MUSIC_GENERATION/SFX_GENERATION) used to live here too — see
 // apps/web/src/lib/ai/elevenlabs.ts. Phase 10 moved those two job types off
-// this file's chat-completions workaround onto ElevenLabs' purpose-built
-// endpoints; that workaround is gone for good (no confirmed dedicated
-// music/SFX endpoint exists on OpenRouter). VOICE's generateSpeech below is
-// different: OpenRouter has an actual documented POST /api/v1/audio/speech
-// endpoint (OpenAI-compatible, confirmed via openrouter.ai/docs 2026-08-19),
-// so re-adding it here as a third VOICE provider alongside ElevenLabs/Sarvam
-// isn't reviving the old workaround.
+// this file's old chat-completions workaround onto ElevenLabs' purpose-built
+// endpoints; that specific workaround is gone for good. VOICE's generateSpeech
+// below is unrelated to it: OpenRouter has an actual documented POST
+// /api/v1/audio/speech endpoint (OpenAI-compatible, confirmed via
+// openrouter.ai/docs 2026-08-19), so re-adding it here as a third VOICE
+// provider alongside ElevenLabs/Sarvam isn't reviving the old workaround.
+//
+// generateAudioClip below (added 2026-08-21) is a third, separate thing: a
+// real OpenRouter provider option for MUSIC_GENERATION/SFX_GENERATION,
+// alongside ElevenLabs (see lib/scene-audio.ts's per-provider dispatch,
+// mirroring VOICE's). OpenRouter still has no dedicated music/SFX REST
+// endpoint (confirmed against its docs 2026-08-21 — only /images, /videos,
+// /audio/speech, /audio/transcriptions are dedicated), but non-speech
+// audio-generating models like Google's Lyria 3 (google/lyria-3-pro-preview)
+// go through the same chat-completions "audio output" mechanism documented
+// for TTS-via-chat: modalities: ["text","audio"], streamed. Confirmed via
+// OpenRouter's own multimodal/audio guide example.
+
+export interface GenerateAudioClipParams {
+  modelId: string; // OpenRouter model slug for a non-speech audio-generating model, e.g. "google/lyria-3-pro-preview"
+  prompt: string;
+}
+
+export interface GeneratedAudioClip {
+  base64: string;
+  mimeType: string;
+}
+
+// Request shape here is NOT fresh guesswork — this same chat-completions
+// audio-output mechanism was built, then deleted wholesale in Phase 10 when
+// MUSIC_GENERATION/SFX_GENERATION moved to ElevenLabs (see this file's
+// generateSpeech below for the unrelated dedicated-endpoint VOICE path). Two
+// quirks were confirmed live against a real key before that deletion and are
+// reapplied here rather than rediscovered by trial and error:
+//   - `stream: true` is mandatory — a non-streaming request 400s with "Audio
+//     output requires stream: true" (at least for some upstream providers).
+//   - `audio.voice` is required even for non-speech content — omitting it
+//     404/400s. It has no meaning for a music model like Lyria, so this just
+//     sends the same "alloy" placeholder confirmed to work, not a real
+//     creative choice.
+//   - `audio.format: "mp3"` was rejected once streaming ("Supported values
+//     are: 'pcm16'"), so this requests pcm16 and wraps the result in a WAV
+//     header via wrapPcmAsWav (below) — same 24kHz/16-bit/mono assumption
+//     generateSpeech's own PCM fallback uses, since a streamed response has no
+//     `audio/pcm;rate=...` Content-Type to read real values from.
+// No duration parameter: nothing in this request shape has one, and Lyria's
+// flat per-song/per-clip pricing suggests length isn't a caller-controlled
+// dial for this model regardless.
+//
+// Response is Server-Sent Events, not plain JSON: each `data: ` line is a
+// chunk whose next audio slice lives at choices[0].delta.audio.data (base64),
+// concatenated below into one clip before a single final decode — matching
+// OpenRouter's own documented client example, not decoded chunk-by-chunk.
+export async function generateAudioClip({ modelId, prompt }: GenerateAudioClipParams): Promise<GeneratedAudioClip> {
+  const apiKey = requireApiKey();
+
+  const response = await fetchWithTimeout(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: prompt }],
+        modalities: ["text", "audio"],
+        audio: { voice: "alloy", format: "pcm16" },
+        stream: true,
+      }),
+    },
+    60_000
+  );
+
+  if (!response.ok || !response.body) {
+    const body = await response.text().catch(() => "");
+    throw new OpenRouterError(`OpenRouter audio generation request failed (${response.status}): ${body}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice("data: ".length).trim();
+      if (!data || data === "[DONE]") continue;
+      let parsed: { choices?: Array<{ delta?: { audio?: { data?: string } } }> };
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const audioChunk = parsed.choices?.[0]?.delta?.audio?.data;
+      if (audioChunk) chunks.push(audioChunk);
+    }
+  }
+
+  if (chunks.length === 0) {
+    throw new OpenRouterError("OpenRouter returned no audio data.");
+  }
+
+  const pcm = Buffer.from(chunks.join(""), "base64");
+  return { base64: wrapPcmAsWav(pcm, 24000, 1).toString("base64"), mimeType: "audio/wav" };
+}
 
 export interface GenerateSpeechParams {
   modelId: string; // OpenRouter TTS model slug, e.g. "openai/gpt-4o-mini-tts-2025-12-15"

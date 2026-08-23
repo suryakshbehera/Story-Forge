@@ -62,6 +62,7 @@ const defaultModels: Array<{
   { jobType: "BLUEPRINT_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "MOTION_PROMPT_DRAFTING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
   { jobType: "AUDIO_CUE_PLANNING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
+  { jobType: "DURATION_RECOMMENDATION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
 ];
 
 // Phase 10 — these three job types moved fully off OpenRouter onto

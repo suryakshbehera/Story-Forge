@@ -17,7 +17,7 @@ import {
 import { ModelSelect, type ModelOption } from "@/components/model-select";
 import { Clapperboard, Save, Sparkles, Trash2 } from "lucide-react";
 import { parseVideoModelConfig } from "@/lib/video-model-config";
-import { planVideoSegments } from "@/lib/video-segmentation";
+import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
 
 export interface SceneVideoClipItem {
   id: string;
@@ -160,6 +160,18 @@ export function SceneVideoPanel({
     () => (mode === "TEXT_TO_VIDEO" && targetDuration && targetDuration > 0 ? planVideoSegments(targetDuration, modelConfig) : null),
     [mode, targetDuration, modelConfig]
   );
+  // Mirrors generateSceneVideo's own per-pair split (lib/scene-video.ts) so
+  // this preview matches what Generate Video will actually produce, not
+  // just a naive even division — see splitFixedDurations for why that
+  // distinction matters for fixed-duration models.
+  const pairSplitPreview = useMemo(() => {
+    if (mode !== "IMAGE_TO_VIDEO" || pairCount === 0 || !targetDuration || targetDuration <= 0) return null;
+    const perPair =
+      modelConfig?.durationMode === "fixed"
+        ? splitFixedDurations(targetDuration, pairCount, modelConfig.fixedDurations ?? [])
+        : Array(pairCount).fill(targetDuration / pairCount);
+    return { perPair, totalSeconds: perPair.reduce((a, b) => a + b, 0) };
+  }, [mode, pairCount, targetDuration, modelConfig]);
 
   async function save() {
     setSaving(true);
@@ -404,7 +416,9 @@ export function SceneVideoPanel({
         <p className="text-xs text-muted-foreground">
           {shotCount === 1
             ? "1 shot → 1 clip (single-image animation, no end keyframe)."
-            : `${shotCount} shots → ${pairCount} clip${pairCount > 1 ? "s" : ""}, one per consecutive shot pair.`}
+            : pairSplitPreview
+              ? `${shotCount} shots → ${pairCount} clip${pairCount > 1 ? "s" : ""} (${pairSplitPreview.perPair.map((d) => `${Math.round(d * 10) / 10}s`).join(" + ")} = ${Math.round(pairSplitPreview.totalSeconds * 10) / 10}s), one per consecutive shot pair.`
+              : `${shotCount} shots → ${pairCount} clip${pairCount > 1 ? "s" : ""}, one per consecutive shot pair.`}
         </p>
       )}
 

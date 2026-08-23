@@ -8,7 +8,7 @@ import { callChatModel, generateVideo, OpenRouterError } from "@/lib/ai/openrout
 import { storage, buildStorageKey } from "@/lib/storage";
 import { extractLastFrame } from "@/lib/ffmpeg";
 import { getSceneVoiceDurationSeconds } from "@/lib/scene-audio";
-import { planVideoSegments } from "@/lib/video-segmentation";
+import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
 import type { VideoModelConfig } from "@/lib/video-model-config";
 
 export interface SerializedSceneVideoClip {
@@ -178,6 +178,19 @@ export async function generateSceneVideo({
           ? [{ startShot: scene.shots[0], endShot: undefined }]
           : scene.shots.slice(0, -1).map((startShot, i) => ({ startShot, endShot: scene.shots[i + 1] }));
 
+      // Auto-split baseline for pairs with no explicit Shot.durationSeconds
+      // override: for a fixed-duration model, distribute the scene's whole
+      // target across every pair at once (see splitFixedDurations) so the
+      // total lands close to the target — e.g. 14s over 2 pairs on [4,6,8]s
+      // options becomes [8,6], not two independently-rounded 8s legs
+      // overshooting to 16s. Anything else (range-mode/unconfigured) falls
+      // back to a plain even split; each leg's own planVideoSegments call
+      // below still clamps it sensibly on its own in that case.
+      const autoPairTargets =
+        sceneTargetDuration && modelConfig?.durationMode === "fixed"
+          ? splitFixedDurations(sceneTargetDuration, pairs.length, modelConfig.fixedDurations ?? [])
+          : pairs.map(() => (sceneTargetDuration ? sceneTargetDuration / pairs.length : undefined));
+
       for (const [pairIndex, pair] of pairs.entries()) {
         const startDataUri = await loadShotImageDataUri(pair.startShot);
         const endDataUri = pair.endShot ? await loadShotImageDataUri(pair.endShot) : undefined;
@@ -187,8 +200,7 @@ export async function generateSceneVideo({
             ? `${scene.description}\n\nTransition: from "${pair.startShot.description}" to "${pair.endShot.description}"`
             : scene.description);
 
-        const pairTarget =
-          pair.startShot.durationSeconds ?? (sceneTargetDuration ? sceneTargetDuration / pairs.length : undefined);
+        const pairTarget = pair.startShot.durationSeconds ?? autoPairTargets[pairIndex];
         const subSegmentDurations = pairTarget ? planVideoSegments(pairTarget, modelConfig).durations : [undefined];
 
         let chainedFrame = startDataUri;

@@ -156,12 +156,15 @@ Judge whether the newly generated image stays visually consistent with those ref
 Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
 { "passed": true or false, "notes": "one or two sentences explaining the judgment" }`;
 
-interface ValidationEntity {
+export interface ValidationEntity {
   name: string;
   referenceImages: Asset[];
 }
 
-async function loadReferenceDataUris(entities: ValidationEntity[]): Promise<string[]> {
+// Exported for scene-video.ts's optional cast/location reference wiring
+// (Seedance Studio) — same "first reference image per locked character / all
+// tagged locations" convention used here for image-generation consistency.
+export async function loadReferenceDataUris(entities: ValidationEntity[]): Promise<string[]> {
   return Promise.all(
     entities.map(async (e) => {
       const ref = e.referenceImages[0];

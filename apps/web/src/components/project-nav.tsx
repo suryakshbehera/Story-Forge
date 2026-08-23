@@ -27,7 +27,8 @@ export function ProjectNav({
 
   tabs.push(
     { href: `${base}/characters`, label: "Characters" },
-    { href: `${base}/locations`, label: "Locations" }
+    { href: `${base}/locations`, label: "Locations" },
+    { href: `${base}/seedance`, label: "Seedance 2.5" }
   );
 
   return (

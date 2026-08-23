@@ -9,6 +9,7 @@ const bodySchema = z.object({
   modelId: z.string().optional(),
   resolution: z.string().optional(),
   generateAudio: z.boolean().optional(),
+  includeCastReferences: z.boolean().optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -30,6 +31,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       modelConfig: parseVideoModelConfig(model.config),
       resolution: body.resolution,
       generateAudio: body.generateAudio,
+      includeCastReferences: body.includeCastReferences,
     });
     return NextResponse.json(clips, { status: 201 });
   } catch (error) {

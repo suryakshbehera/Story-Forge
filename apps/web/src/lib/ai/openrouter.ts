@@ -265,6 +265,16 @@ export interface GenerateVideoParams {
   // e.g. "480p"/"720p" — model-dependent, omitted when the caller has no
   // preference so the provider's own default applies.
   resolution?: string;
+  // Data URIs for OpenRouter's separate `input_references` field — identity/
+  // style guidance (e.g. a locked character's or a location's reference
+  // image), distinct from frame_images' first/last keyframes above. Confirmed
+  // via OpenRouter's own video-generation docs and Seedance 2.5's model page
+  // (up to 50 image/video/audio reference assets under "Omni Reference
+  // mode"); this app only ever sends images. Optional and additive — when
+  // both frame_images and input_references are present OpenRouter still
+  // treats the request as image-to-video, references just carry lower
+  // priority than the keyframes.
+  inputReferenceDataUris?: string[];
 }
 
 export interface GeneratedVideo {
@@ -312,6 +322,7 @@ export async function generateVideo({
   durationSeconds,
   generateAudio,
   resolution,
+  inputReferenceDataUris,
 }: GenerateVideoParams): Promise<GeneratedVideo> {
   const apiKey = requireApiKey();
 
@@ -338,6 +349,9 @@ export async function generateVideo({
                   : []),
               ],
             }
+          : {}),
+        ...(inputReferenceDataUris?.length
+          ? { input_references: inputReferenceDataUris.map((url) => ({ type: "image_url", image_url: { url } })) }
           : {}),
       }),
     },

@@ -9,6 +9,7 @@ import { storage, buildStorageKey } from "@/lib/storage";
 import { extractLastFrame } from "@/lib/ffmpeg";
 import { getSceneVoiceDurationSeconds } from "@/lib/scene-audio";
 import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
+import { loadReferenceDataUris, type ValidationEntity } from "@/lib/shot-images";
 import type { VideoModelConfig } from "@/lib/video-model-config";
 
 export interface SerializedSceneVideoClip {
@@ -53,6 +54,15 @@ interface GenerateSceneVideoParams {
   modelConfig: VideoModelConfig | null;
   resolution?: string;
   generateAudio?: boolean;
+  // Opt-in only — never set by the generic scene video panel, so every other
+  // model's behavior is unchanged. When true, resolves this scene's locked
+  // characters' + tagged locations' reference images (same roster
+  // generateShotImage() already uses for image-generation consistency, see
+  // lib/shot-images.ts) and sends them as OpenRouter's `input_references` —
+  // identity/style guidance distinct from the per-pair keyframes below. Added
+  // for the Seedance 2.5 Studio page, whose prompting model treats "give
+  // every reference a single job" as a first-class practice.
+  includeCastReferences?: boolean;
 }
 
 // IMAGE_TO_VIDEO scenes generate one clip per consecutive shot pair
@@ -75,11 +85,14 @@ export async function generateSceneVideo({
   modelConfig,
   resolution,
   generateAudio,
+  includeCastReferences,
 }: GenerateSceneVideoParams): Promise<SerializedSceneVideoClip[]> {
   const scene = await prisma.scene.findUniqueOrThrow({
     where: { id: sceneId },
     include: {
       shots: { orderBy: { order: "asc" }, include: { images: { where: { isSelected: true }, take: 1 } } },
+      characters: { include: { referenceImages: true } },
+      locations: { include: { referenceImages: true } },
     },
   });
 
@@ -89,6 +102,16 @@ export async function generateSceneVideo({
 
   const resolvedResolution = resolution ?? scene.videoResolution ?? modelConfig?.resolutions?.[0] ?? undefined;
   const resolvedGenerateAudio = generateAudio ?? scene.videoGenerateAudio;
+
+  // Same roster generateShotImage() uses for image-generation consistency —
+  // locked characters (an unlocked character's look is allowed to vary, so
+  // it isn't a reference worth pinning) plus every tagged location.
+  const castTargets: ValidationEntity[] = [
+    ...scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
+    ...scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
+  ].filter((t) => t.referenceImages.length > 0);
+  const castReferenceDataUris =
+    includeCastReferences && castTargets.length > 0 ? await loadReferenceDataUris(castTargets) : [];
 
   type SceneShot = (typeof scene.shots)[number];
 
@@ -214,6 +237,7 @@ export async function generateSceneVideo({
             durationSeconds: subDuration,
             generateAudio: resolvedGenerateAudio,
             resolution: resolvedResolution,
+            inputReferenceDataUris: castReferenceDataUris,
           });
 
           const buffer = Buffer.from(generated.base64, "base64");
@@ -242,6 +266,7 @@ export async function generateSceneVideo({
           durationSeconds: segmentDuration,
           generateAudio: resolvedGenerateAudio,
           resolution: resolvedResolution,
+          inputReferenceDataUris: castReferenceDataUris,
         });
 
         const buffer = Buffer.from(generated.base64, "base64");

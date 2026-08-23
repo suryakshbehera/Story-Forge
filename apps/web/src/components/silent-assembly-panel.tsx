@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ModelSelect } from "@/components/model-select";
@@ -24,6 +25,7 @@ export function SilentAssemblyPanel({
   parentId: string;
   initialSilentVideos: SilentVideoItem[];
 }) {
+  const router = useRouter();
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(false);
   const [silentVideos, setSilentVideos] = useState(initialSilentVideos);
@@ -49,6 +51,7 @@ export function SilentAssemblyPanel({
       const video: SilentVideoItem = await res.json();
       setSilentVideos((prev) => [video, ...prev.map((v) => ({ ...v, isSelected: false }))]);
       toast.success("Silent picture assembled.");
+      router.refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Assembly failed.");
     } finally {
@@ -63,6 +66,7 @@ export function SilentAssemblyPanel({
       return;
     }
     setSilentVideos((prev) => prev.map((v) => ({ ...v, isSelected: v.id === assetId })));
+    router.refresh();
   }
 
   async function deleteVideo(assetId: string) {
@@ -73,6 +77,7 @@ export function SilentAssemblyPanel({
       return;
     }
     setSilentVideos((prev) => prev.filter((v) => v.id !== assetId));
+    router.refresh();
   }
 
   return (

@@ -44,6 +44,21 @@ export interface ChatModelParams {
 
 export class OpenRouterError extends Error {}
 
+// A non-2xx response isn't always OpenRouter's own JSON error shape — a
+// Cloudflare-fronted outage (502/503/504) returns a full HTML error page as
+// the body instead. Dumping that verbatim into an OpenRouterError message
+// used to surface as a wall of raw HTML in the UI toast; this collapses it
+// to a short, readable line (pulling the page's <title> when present) so a
+// gateway outage reads as "502: Bad gateway" instead of a doc dump.
+function summarizeErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (/^<(!doctype html|html)/i.test(trimmed)) {
+    const title = trimmed.match(/<title>([^<]*)<\/title>/i)?.[1]?.trim();
+    return `non-JSON HTML error page from the gateway${title ? ` (${title})` : ""} — likely a transient OpenRouter/Cloudflare outage, try again shortly.`;
+  }
+  return trimmed.length > 500 ? `${trimmed.slice(0, 500)}…` : trimmed;
+}
+
 function requireApiKey(): string {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
@@ -147,7 +162,7 @@ export async function callChatModel({
 
   if (!response.ok) {
     const body = await response.text();
-    throw new OpenRouterError(`OpenRouter request failed (${response.status}): ${body}`);
+    throw new OpenRouterError(`OpenRouter request failed (${response.status}): ${summarizeErrorBody(body)}`);
   }
 
   const data = await response.json();
@@ -215,7 +230,7 @@ export async function generateImage({
 
   if (!response.ok) {
     const body = await response.text();
-    throw new OpenRouterError(`OpenRouter image request failed (${response.status}): ${body}`);
+    throw new OpenRouterError(`OpenRouter image request failed (${response.status}): ${summarizeErrorBody(body)}`);
   }
 
   const data = await response.json();
@@ -273,7 +288,7 @@ async function pollVideoJob(jobId: string, apiKey: string): Promise<string> {
     );
     if (!response.ok) {
       const body = await response.text();
-      throw new OpenRouterError(`OpenRouter video status check failed (${response.status}): ${body}`);
+      throw new OpenRouterError(`OpenRouter video status check failed (${response.status}): ${summarizeErrorBody(body)}`);
     }
     const data = await response.json();
     if (data.status === "completed") {
@@ -331,7 +346,7 @@ export async function generateVideo({
 
   if (!submitResponse.ok) {
     const body = await submitResponse.text();
-    throw new OpenRouterError(`OpenRouter video request failed (${submitResponse.status}): ${body}`);
+    throw new OpenRouterError(`OpenRouter video request failed (${submitResponse.status}): ${summarizeErrorBody(body)}`);
   }
 
   const submitted = await submitResponse.json();
@@ -433,7 +448,7 @@ export async function generateAudioClip({ modelId, prompt }: GenerateAudioClipPa
 
   if (!response.ok || !response.body) {
     const body = await response.text().catch(() => "");
-    throw new OpenRouterError(`OpenRouter audio generation request failed (${response.status}): ${body}`);
+    throw new OpenRouterError(`OpenRouter audio generation request failed (${response.status}): ${summarizeErrorBody(body)}`);
   }
 
   const reader = response.body.getReader();
@@ -569,13 +584,13 @@ export async function generateSpeech(params: GenerateSpeechParams): Promise<Gene
   if (!response.ok) {
     const body = await response.text();
     if (!isUnsupportedFormatError(response.status, body)) {
-      throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${body}`);
+      throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${summarizeErrorBody(body)}`);
     }
     response = await requestSpeech(apiKey, "pcm", params);
     responseFormat = "pcm";
     if (!response.ok) {
       const retryBody = await response.text();
-      throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${retryBody}`);
+      throw new OpenRouterError(`OpenRouter speech request failed (${response.status}): ${summarizeErrorBody(retryBody)}`);
     }
   }
 

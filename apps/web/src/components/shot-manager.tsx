@@ -74,6 +74,7 @@ export function ShotManager({
   validationModelId,
   imageInstructions,
   shotPlanningModelId,
+  onShotsChange,
 }: {
   sceneId: string;
   sceneVisualMode: "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
@@ -83,10 +84,21 @@ export function ShotManager({
   validationModelId: string;
   imageInstructions: string;
   shotPlanningModelId: string;
+  // Shots live in this component's own state (image generation/selection
+  // happens per-shot below, never round-tripping through the parent scene
+  // object) — reported up so SceneManager's copy of scene.shots doesn't go
+  // stale for anything that gates on it, e.g. SceneVideoPanel's "every shot
+  // needs a selected image" check.
+  onShotsChange?: (shots: ShotItem[]) => void;
 }) {
   const [shots, setShots] = useState(initialShots);
   const [planning, setPlanning] = useState(false);
   const [adding, setAdding] = useState(false);
+
+  useEffect(() => {
+    onShotsChange?.(shots);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shots]);
 
   async function generateShots() {
     if (!shotPlanningModelId) {

@@ -690,6 +690,7 @@ function SceneRow({
             validationModelId={validationModelId}
             imageInstructions={imageInstructions}
             shotPlanningModelId={shotPlanningModelId}
+            onShotsChange={(shots) => onUpdate({ ...scene, shots })}
           />
         )}
 

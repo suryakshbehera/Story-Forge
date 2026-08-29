@@ -671,6 +671,41 @@ export function mapSilentVideos<T extends { silentVideos: Asset[] }>(parent: T) 
   return { ...parent, silentVideos: parent.silentVideos.map(serializeSilentVideo) };
 }
 
+const CUE_PLAN_ATTACHMENT_WIDTH = 640;
+const CUE_PLAN_ATTACHMENT_FPS = 8;
+
+// getSelectedSilentPicture used to base64 the selected take's raw bytes
+// as-is — a full FULL_RES (1920x1080/30fps) render of the whole story/
+// episode. Inlined as a video_url data URI in one JSON POST to OpenRouter
+// (see draftAudioCuePlan), that consistently 502'd at OpenRouter's
+// Cloudflare gateway: base64 already inflates size ~33%, and a multi-minute
+// 1080p file pushes the request into tens of MB with no chunking, which the
+// gateway apparently can't reliably buffer/forward. The cue-plan model only
+// needs to recognize what's happening on screen per scene, not read fine
+// detail, so this transcodes a much smaller copy — same total duration (so
+// it still lines up with the manifest's per-scene timing), just far fewer
+// pixels and frames — and sends that instead of the original.
+async function shrinkForCuePlanAttachment(bytes: Buffer): Promise<Buffer> {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-cueplan-shrink-"));
+  try {
+    const inPath = path.join(workDir, "in.mp4");
+    const outPath = path.join(workDir, "out.mp4");
+    await fs.writeFile(inPath, bytes);
+    await runFfmpeg([
+      "-i", inPath,
+      "-vf", `scale=${CUE_PLAN_ATTACHMENT_WIDTH}:-2,fps=${CUE_PLAN_ATTACHMENT_FPS}`,
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "30",
+      "-an",
+      outPath,
+    ]);
+    return await fs.readFile(outPath);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+}
+
 // Reads the selected SILENT_VIDEO take for lib/audio-cue-plan.ts to draft
 // against, instead of rebuilding the picture from scratch on every draft
 // click. null means nothing has been assembled/selected yet — the caller
@@ -686,9 +721,10 @@ export async function getSelectedSilentPicture(
   if (!asset) return null;
   const bytes = await storage.get(asset.storageKey);
   if (!bytes) return null;
+  const shrunk = await shrinkForCuePlanAttachment(bytes);
   return {
-    base64: bytes.toString("base64"),
-    mimeType: asset.mimeType ?? "video/mp4",
+    base64: shrunk.toString("base64"),
+    mimeType: "video/mp4",
     manifest: (asset.metadata as unknown as SceneManifestEntry[] | null) ?? [],
   };
 }

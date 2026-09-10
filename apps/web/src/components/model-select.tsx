@@ -8,6 +8,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { getModelsForJobType } from "@/lib/model-registry-cache";
 import type { AiJobType } from "db";
 
 export interface ModelOption {
@@ -42,9 +43,8 @@ export function ModelSelect({
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/ai-models?jobType=${jobType}&enabledOnly=true`)
-      .then((res) => res.json())
-      .then((data: ModelOption[]) => {
+    getModelsForJobType(jobType)
+      .then((data) => {
         if (cancelled) return;
         setModels(data);
         onModelsChange?.(data);
@@ -52,15 +52,6 @@ export function ModelSelect({
           const fallback = data.find((m) => m.isDefault) ?? data[0];
           if (fallback) onChange(fallback.id);
         }
-      })
-      .catch(() => {
-        // A failed/aborted fetch (network hiccup, stale HMR chunk, tab
-        // navigating away mid-request) must not leave `models` stuck at
-        // null forever — that renders as a permanent "Loading models…"
-        // with no way to recover short of a full page reload. Falling
-        // through to the empty-list state at least shows the existing
-        // "No models configured" messaging instead of hanging silently.
-        if (!cancelled) setModels([]);
       });
     return () => {
       cancelled = true;

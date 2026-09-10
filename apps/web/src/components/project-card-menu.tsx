@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { MoreVertical, Trash2 } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 // Sits inside the project card's <Link> (see app/page.tsx) — every handler
 // here stops propagation so opening the menu or deleting never triggers the
@@ -18,11 +19,16 @@ import { MoreVertical, Trash2 } from "lucide-react";
 export function ProjectCardMenu({ projectId, projectName }: { projectId: string; projectName: string }) {
   const router = useRouter();
   const [deleting, setDeleting] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   async function remove() {
-    if (!confirm(`Delete "${projectName}"? This can't be undone — all its scenes, characters, and generated assets go with it.`)) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Delete "${projectName}"?`,
+      description: "This can't be undone — all its scenes, characters, and generated assets go with it.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/projects/${projectId}`, { method: "DELETE" });
@@ -42,6 +48,7 @@ export function ProjectCardMenu({ projectId, projectName }: { projectId: string;
           <Button
             size="icon-sm"
             variant="ghost"
+            aria-label="Project menu"
             disabled={deleting}
             onClick={(e) => {
               e.preventDefault();
@@ -65,6 +72,7 @@ export function ProjectCardMenu({ projectId, projectName }: { projectId: string;
           Delete Project
         </DropdownMenuItem>
       </DropdownMenuContent>
+      {ConfirmDialog}
     </DropdownMenu>
   );
 }

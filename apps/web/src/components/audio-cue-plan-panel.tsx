@@ -186,7 +186,12 @@ export function AudioCuePlanPanel({
                           updateEntry(entry.sceneId, { dialogueLines });
                         }}
                       />
-                      <Button size="icon-sm" variant="ghost" onClick={() => removeDialogueLine(entry.sceneId, i)} className="text-destructive">
+                      <Button
+                        size="icon-sm"
+                        variant="destructive"
+                        aria-label="Remove dialogue line"
+                        onClick={() => removeDialogueLine(entry.sceneId, i)}
+                      >
                         <Trash2 className="size-3.5" />
                       </Button>
                     </div>

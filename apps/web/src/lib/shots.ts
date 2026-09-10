@@ -70,6 +70,32 @@ export class ShotsExistError extends Error {
 
 const CAMERA_MOVEMENTS = ["STATIC", "ZOOM_IN", "ZOOM_OUT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN"] as const;
 
+// Rough words-per-minute estimate (~150wpm, a common spoken-narration rate)
+// used only to give AI-planned ILLUSTRATION shots a sane starting duration
+// when the scene already has narration/dialogue text written at
+// shot-planning time — the per-shot Duration field (shot-manager.tsx) stays
+// the real source of truth once a human, or the Audio Cue Plan step
+// (audio-cue-plan.ts), reviews it. When there's no script yet — the normal
+// picture-first order Phase 11 expects — this is skipped entirely and shots
+// keep today's null/DEFAULT_ILLUSTRATION_SECONDS fallback (see
+// lib/illustration-timing.ts).
+const WORDS_PER_SECOND = 150 / 60;
+const MIN_ESTIMATED_SHOT_SECONDS = 1;
+
+function countWords(text: string): number {
+  return text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length;
+}
+
+function estimateShotDurations(
+  scene: { narration: string | null; dialogueLines: { text: string }[] },
+  shotCount: number
+): number[] | null {
+  const words = countWords(scene.narration ?? "") + scene.dialogueLines.reduce((sum, l) => sum + countWords(l.text), 0);
+  if (words === 0) return null;
+  const perShot = Math.max(MIN_ESTIMATED_SHOT_SECONDS, Math.round(words / WORDS_PER_SECOND / shotCount));
+  return Array(shotCount).fill(perShot);
+}
+
 const aiShotsResponseSchema = z.object({
   shots: z
     .array(
@@ -150,6 +176,9 @@ export async function generateShots({ sceneId, modelId, regenerateAll }: Generat
     throw new OpenRouterError("AI returned an unexpected shape.");
   }
 
+  const estimatedDurations =
+    scene.visualMode === "ILLUSTRATION" ? estimateShotDurations(scene, parsed.data.shots.length) : null;
+
   const shots = await prisma.$transaction(async (tx) => {
     if (regenerateAll) {
       await tx.shot.deleteMany({ where: { sceneId } });
@@ -163,6 +192,7 @@ export async function generateShots({ sceneId, modelId, regenerateAll }: Generat
             order: index + 1,
             description: s.description,
             cameraMovement: (s.cameraMovement ?? "STATIC") as CameraMovement,
+            durationSeconds: estimatedDurations?.[index] ?? null,
           },
           include: SHOT_INCLUDE,
         })

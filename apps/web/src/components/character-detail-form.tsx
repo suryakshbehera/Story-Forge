@@ -6,9 +6,11 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Field } from "@/components/field";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Save, Trash2, Lock } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface CharacterFields {
   name: string;
@@ -33,6 +35,7 @@ export function CharacterDetailForm({
   const [fields, setFields] = useState(initialFields);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   function update<K extends keyof CharacterFields>(key: K, value: CharacterFields[K]) {
     setFields((prev) => ({ ...prev, [key]: value }));
@@ -57,7 +60,13 @@ export function CharacterDetailForm({
   }
 
   async function remove() {
-    if (!confirm(`Delete "${fields.name}"? This can't be undone.`)) return;
+    const ok = await confirm({
+      title: `Delete "${fields.name}"?`,
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/characters/${characterId}`, { method: "DELETE" });
@@ -135,20 +144,12 @@ export function CharacterDetailForm({
           <Save className="size-4" />
           {saving ? "Saving…" : "Save Character"}
         </Button>
-        <Button onClick={remove} disabled={deleting} variant="outline" className="text-destructive">
+        <Button onClick={remove} disabled={deleting} variant="destructive">
           <Trash2 className="size-4" />
           Delete
         </Button>
       </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="grid gap-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      {children}
+      {ConfirmDialog}
     </div>
   );
 }

@@ -79,14 +79,17 @@ export function SeasonsManager({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex justify-end">
-        <AddSeasonDialog nextNumber={seasons.length + 1} onAdd={addSeason} />
-      </div>
+      {seasons.length > 0 && (
+        <div className="flex justify-end">
+          <AddSeasonDialog nextNumber={seasons.length + 1} onAdd={addSeason} />
+        </div>
+      )}
 
       {seasons.length === 0 ? (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            No seasons yet. Add your first season to start planning episodes.
+          <CardContent className="flex flex-col items-center gap-3 py-12 text-center text-sm text-muted-foreground">
+            <p>No seasons yet. Add your first season to start planning episodes.</p>
+            <AddSeasonDialog nextNumber={seasons.length + 1} onAdd={addSeason} />
           </CardContent>
         </Card>
       ) : (
@@ -97,15 +100,24 @@ export function SeasonsManager({
                 Season {season.number}
                 {season.title ? ` — ${season.title}` : ""}
               </CardTitle>
-              <AddEpisodeDialog
-                seasonId={season.id}
-                nextNumber={season.episodes.length + 1}
-                onAdd={addEpisode}
-              />
+              {season.episodes.length > 0 && (
+                <AddEpisodeDialog
+                  seasonId={season.id}
+                  nextNumber={season.episodes.length + 1}
+                  onAdd={addEpisode}
+                />
+              )}
             </CardHeader>
             <CardContent>
               {season.episodes.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No episodes yet.</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm text-muted-foreground">No episodes yet.</p>
+                  <AddEpisodeDialog
+                    seasonId={season.id}
+                    nextNumber={season.episodes.length + 1}
+                    onAdd={addEpisode}
+                  />
+                </div>
               ) : (
                 <div className="flex flex-col divide-y">
                   {season.episodes.map((ep) => (

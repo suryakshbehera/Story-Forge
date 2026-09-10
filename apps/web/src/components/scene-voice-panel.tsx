@@ -16,6 +16,35 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelSelect } from "@/components/model-select";
 import { Mic, Plus, Save, Trash2, ChevronUp, ChevronDown, Wand2 } from "lucide-react";
+import { illustrationTimingMismatch } from "@/lib/illustration-timing";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+
+// Only meaningful for ILLUSTRATION — IMAGE_TO_VIDEO already self-fits clip
+// length to voice via autoPairTargets (scene-video.ts). Fires right after a
+// narration/dialogue generation, the first point a fresh, real voice
+// duration actually exists to compare against — not a pre-generation gate,
+// since Narrata is manual-first and forcing the whole-episode Audio Cue Plan
+// pass just to fix one scene's shot timing would be heavier than the
+// problem. Mirrors the inline hint in shot-manager.tsx. Final Assembly
+// always renders picture and voice to the exact same length regardless (see
+// buildIllustrationSegment's scaleToSeconds in video-assembly.ts) — this is
+// a pacing heads-up, not a "this will break" warning: a gap this big means
+// every shot will be visibly stretched or compressed from the duration set
+// below to land on the voice exactly.
+async function warnIfIllustrationTimingMismatch(sceneId: string, shotsTotalSeconds: number) {
+  try {
+    const res = await fetch(`/api/scenes/${sceneId}/voice-duration`);
+    const data: { seconds: number | null } = await res.json();
+    if (data.seconds != null && illustrationTimingMismatch(shotsTotalSeconds, data.seconds)) {
+      toast.warning(
+        `Shots total ${shotsTotalSeconds.toFixed(1)}s but narration/dialogue audio is now ${data.seconds.toFixed(1)}s — Final Assembly will stretch/compress every shot to match exactly, so pacing will look off. Adjust shot durations for better pacing, or fit narration to the picture via Assemble without Audio → Audio Cue Plan.`
+      );
+    }
+  } catch {
+    // Best-effort nudge only — a failed check shouldn't error out a
+    // generation that already succeeded.
+  }
+}
 
 export interface AudioTake {
   id: string;
@@ -48,6 +77,8 @@ export interface VoiceCharacterOption {
 // a voice string from the user. See lib/voice.ts.
 export function SceneVoicePanel({
   sceneId,
+  sceneVisualMode,
+  illustrationShotsTotalSeconds,
   characters,
   narratorVoiceName,
   initialNarration,
@@ -57,6 +88,10 @@ export function SceneVoicePanel({
   initialDialogueLines,
 }: {
   sceneId: string;
+  // Both only used to nudge on an ILLUSTRATION timing mismatch after a
+  // generation succeeds — see warnIfIllustrationTimingMismatch above.
+  sceneVisualMode: "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
+  illustrationShotsTotalSeconds: number;
   characters: VoiceCharacterOption[];
   narratorVoiceName: string | null;
   initialNarration: string;
@@ -89,7 +124,7 @@ export function SceneVoicePanel({
   const [scriptModelId, setScriptModelId] = useState("");
   const [drafting, setDrafting] = useState(false);
 
-  async function saveNarration() {
+  async function saveNarration({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
     setSavingNarration(true);
     try {
       const res = await fetch(`/api/scenes/${sceneId}`, {
@@ -105,9 +140,11 @@ export function SceneVoicePanel({
       setSavedNarration(narration);
       setSavedNarrationDeliveryNotes(narrationDeliveryNotes);
       setSavedNarrationSpeed(narrationSpeed);
-      toast.success("Narration script saved.");
+      if (!silent) toast.success("Narration script saved.");
+      return true;
     } catch {
       toast.error("Couldn't save narration script.");
+      return false;
     } finally {
       setSavingNarration(false);
     }
@@ -148,8 +185,8 @@ export function SceneVoicePanel({
       return;
     }
     if (narrationDirty) {
-      toast.error("Save the narration script before generating audio.");
-      return;
+      const ok = await saveNarration({ silent: true });
+      if (!ok) return;
     }
     setGeneratingNarration(true);
     try {
@@ -165,6 +202,9 @@ export function SceneVoicePanel({
       const take: AudioTake = await res.json();
       setNarrationAudio((prev) => [take, ...prev.map((t) => ({ ...t, isSelected: false }))]);
       toast.success("Narration audio generated.");
+      if (sceneVisualMode === "ILLUSTRATION") {
+        warnIfIllustrationTimingMismatch(sceneId, illustrationShotsTotalSeconds);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
     } finally {
@@ -345,7 +385,7 @@ export function SceneVoicePanel({
           <Button
             size="sm"
             variant="outline"
-            onClick={saveNarration}
+            onClick={() => saveNarration()}
             disabled={savingNarration || !narrationDirty}
           >
             <Save className="size-3.5" />
@@ -355,7 +395,7 @@ export function SceneVoicePanel({
           <Button
             size="sm"
             onClick={generateNarration}
-            disabled={generatingNarration || !savedNarration.trim() || !narratorVoiceName}
+            disabled={generatingNarration || !narration.trim() || !narratorVoiceName}
           >
             <Mic className="size-3.5" />
             {generatingNarration ? "Generating…" : "Generate Audio"}
@@ -367,6 +407,7 @@ export function SceneVoicePanel({
               <AudioTakeRow
                 key={take.id}
                 take={take}
+                deleteLabel="Delete narration take"
                 onSelect={() => selectNarrationTake(take.id)}
                 onDelete={() => deleteNarrationTake(take.id)}
               />
@@ -384,16 +425,22 @@ export function SceneVoicePanel({
               <Wand2 className="size-3.5" />
               {directing ? "Directing…" : "Direct Dialogue"}
             </Button>
-            <AddDialogueLineDialog characters={characters} onAdd={addDialogueLine} />
+            {dialogueLines.length > 0 && <AddDialogueLineDialog characters={characters} onAdd={addDialogueLine} />}
           </div>
         </div>
         {dialogueLines.length === 0 ? (
-          <p className="mt-1.5 text-xs text-muted-foreground">No dialogue lines yet.</p>
+          <div className="mt-1.5 flex items-center gap-2">
+            <p className="text-xs text-muted-foreground">No dialogue lines yet.</p>
+            <AddDialogueLineDialog characters={characters} onAdd={addDialogueLine} />
+          </div>
         ) : (
           <div className="mt-2 flex flex-col gap-2">
             {dialogueLines.map((line, index) => (
               <DialogueLineRow
                 key={line.id}
+                sceneId={sceneId}
+                sceneVisualMode={sceneVisualMode}
+                illustrationShotsTotalSeconds={illustrationShotsTotalSeconds}
                 line={line}
                 characters={characters}
                 isFirst={index === 0}
@@ -410,7 +457,17 @@ export function SceneVoicePanel({
   );
 }
 
-function AudioTakeRow({ take, onSelect, onDelete }: { take: AudioTake; onSelect: () => void; onDelete: () => void }) {
+function AudioTakeRow({
+  take,
+  deleteLabel = "Delete take",
+  onSelect,
+  onDelete,
+}: {
+  take: AudioTake;
+  deleteLabel?: string;
+  onSelect: () => void;
+  onDelete: () => void;
+}) {
   return (
     <div className={`flex items-center gap-2 rounded-md border p-1.5 ${take.isSelected ? "border-foreground" : ""}`}>
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
@@ -418,7 +475,7 @@ function AudioTakeRow({ take, onSelect, onDelete }: { take: AudioTake; onSelect:
       <Button size="sm" variant={take.isSelected ? "default" : "outline"} onClick={onSelect} disabled={take.isSelected}>
         {take.isSelected ? "Selected" : "Use this take"}
       </Button>
-      <Button size="icon-sm" variant="ghost" onClick={onDelete} className="text-destructive">
+      <Button size="icon-sm" variant="destructive" aria-label={deleteLabel} onClick={onDelete}>
         <Trash2 className="size-3.5" />
       </Button>
     </div>
@@ -496,6 +553,9 @@ function AddDialogueLineDialog({
 }
 
 function DialogueLineRow({
+  sceneId,
+  sceneVisualMode,
+  illustrationShotsTotalSeconds,
   line,
   characters,
   isFirst,
@@ -504,6 +564,9 @@ function DialogueLineRow({
   onMove,
   onDelete,
 }: {
+  sceneId: string;
+  sceneVisualMode: "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
+  illustrationShotsTotalSeconds: number;
   line: DialogueLineItem;
   characters: VoiceCharacterOption[];
   isFirst: boolean;
@@ -522,6 +585,7 @@ function DialogueLineRow({
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(false);
   const [audio, setAudio] = useState(line.audio);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   const dirty =
     text !== line.text ||
@@ -531,7 +595,7 @@ function DialogueLineRow({
   const selectedCharacter = characters.find((c) => c.id === characterId);
   const voiceName = characterId === line.character.id ? line.character.voiceName : selectedCharacter?.voiceName ?? null;
 
-  async function save() {
+  async function save({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
     setSaving(true);
     try {
       const res = await fetch(`/api/dialogue-lines/${line.id}`, {
@@ -548,16 +612,24 @@ function DialogueLineRow({
       const updated: DialogueLineItem = await res.json();
       setAudio(updated.audio);
       onUpdate(updated);
-      toast.success("Dialogue line saved.");
+      if (!silent) toast.success("Dialogue line saved.");
+      return true;
     } catch {
       toast.error("Couldn't save dialogue line.");
+      return false;
     } finally {
       setSaving(false);
     }
   }
 
   async function remove() {
-    if (!confirm("Delete this dialogue line? This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this dialogue line?",
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/dialogue-lines/${line.id}`, { method: "DELETE" });
@@ -594,8 +666,8 @@ function DialogueLineRow({
       return;
     }
     if (dirty) {
-      toast.error("Save the line before generating audio.");
-      return;
+      const ok = await save({ silent: true });
+      if (!ok) return;
     }
     setGenerating(true);
     try {
@@ -611,6 +683,9 @@ function DialogueLineRow({
       const take: AudioTake = await res.json();
       setAudio((prev) => [take, ...prev.map((t) => ({ ...t, isSelected: false }))]);
       toast.success("Dialogue audio generated.");
+      if (sceneVisualMode === "ILLUSTRATION") {
+        warnIfIllustrationTimingMismatch(sceneId, illustrationShotsTotalSeconds);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
     } finally {
@@ -656,13 +731,13 @@ function DialogueLineRow({
           </SelectContent>
         </Select>
         <div className="ml-auto flex items-center gap-1">
-          <Button size="icon-sm" variant="ghost" disabled={isFirst || moving} onClick={() => move("up")}>
+          <Button size="icon-sm" variant="ghost" aria-label="Move dialogue line up" disabled={isFirst || moving} onClick={() => move("up")}>
             <ChevronUp className="size-3.5" />
           </Button>
-          <Button size="icon-sm" variant="ghost" disabled={isLast || moving} onClick={() => move("down")}>
+          <Button size="icon-sm" variant="ghost" aria-label="Move dialogue line down" disabled={isLast || moving} onClick={() => move("down")}>
             <ChevronDown className="size-3.5" />
           </Button>
-          <Button size="icon-sm" variant="ghost" disabled={deleting} onClick={remove} className="text-destructive">
+          <Button size="icon-sm" variant="destructive" aria-label="Delete dialogue line" disabled={deleting} onClick={remove}>
             <Trash2 className="size-3.5" />
           </Button>
         </div>
@@ -695,11 +770,11 @@ function DialogueLineRow({
       </div>
 
       <div className="mt-1.5 flex flex-wrap items-end gap-2">
-        <Button size="sm" variant="outline" onClick={save} disabled={!dirty || saving}>
+        <Button size="sm" variant="outline" onClick={() => save()} disabled={!dirty || saving}>
           {saving ? "Saving…" : "Save"}
         </Button>
         <ModelSelect jobType="VOICE" value={modelId} onChange={setModelId} />
-        <Button size="sm" onClick={generate} disabled={generating || !line.text.trim() || !voiceName || dirty}>
+        <Button size="sm" onClick={generate} disabled={generating || !text.trim() || !voiceName}>
           {generating ? "Generating…" : "Generate Audio"}
         </Button>
       </div>
@@ -709,12 +784,14 @@ function DialogueLineRow({
             <AudioTakeRow
               key={take.id}
               take={take}
+              deleteLabel="Delete dialogue take"
               onSelect={() => selectTake(take.id)}
               onDelete={() => deleteTake(take.id)}
             />
           ))}
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }

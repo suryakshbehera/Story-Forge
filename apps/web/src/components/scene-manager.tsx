@@ -22,6 +22,9 @@ import { SceneVoicePanel, type AudioTake, type DialogueLineItem } from "@/compon
 import { SceneVideoPanel, type SceneVideoClipItem } from "@/components/scene-video-panel";
 import { SceneAudioPanel } from "@/components/scene-audio-panel";
 import { ShotManager, type ShotItem } from "@/components/shot-manager";
+import { effectiveShotSeconds } from "@/lib/illustration-timing";
+import { Field } from "@/components/field";
+import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "@/components/ui/collapsible";
 import {
   Sparkles,
   Plus,
@@ -29,8 +32,11 @@ import {
   Trash2,
   ChevronUp,
   ChevronDown,
+  ChevronRight,
   AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
 
@@ -133,6 +139,7 @@ export function SceneManager({
   const [instructions, setInstructions] = useState("");
   const [generating, setGenerating] = useState(false);
   const [unmatchedNames, setUnmatchedNames] = useState<string[] | null>(null);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   const [promptModelId, setPromptModelId] = useState("");
   const [imageModelId, setImageModelId] = useState("");
@@ -229,9 +236,12 @@ export function SceneManager({
     }
     const regenerateAll = scenes.length > 0;
     if (regenerateAll) {
-      const ok = confirm(
-        `This deletes all ${scenes.length} existing scenes and replaces them with a new AI-generated set. Continue?`
-      );
+      const ok = await confirm({
+        title: "Regenerate all scenes?",
+        description: `This deletes all ${scenes.length} existing scenes and shots before generating new ones. This can't be undone.`,
+        confirmLabel: "Regenerate",
+        destructive: true,
+      });
       if (!ok) return;
     }
     setGenerating(true);
@@ -391,13 +401,14 @@ export function SceneManager({
         <h3 className="text-sm font-medium text-muted-foreground">
           {scenes.length} scene{scenes.length === 1 ? "" : "s"}
         </h3>
-        <AddSceneDialog onAdd={addScene} />
+        {scenes.length > 0 && <AddSceneDialog onAdd={addScene} />}
       </div>
 
       {scenes.length === 0 ? (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            No scenes yet — generate from the written content above, or add one manually.
+          <CardContent className="flex flex-col items-center gap-3 py-12 text-center text-sm text-muted-foreground">
+            <p>No scenes yet — generate from the written content above, or add one manually.</p>
+            <AddSceneDialog onAdd={addScene} />
           </CardContent>
         </Card>
       ) : (
@@ -424,6 +435,7 @@ export function SceneManager({
           ))}
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }
@@ -526,6 +538,20 @@ function SceneRow({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
+  // Shots is usually the first thing worked on per scene and gates Video, so
+  // it starts open; Video/Voice/Audio start collapsed to keep a multi-scene
+  // page scannable — see docs/product/ux-audit-2026-09.md F4.
+  const [shotsOpen, setShotsOpen] = useState(true);
+  const [videoOpen, setVideoOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [audioOpen, setAudioOpen] = useState(false);
+
+  const shotsComplete = scene.shots.length > 0 && scene.shots.every((s) => s.images.some((img) => img.isSelected));
+  const videoComplete = scene.videoClips.some((c) => c.isSelected);
+  const voiceComplete =
+    scene.narrationAudio.some((a) => a.isSelected) || scene.dialogueLines.some((l) => l.audio.some((a) => a.isSelected));
+  const audioComplete = scene.music.some((a) => a.isSelected) || scene.sfx.some((a) => a.isSelected);
 
   const dirty =
     title !== (scene.title ?? "") ||
@@ -591,8 +617,13 @@ function SceneRow({
   }
 
   async function remove() {
-    if (!confirm(`Delete scene ${scene.order}${scene.title ? ` (${scene.title})` : ""}? This can't be undone.`))
-      return;
+    const ok = await confirm({
+      title: `Delete scene ${scene.order}${scene.title ? ` (${scene.title})` : ""}?`,
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/scenes/${scene.id}`, { method: "DELETE" });
@@ -612,13 +643,13 @@ function SceneRow({
           #{scene.order} {title || <span className="text-muted-foreground">Untitled Scene</span>}
         </CardTitle>
         <div className="flex items-center gap-1">
-          <Button size="icon-sm" variant="ghost" disabled={isFirst || moving} onClick={() => move("up")}>
+          <Button size="icon-sm" variant="ghost" aria-label="Move scene up" disabled={isFirst || moving} onClick={() => move("up")}>
             <ChevronUp className="size-4" />
           </Button>
-          <Button size="icon-sm" variant="ghost" disabled={isLast || moving} onClick={() => move("down")}>
+          <Button size="icon-sm" variant="ghost" aria-label="Move scene down" disabled={isLast || moving} onClick={() => move("down")}>
             <ChevronDown className="size-4" />
           </Button>
-          <Button size="icon-sm" variant="ghost" disabled={deleting} onClick={remove} className="text-destructive">
+          <Button size="icon-sm" variant="destructive" aria-label="Delete scene" disabled={deleting} onClick={remove}>
             <Trash2 className="size-4" />
           </Button>
         </div>
@@ -681,57 +712,90 @@ function SceneRow({
         </Button>
 
         {scene.visualMode !== "TEXT_TO_VIDEO" && (
-          <ShotManager
-            sceneId={scene.id}
-            sceneVisualMode={scene.visualMode}
-            initialShots={scene.shots}
-            promptModelId={promptModelId}
-            imageModelId={imageModelId}
-            validationModelId={validationModelId}
-            imageInstructions={imageInstructions}
-            shotPlanningModelId={shotPlanningModelId}
-            onShotsChange={(shots) => onUpdate({ ...scene, shots })}
-          />
+          <Collapsible open={shotsOpen} onOpenChange={setShotsOpen}>
+            <SectionTrigger label="Shots" complete={shotsComplete} />
+            <CollapsiblePanel>
+              <ShotManager
+                sceneId={scene.id}
+                sceneVisualMode={scene.visualMode}
+                initialShots={scene.shots}
+                promptModelId={promptModelId}
+                imageModelId={imageModelId}
+                validationModelId={validationModelId}
+                imageInstructions={imageInstructions}
+                shotPlanningModelId={shotPlanningModelId}
+                onShotsChange={(shots) => onUpdate({ ...scene, shots })}
+              />
+            </CollapsiblePanel>
+          </Collapsible>
         )}
 
         {(scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO") && (
-          <SceneVideoPanel
-            sceneId={scene.id}
-            mode={scene.visualMode}
-            hasSelectedImage={scene.shots[0]?.images.some((img) => img.isSelected) ?? false}
-            shotCount={scene.shots.length}
-            allShotsHaveImages={scene.shots.length > 0 && scene.shots.every((s) => s.images.some((img) => img.isSelected))}
-            initialMotionPrompt={scene.motionPrompt ?? ""}
-            initialVideoPrompt={scene.videoPrompt ?? ""}
-            initialVideoDurationSeconds={scene.videoDurationSeconds}
-            initialVideoResolution={scene.videoResolution}
-            initialVideoGenerateAudio={scene.videoGenerateAudio}
-            initialVideoClips={scene.videoClips}
-          />
+          <Collapsible open={videoOpen} onOpenChange={setVideoOpen}>
+            <SectionTrigger label="Video" complete={videoComplete} />
+            <CollapsiblePanel>
+              <SceneVideoPanel
+                sceneId={scene.id}
+                mode={scene.visualMode}
+                hasSelectedImage={scene.shots[0]?.images.some((img) => img.isSelected) ?? false}
+                shotCount={scene.shots.length}
+                allShotsHaveImages={scene.shots.length > 0 && scene.shots.every((s) => s.images.some((img) => img.isSelected))}
+                initialMotionPrompt={scene.motionPrompt ?? ""}
+                initialVideoPrompt={scene.videoPrompt ?? ""}
+                initialVideoDurationSeconds={scene.videoDurationSeconds}
+                initialVideoResolution={scene.videoResolution}
+                initialVideoGenerateAudio={scene.videoGenerateAudio}
+                initialVideoClips={scene.videoClips}
+              />
+            </CollapsiblePanel>
+          </Collapsible>
         )}
 
-        <SceneVoicePanel
-          sceneId={scene.id}
-          characters={characters.map((c) => ({ id: c.id, name: c.name, voiceName: c.voiceName ?? null }))}
-          narratorVoiceName={narratorVoiceName}
-          initialNarration={scene.narration ?? ""}
-          initialNarrationDeliveryNotes={scene.narrationDeliveryNotes}
-          initialNarrationSpeed={scene.narrationSpeed}
-          initialNarrationAudio={scene.narrationAudio}
-          initialDialogueLines={scene.dialogueLines}
-        />
+        <Collapsible open={voiceOpen} onOpenChange={setVoiceOpen}>
+          <SectionTrigger label="Voice" complete={voiceComplete} />
+          <CollapsiblePanel>
+            <SceneVoicePanel
+              sceneId={scene.id}
+              sceneVisualMode={scene.visualMode}
+              illustrationShotsTotalSeconds={scene.shots.reduce((sum, s) => sum + effectiveShotSeconds(s.durationSeconds), 0)}
+              characters={characters.map((c) => ({ id: c.id, name: c.name, voiceName: c.voiceName ?? null }))}
+              narratorVoiceName={narratorVoiceName}
+              initialNarration={scene.narration ?? ""}
+              initialNarrationDeliveryNotes={scene.narrationDeliveryNotes}
+              initialNarrationSpeed={scene.narrationSpeed}
+              initialNarrationAudio={scene.narrationAudio}
+              initialDialogueLines={scene.dialogueLines}
+            />
+          </CollapsiblePanel>
+        </Collapsible>
 
-        <SceneAudioPanel
-          sceneId={scene.id}
-          initialMusicPrompt={scene.musicPrompt ?? ""}
-          initialSfxPrompt={scene.sfxPrompt ?? ""}
-          initialMusicVolume={scene.musicVolume}
-          initialSfxVolume={scene.sfxVolume}
-          initialMusic={scene.music}
-          initialSfx={scene.sfx}
-        />
+        <Collapsible open={audioOpen} onOpenChange={setAudioOpen}>
+          <SectionTrigger label="Music & SFX" complete={audioComplete} />
+          <CollapsiblePanel>
+            <SceneAudioPanel
+              sceneId={scene.id}
+              initialMusicPrompt={scene.musicPrompt ?? ""}
+              initialSfxPrompt={scene.sfxPrompt ?? ""}
+              initialMusicVolume={scene.musicVolume}
+              initialSfxVolume={scene.sfxVolume}
+              initialMusic={scene.music}
+              initialSfx={scene.sfx}
+            />
+          </CollapsiblePanel>
+        </Collapsible>
       </CardContent>
+      {ConfirmDialog}
     </Card>
+  );
+}
+
+function SectionTrigger({ label, complete }: { label: string; complete: boolean }) {
+  return (
+    <CollapsibleTrigger className="group flex w-full items-center gap-1.5 rounded-md border py-1.5 pl-2 text-left text-sm font-medium text-muted-foreground hover:text-foreground">
+      <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[panel-open]:rotate-90" />
+      {label}
+      {complete && <CheckCircle2 className="size-3.5 text-green-600" aria-label="Complete" />}
+    </CollapsibleTrigger>
   );
 }
 
@@ -756,13 +820,4 @@ function sameSet(a: Set<string>, b: Set<string>) {
   if (a.size !== b.size) return false;
   for (const v of a) if (!b.has(v)) return false;
   return true;
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="grid gap-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      {children}
-    </div>
-  );
 }

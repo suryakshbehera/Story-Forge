@@ -18,57 +18,10 @@ import { ModelSelect, type ModelOption } from "@/components/model-select";
 import { Clapperboard, Save, Sparkles, Trash2 } from "lucide-react";
 import { parseVideoModelConfig } from "@/lib/video-model-config";
 import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
+import { groupIntoTakes, clipLabel, type SceneVideoClipItem, type VideoTake } from "@/lib/video-takes";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
-export interface SceneVideoClipItem {
-  id: string;
-  url: string;
-  isSelected: boolean;
-  batchId?: string | null;
-  segmentOrder?: number | null;
-  pairIndex?: number | null;
-}
-
-interface VideoTake {
-  key: string;
-  clips: SceneVideoClipItem[];
-  isSelected: boolean;
-}
-
-function groupIntoTakes(clips: SceneVideoClipItem[]): VideoTake[] {
-  const byBatch = new Map<string, SceneVideoClipItem[]>();
-  const takes: VideoTake[] = [];
-  for (const clip of clips) {
-    if (!clip.batchId) {
-      takes.push({ key: clip.id, clips: [clip], isSelected: clip.isSelected });
-      continue;
-    }
-    const existing = byBatch.get(clip.batchId);
-    if (existing) {
-      existing.push(clip);
-    } else {
-      const group: SceneVideoClipItem[] = [clip];
-      byBatch.set(clip.batchId, group);
-      takes.push({ key: clip.batchId, clips: group, isSelected: clip.isSelected });
-    }
-  }
-  for (const take of takes) {
-    take.clips.sort((a, b) => (a.segmentOrder ?? 0) - (b.segmentOrder ?? 0));
-  }
-  return takes;
-}
-
-// Clips are already sorted by segmentOrder within a take. Consecutive clips
-// sharing a pairIndex are duration-chained sub-segments of the same shot
-// pair (rare — only when a pair's own target duration exceeds what the
-// model can produce in one call), so only the first gets the plain label.
-function clipLabel(clips: SceneVideoClipItem[], i: number): string | undefined {
-  if (clips.length <= 1) return undefined;
-  const clip = clips[i];
-  if (clip.pairIndex == null) return `Segment ${i + 1}`;
-  const isContinuation = i > 0 && clips[i - 1].pairIndex === clip.pairIndex;
-  const pairLabel = `Shot ${clip.pairIndex + 1}→${clip.pairIndex + 2}`;
-  return isContinuation ? `${pairLabel} (cont.)` : pairLabel;
-}
+export type { SceneVideoClipItem };
 
 // Motion prompt/video prompt are user-written, never AI-drafted — same
 // pattern as Scene.narration in scene-voice-panel.tsx. Duration has an
@@ -130,6 +83,7 @@ export function SceneVideoPanel({
   const [durationModelId, setDurationModelId] = useState("");
   const [suggestingDuration, setSuggestingDuration] = useState(false);
   const [durationReason, setDurationReason] = useState("");
+  const { confirm, ConfirmDialog } = useConfirm();
 
   useEffect(() => {
     let cancelled = false;
@@ -173,7 +127,7 @@ export function SceneVideoPanel({
     return { perPair, totalSeconds: perPair.reduce((a, b) => a + b, 0) };
   }, [mode, pairCount, targetDuration, modelConfig]);
 
-  async function save() {
+  async function save({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
     setSaving(true);
     try {
       const res = await fetch(`/api/scenes/${sceneId}`, {
@@ -193,9 +147,11 @@ export function SceneVideoPanel({
       setSavedDuration(duration);
       setSavedResolution(resolution);
       setSavedGenerateAudio(generateAudio);
-      toast.success("Motion settings saved.");
+      if (!silent) toast.success("Motion settings saved.");
+      return true;
     } catch {
       toast.error("Couldn't save motion settings.");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -207,8 +163,8 @@ export function SceneVideoPanel({
       return;
     }
     if (dirty) {
-      toast.error("Save the motion settings before generating.");
-      return;
+      const ok = await save({ silent: true });
+      if (!ok) return;
     }
     setGenerating(true);
     try {
@@ -302,7 +258,13 @@ export function SceneVideoPanel({
   }
 
   async function deleteTake(take: VideoTake) {
-    if (!confirm("Delete this take? This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this take?",
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/scenes/${sceneId}/video/${take.clips[0].id}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Couldn't delete take.");
@@ -404,7 +366,7 @@ export function SceneVideoPanel({
           <Switch checked={generateAudio} onCheckedChange={setGenerateAudio} />
           Native audio
         </label>
-        <Button size="sm" variant="outline" onClick={save} disabled={!dirty || saving}>
+        <Button size="sm" variant="outline" onClick={() => save()} disabled={!dirty || saving}>
           <Save className="size-3.5" />
           {saving ? "Saving…" : "Save"}
         </Button>
@@ -440,7 +402,7 @@ export function SceneVideoPanel({
       ) : (
         <div className="flex flex-wrap items-end gap-2">
           <ModelSelect jobType="VIDEO_GENERATION" value={modelId} onChange={setModelId} onModelsChange={setModels} />
-          <Button size="sm" onClick={generate} disabled={generating || dirty}>
+          <Button size="sm" onClick={generate} disabled={generating}>
             <Clapperboard className="size-3.5" />
             {generating ? "Generating…" : "Generate Video"}
           </Button>
@@ -458,7 +420,7 @@ export function SceneVideoPanel({
                 <Button size="sm" variant={take.isSelected ? "default" : "outline"} onClick={() => selectTake(take.clips[0].id)} disabled={take.isSelected}>
                   {take.isSelected ? "Selected" : "Use this take"}
                 </Button>
-                <Button size="icon-sm" variant="ghost" onClick={() => deleteTake(take)} className="ml-auto text-destructive">
+                <Button size="icon-sm" variant="destructive" aria-label="Delete video take" onClick={() => deleteTake(take)} className="ml-auto">
                   <Trash2 className="size-3.5" />
                 </Button>
               </div>
@@ -473,6 +435,7 @@ export function SceneVideoPanel({
           ))}
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }

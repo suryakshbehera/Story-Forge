@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { ModelSelect } from "@/components/model-select";
 import type { AudioTake } from "@/components/scene-voice-panel";
 import { Sparkles, Upload, Trash2, Save } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 // Two independent slots (Music, SFX). musicPrompt/sfxPrompt are hand-edited
 // here (or populated by the Audio Cue Plan panel above the Scenes card —
@@ -47,7 +48,7 @@ export function SceneAudioPanel({
     musicVolume !== savedMusicVolume ||
     sfxVolume !== savedSfxVolume;
 
-  async function save() {
+  async function save({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
     setSaving(true);
     try {
       const res = await fetch(`/api/scenes/${sceneId}`, {
@@ -65,9 +66,11 @@ export function SceneAudioPanel({
       setSavedSfxPrompt(sfxPrompt);
       setSavedMusicVolume(musicVolume);
       setSavedSfxVolume(sfxVolume);
-      toast.success("Audio settings saved.");
+      if (!silent) toast.success("Audio settings saved.");
+      return true;
     } catch {
       toast.error("Couldn't save audio settings.");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -86,6 +89,7 @@ export function SceneAudioPanel({
         onVolumeChange={setMusicVolume}
         placeholder="e.g. slow, hopeful piano and strings that build gently — from the Audio Cue Plan above, or written by hand"
         dirty={dirty}
+        onSave={save}
         initialTakes={initialMusic}
       />
 
@@ -100,10 +104,11 @@ export function SceneAudioPanel({
         onVolumeChange={setSfxVolume}
         placeholder="e.g. footsteps on gravel, a door creaking open"
         dirty={dirty}
+        onSave={save}
         initialTakes={initialSfx}
       />
 
-      <Button size="sm" onClick={save} disabled={!dirty || saving} className="self-start">
+      <Button size="sm" onClick={() => save()} disabled={!dirty || saving} className="self-start">
         <Save className="size-3.5" />
         {saving ? "Saving…" : "Save Audio Settings"}
       </Button>
@@ -122,6 +127,7 @@ function AudioTrackSection({
   onVolumeChange,
   placeholder,
   dirty,
+  onSave,
   initialTakes,
 }: {
   label: string;
@@ -134,6 +140,7 @@ function AudioTrackSection({
   onVolumeChange: (v: number) => void;
   placeholder: string;
   dirty: boolean;
+  onSave: (opts?: { silent?: boolean }) => Promise<boolean>;
   initialTakes: AudioTake[];
 }) {
   const [modelId, setModelId] = useState("");
@@ -141,6 +148,7 @@ function AudioTrackSection({
   const [uploading, setUploading] = useState(false);
   const [takes, setTakes] = useState(initialTakes);
   const fileRef = useRef<HTMLInputElement>(null);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   async function generate() {
     if (!modelId) {
@@ -148,8 +156,8 @@ function AudioTrackSection({
       return;
     }
     if (dirty) {
-      toast.error("Save the audio plan before generating.");
-      return;
+      const ok = await onSave({ silent: true });
+      if (!ok) return;
     }
     if (!prompt.trim()) {
       toast.error(`Write or generate a ${label.toLowerCase()} prompt first.`);
@@ -206,7 +214,13 @@ function AudioTrackSection({
   }
 
   async function remove(assetId: string) {
-    if (!confirm(`Delete this ${label.toLowerCase()} take? This can't be undone.`)) return;
+    const ok = await confirm({
+      title: `Delete this ${label.toLowerCase()} take?`,
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/scenes/${sceneId}/${basePath}/${assetId}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error(`Couldn't delete ${label.toLowerCase()}.`);
@@ -275,13 +289,14 @@ function AudioTrackSection({
               >
                 {take.isSelected ? "Selected" : "Use this"}
               </Button>
-              <Button size="icon-sm" variant="ghost" onClick={() => remove(take.id)} className="text-destructive">
+              <Button size="icon-sm" variant="destructive" aria-label={`Delete ${label.toLowerCase()} take`} onClick={() => remove(take.id)}>
                 <Trash2 className="size-3.5" />
               </Button>
             </div>
           ))}
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }

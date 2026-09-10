@@ -17,9 +17,11 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ModelSelect, type ModelOption } from "@/components/model-select";
-import type { SceneVideoClipItem } from "@/components/scene-video-panel";
 import { parseVideoModelConfig } from "@/lib/video-model-config";
+import { groupIntoTakes, type SceneVideoClipItem, type VideoTake as Take } from "@/lib/video-takes";
 import { Clapperboard, Trash2 } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import Link from "next/link";
 
 export interface SeedanceSceneOption {
   id: string;
@@ -39,36 +41,6 @@ export interface SeedanceSceneOption {
     characters: { id: string; name: string; isLocked: boolean; imageUrl: string | null }[];
     locations: { id: string; name: string; imageUrl: string | null }[];
   };
-}
-
-interface Take {
-  key: string;
-  clips: SceneVideoClipItem[];
-  isSelected: boolean;
-}
-
-// Same batching logic as scene-video-panel.tsx's groupIntoTakes/clipLabel —
-// duplicated rather than imported since those are private to that file and
-// this studio's gallery is intentionally independent of it.
-function groupIntoTakes(clips: SceneVideoClipItem[]): Take[] {
-  const byBatch = new Map<string, SceneVideoClipItem[]>();
-  const takes: Take[] = [];
-  for (const clip of clips) {
-    if (!clip.batchId) {
-      takes.push({ key: clip.id, clips: [clip], isSelected: clip.isSelected });
-      continue;
-    }
-    const existing = byBatch.get(clip.batchId);
-    if (existing) {
-      existing.push(clip);
-    } else {
-      const group = [clip];
-      byBatch.set(clip.batchId, group);
-      takes.push({ key: clip.batchId, clips: group, isSelected: clip.isSelected });
-    }
-  }
-  for (const take of takes) take.clips.sort((a, b) => (a.segmentOrder ?? 0) - (b.segmentOrder ?? 0));
-  return takes;
 }
 
 interface PromptBuilderFields {
@@ -123,7 +95,15 @@ const FAILURE_MODES: { symptom: string; fix: string }[] = [
   { symptom: "Clip trails off with no resolution", fix: "Fill in “Ending” — a held frame, pull-back, or specific gesture." },
 ];
 
-export function SeedanceStudio({ scenes: initialScenes }: { scenes: SeedanceSceneOption[] }) {
+export function SeedanceStudio({
+  scenes: initialScenes,
+  projectId,
+  projectType,
+}: {
+  scenes: SeedanceSceneOption[];
+  projectId: string;
+  projectType: "SINGLE" | "SERIES";
+}) {
   const [scenes, setScenes] = useState(initialScenes);
   const [sceneId, setSceneId] = useState(initialScenes[0]?.id ?? "");
   const [modelId, setModelId] = useState("");
@@ -136,9 +116,17 @@ export function SeedanceStudio({ scenes: initialScenes }: { scenes: SeedanceScen
 
   if (initialScenes.length === 0) {
     return (
-      <p className="text-sm text-muted-foreground">
-        No scenes are set to Image → Video or Text → Video yet. Set a scene&apos;s Visual Mode on the Scenes page first.
-      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-muted-foreground">
+          No scenes are set to Image → Video or Text → Video yet. Set a scene&apos;s Visual Mode
+          {projectType === "SINGLE" ? " on the Scenes page first." : " on one of the episode pages first."}
+        </p>
+        {projectType === "SINGLE" && (
+          <Button size="sm" variant="outline" render={<Link href={`/projects/${projectId}/story/scenes`} />}>
+            Go to Scenes
+          </Button>
+        )}
+      </div>
     );
   }
 
@@ -296,6 +284,7 @@ function SeedanceSceneForm({
   const [generateAudio, setGenerateAudio] = useState(scene.videoGenerateAudio);
   const [includeCastReferences, setIncludeCastReferences] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   const assembled = useMemo(() => assemblePrompt(fields), [fields]);
   const savedPrompt = scene.visualMode === "IMAGE_TO_VIDEO" ? scene.motionPrompt : scene.videoPrompt;
@@ -364,7 +353,13 @@ function SeedanceSceneForm({
   }
 
   async function deleteTake(take: Take) {
-    if (!confirm("Delete this take? This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this take?",
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/scenes/${scene.id}/video/${take.clips[0].id}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Couldn't delete take.");
@@ -583,7 +578,7 @@ function SeedanceSceneForm({
                     <Button size="sm" variant={take.isSelected ? "default" : "outline"} onClick={() => selectTake(take.clips[0].id)} disabled={take.isSelected}>
                       {take.isSelected ? "Selected" : "Use this take"}
                     </Button>
-                    <Button size="icon-sm" variant="ghost" onClick={() => deleteTake(take)} className="ml-auto text-destructive">
+                    <Button size="icon-sm" variant="destructive" aria-label="Delete video take" onClick={() => deleteTake(take)} className="ml-auto">
                       <Trash2 className="size-3.5" />
                     </Button>
                   </div>
@@ -593,6 +588,7 @@ function SeedanceSceneForm({
           )}
         </CardContent>
       </Card>
+      {ConfirmDialog}
     </>
   );
 }

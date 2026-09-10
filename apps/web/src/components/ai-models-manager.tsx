@@ -25,6 +25,8 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Trash2, Pencil } from "lucide-react";
 import type { VideoModelConfig } from "@/lib/video-model-config";
+import { invalidateModelCache } from "@/lib/model-registry-cache";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 const JOB_TYPES = [
   "MASTER_AI",
@@ -91,6 +93,7 @@ export interface ModelRow {
 
 export function AiModelsManager({ initialModels }: { initialModels: ModelRow[] }) {
   const [models, setModels] = useState(initialModels);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   async function addModel(input: Omit<ModelRow, "id">) {
     const res = await fetch("/api/ai-models", {
@@ -109,6 +112,7 @@ export function AiModelsManager({ initialModels }: { initialModels: ModelRow[] }
         : prev;
       return [...next, created];
     });
+    invalidateModelCache();
     toast.success("Model added.");
   }
 
@@ -130,16 +134,24 @@ export function AiModelsManager({ initialModels }: { initialModels: ModelRow[] }
         return m;
       })
     );
+    invalidateModelCache();
   }
 
   async function deleteModel(id: string) {
-    if (!confirm("Remove this model from the registry?")) return;
+    const ok = await confirm({
+      title: "Remove this model?",
+      description: "This removes it from the registry. Any job type still using it as default will need a new default picked.",
+      confirmLabel: "Remove",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/ai-models/${id}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Couldn't delete model.");
       return;
     }
     setModels((prev) => prev.filter((m) => m.id !== id));
+    invalidateModelCache();
   }
 
   return (
@@ -189,13 +201,13 @@ export function AiModelsManager({ initialModels }: { initialModels: ModelRow[] }
                       initial={m}
                       onSubmit={(patch) => updateModel(m.id, patch)}
                       trigger={
-                        <Button size="icon" variant="ghost">
+                        <Button size="icon" variant="ghost" aria-label="Edit model">
                           <Pencil className="size-4" />
                         </Button>
                       }
                     />
-                    <Button size="icon" variant="ghost" onClick={() => deleteModel(m.id)}>
-                      <Trash2 className="size-4 text-destructive" />
+                    <Button size="icon" variant="destructive" aria-label="Remove model" onClick={() => deleteModel(m.id)}>
+                      <Trash2 className="size-4" />
                     </Button>
                   </div>
                 </TableCell>
@@ -204,6 +216,7 @@ export function AiModelsManager({ initialModels }: { initialModels: ModelRow[] }
           </TableBody>
         </Table>
       </div>
+      {ConfirmDialog}
     </div>
   );
 }

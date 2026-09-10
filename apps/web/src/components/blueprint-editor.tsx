@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Field } from "@/components/field";
 import { Textarea } from "@/components/ui/textarea";
 import { ModelSelect } from "@/components/model-select";
 import { VersionsPanel, type VersionItem } from "@/components/versions-panel";
@@ -234,15 +234,6 @@ export function BlueprintEditor({
           </CardContent>
         </Card>
       </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="grid gap-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      {children}
     </div>
   );
 }

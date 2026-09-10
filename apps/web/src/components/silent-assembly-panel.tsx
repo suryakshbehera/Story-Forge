@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ModelSelect } from "@/components/model-select";
 import { Clapperboard, Trash2 } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 export interface SilentVideoItem {
   id: string;
@@ -29,6 +30,7 @@ export function SilentAssemblyPanel({
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(false);
   const [silentVideos, setSilentVideos] = useState(initialSilentVideos);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   const base = parentType === "story" ? `/api/stories/${parentId}/silent-video` : `/api/episodes/${parentId}/silent-video`;
 
@@ -70,7 +72,13 @@ export function SilentAssemblyPanel({
   }
 
   async function deleteVideo(assetId: string) {
-    if (!confirm("Delete this silent assembly? This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this silent assembly?",
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch(`${base}/${assetId}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Couldn't delete this take.");
@@ -102,13 +110,20 @@ export function SilentAssemblyPanel({
               <Button size="sm" variant={video.isSelected ? "default" : "outline"} onClick={() => selectVideo(video.id)} disabled={video.isSelected}>
                 {video.isSelected ? "Selected" : "Use this take"}
               </Button>
-              <Button size="icon-sm" variant="ghost" onClick={() => deleteVideo(video.id)} className="ml-auto text-destructive">
+              <Button
+                size="icon-sm"
+                variant="destructive"
+                aria-label="Delete silent video"
+                onClick={() => deleteVideo(video.id)}
+                className="ml-auto"
+              >
                 <Trash2 className="size-3.5" />
               </Button>
             </div>
           ))}
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }

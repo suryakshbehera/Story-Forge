@@ -377,19 +377,25 @@ model Shot {
   description String @db.Text
 
   // Only meaningful for ILLUSTRATION scenes — each shot's image is held via
-  // Ken Burns for its own slice of the scene's audio duration, then
-  // concatenated in order. For IMAGE_TO_VIDEO scenes, each consecutive shot
-  // pair (shot[i]->shot[i+1]) generates its own clip instead, using the
-  // pair's two images as start/end keyframes — see generateSceneVideo() in
+  // Ken Burns for its own explicit duration, then concatenated in order (see
+  // durationSeconds below — the picture's timing no longer derives from
+  // scene audio). For IMAGE_TO_VIDEO scenes, each consecutive shot pair
+  // (shot[i]->shot[i+1]) generates its own clip instead, using the pair's
+  // two images as start/end keyframes — see generateSceneVideo() in
   // scene-video.ts. TEXT_TO_VIDEO scenes don't use shots at all (no source
   // image to speak of).
   cameraMovement CameraMovement @default(STATIC)
 
-  // Optional explicit length. ILLUSTRATION: shots left unset evenly split
-  // whatever duration remains of the scene's total audio after explicit ones
-  // are subtracted out. IMAGE_TO_VIDEO: read as "how long the clip leaving
-  // this shot should run" (the pair shot[i]->shot[i+1]); shots left unset
-  // evenly split the scene's target duration across its pairs.
+  // Optional explicit length. ILLUSTRATION (Phase 11+): the picture is
+  // authoritative and voice is fit to it afterward (see buildSceneSegment in
+  // video-assembly.ts) — shots left unset fall back to a flat
+  // DEFAULT_ILLUSTRATION_SECONDS each (lib/illustration-timing.ts), *not* a
+  // split of the scene's audio length; generateShots (lib/shots.ts) seeds a
+  // rough word-count-based split only when the scene already has narration/
+  // dialogue text at shot-planning time. IMAGE_TO_VIDEO: read as "how long
+  // the clip leaving this shot should run" (the pair shot[i]->shot[i+1]);
+  // shots left unset evenly split the scene's target duration across its
+  // pairs (see splitFixedDurations in video-segmentation.ts).
   durationSeconds Int?
 
   images Asset[] @relation("ShotImages")

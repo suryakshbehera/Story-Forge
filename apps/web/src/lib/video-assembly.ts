@@ -5,6 +5,7 @@ import { prisma, type Asset, type Prisma, type CameraMovement } from "@/lib/db";
 import { parentWhere, type ScenesParentType } from "@/lib/scenes";
 import { runFfmpeg, probeDuration, hasAudioStream } from "@/lib/ffmpeg";
 import { storage, buildStorageKey } from "@/lib/storage";
+import { effectiveShotSeconds, MIN_SHOT_SECONDS } from "@/lib/illustration-timing";
 
 // Canonical output format every intermediate segment is normalized to, so
 // ffmpeg's concat demuxer can stream-copy them together at the end without
@@ -16,7 +17,6 @@ const WIDTH = 1920;
 const HEIGHT = 1080;
 const FPS = 30;
 const AUDIO_RATE = 44100;
-const DEFAULT_ILLUSTRATION_SECONDS = 5;
 const DURATION_TOLERANCE_SECONDS = 0.15;
 // Crossfade length between consecutive scenes in the real final render —
 // clamped per-pair to each neighbor's own duration (see
@@ -81,6 +81,8 @@ export interface SerializedFinalVideo {
   url: string;
   isSelected: boolean;
   createdAt: Date;
+  fileName: string | null;
+  sizeBytes: number | null;
 }
 
 export function serializeFinalVideo(asset: Asset): SerializedFinalVideo {
@@ -89,6 +91,8 @@ export function serializeFinalVideo(asset: Asset): SerializedFinalVideo {
     url: storage.url(asset.storageKey),
     isSelected: asset.isSelected,
     createdAt: asset.createdAt,
+    fileName: asset.fileName,
+    sizeBytes: asset.sizeBytes,
   };
 }
 
@@ -204,21 +208,34 @@ async function buildSceneVoiceTrack(scene: AssemblyScene, workDir: string, index
 }
 
 // Phase 8 — one Ken Burns clip per shot, concatenated in order. Phase 11:
-// each shot's duration is now purely its own — an explicit
-// Shot.durationSeconds, or DEFAULT_ILLUSTRATION_SECONDS when unset — rather
-// than splitting whatever's left of a scene-level total (that total used to
-// come from the scene's narration/dialogue length, which no longer drives
-// visual timing; see buildSceneSegment). Floored at a minimum so a
-// pathological explicit 0/negative value can't produce a zero-length ffmpeg
-// segment.
-const MIN_SHOT_SECONDS = 0.5;
-
-async function buildIllustrationSegment(scene: AssemblyScene, workDir: string, index: number, outPath: string, target: VisualTarget): Promise<string> {
+// each shot's duration is its own — an explicit Shot.durationSeconds, or
+// DEFAULT_ILLUSTRATION_SECONDS when unset (effectiveShotSeconds, shared with
+// shot-manager.tsx's hint — see lib/illustration-timing.ts) — rather than
+// splitting a scene-level total. That per-shot number is the *authored
+// pacing* (which shot gets more screen time relative to the others), not the
+// final render length: when `scaleToSeconds` is given (buildSceneSegment
+// passes the scene's real, just-generated voice-track duration whenever one
+// exists), every shot is stretched or compressed by the same ratio so the
+// picture's total lands exactly on it — no freeze-frame hold or trailing
+// silence needed to reconcile picture and voice, they're the same number by
+// construction. null (no voice yet, e.g. generateSilentAssembly) keeps each
+// shot at its own natural, unscaled duration.
+async function buildIllustrationSegment(
+  scene: AssemblyScene,
+  workDir: string,
+  index: number,
+  outPath: string,
+  target: VisualTarget,
+  scaleToSeconds: number | null
+): Promise<string> {
   const shots = scene.shots;
+  const naturalDurations = shots.map((shot) => effectiveShotSeconds(shot.durationSeconds));
+  const naturalTotal = naturalDurations.reduce((sum, d) => sum + d, 0);
+  const scale = scaleToSeconds != null && naturalTotal > 0 ? scaleToSeconds / naturalTotal : 1;
 
   const shotPaths: string[] = [];
   for (const [i, shot] of shots.entries()) {
-    const shotDuration = Math.max(shot.durationSeconds ?? DEFAULT_ILLUSTRATION_SECONDS, MIN_SHOT_SECONDS);
+    const shotDuration = Math.max(naturalDurations[i] * scale, MIN_SHOT_SECONDS);
     const shotPath = path.join(workDir, `scene${index}-shot${i}.mp4`);
     const imagePath = await writeAssetToTemp(shot.images[0], workDir, `scene${index}-shot${i}-image`);
     const frames = Math.max(Math.round(shotDuration * target.fps), 1);
@@ -260,19 +277,29 @@ async function extractClipAudioLayer(clipPath: string, workDir: string, name: st
   return outPath;
 }
 
-// Silent, normalized visual segment at the scene's own native/explicit
-// duration — IMAGE_TO_VIDEO/TEXT_TO_VIDEO scenes use the clip's own native
-// length; ILLUSTRATION shots use their own durationSeconds (see
-// buildIllustrationSegment). Phase 11: no longer sized to the scene's
-// narration/dialogue — the picture is assembled first and is authoritative;
-// voice is fit to *it* instead (see padVoiceToMatch/padVisualToMatch in
-// buildSceneSegment) so cue planning has a locked timeline to plan against.
-async function buildVisualSegment(scene: AssemblyScene, workDir: string, index: number, target: VisualTarget): Promise<VisualSegmentResult> {
+// Silent, normalized visual segment. IMAGE_TO_VIDEO/TEXT_TO_VIDEO scenes use
+// the clip's own native length always — a real generated video clip can't be
+// time-scaled without regenerating it or visibly speed-ramping it, so
+// `scaleToSeconds` is ignored for them. ILLUSTRATION shots use their own
+// durationSeconds, scaled to `scaleToSeconds` when given (see
+// buildIllustrationSegment) — from generateSilentAssembly (no voice exists
+// yet) this is always null, so cue planning still gets each shot's natural,
+// unscaled length to draft narration against; from assembleVideo's
+// buildSceneSegment it's the scene's actual voice-track duration whenever
+// one exists, so the rendered picture and voice always land on the same
+// number instead of one padding to cover the other.
+async function buildVisualSegment(
+  scene: AssemblyScene,
+  workDir: string,
+  index: number,
+  target: VisualTarget,
+  scaleToSeconds: number | null
+): Promise<VisualSegmentResult> {
   const outPath = path.join(workDir, `scene${index}-visual.mp4`);
   const needsClip = scene.visualMode === "IMAGE_TO_VIDEO" || scene.visualMode === "TEXT_TO_VIDEO";
 
   if (!needsClip) {
-    return { path: await buildIllustrationSegment(scene, workDir, index, outPath, target), clipPath: null };
+    return { path: await buildIllustrationSegment(scene, workDir, index, outPath, target, scaleToSeconds), clipPath: null };
   }
 
   const clipPath = await resolveSceneClipPath(scene.videoClips, workDir, index);
@@ -301,10 +328,14 @@ async function resolveSceneClipPath(clips: Asset[], workDir: string, index: numb
 }
 
 // Freeze-pads (holds the last frame) a finished visual segment out to
-// targetDuration when the scene's voice track runs longer than the picture
-// itself — the picture is primary now, but narration/dialogue still never
-// gets cut short to fit it (same value judgment the old target-duration trim
-// logic made, just applied in the other direction).
+// targetDuration when it's still shorter — narration/dialogue never gets cut
+// short to fit the picture. For ILLUSTRATION with a voice track, the picture
+// was already built scaled to that same voice duration (see
+// buildIllustrationSegment's scaleToSeconds), so this is normally a no-op
+// past DURATION_TOLERANCE_SECONDS, just mopping up sub-frame rounding, not
+// doing the real reconciling work. It still does real work for
+// IMAGE_TO_VIDEO/TEXT_TO_VIDEO (native clip length can't be rescaled the same
+// way) and for ILLUSTRATION scenes with no voice track at all.
 async function padVisualToMatch(visualPath: string, workDir: string, index: number, targetDuration: number, currentDuration: number): Promise<string> {
   if (targetDuration <= currentDuration + DURATION_TOLERANCE_SECONDS) return visualPath;
   const outPath = path.join(workDir, `scene${index}-visual-padded.mp4`);
@@ -395,15 +426,20 @@ async function muxSceneSegment(visualPath: string, audioPath: string | null, wor
 }
 
 async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: number, includeClipAudio: boolean): Promise<string> {
-  const { path: rawVisualPath, clipPath } = await buildVisualSegment(scene, workDir, index, FULL_RES);
-  const visualDuration = await probeDuration(rawVisualPath);
-
   const voicePath = await buildSceneVoiceTrack(scene, workDir, index);
   const voiceDuration = voicePath ? await probeDuration(voicePath) : 0;
 
-  // The picture is authoritative (native clip length / shot durations) —
-  // voice is fit to it, extending the picture only if voice runs longer
-  // than the picture it was cue-planned/written against.
+  // ILLUSTRATION with a real voice track: scale the picture to that exact
+  // duration up front (see buildIllustrationSegment) so visual and voice are
+  // the same number by construction, instead of building the picture at its
+  // own natural length and reconciling afterward. Everything else (no voice
+  // yet, or a real generated IMAGE_TO_VIDEO/TEXT_TO_VIDEO clip that can't be
+  // rescaled without regenerating it) keeps the picture's natural length —
+  // the padding below is what reconciles those cases.
+  const scaleToSeconds = scene.visualMode === "ILLUSTRATION" && voiceDuration > 0 ? voiceDuration : null;
+  const { path: rawVisualPath, clipPath } = await buildVisualSegment(scene, workDir, index, FULL_RES, scaleToSeconds);
+  const visualDuration = await probeDuration(rawVisualPath);
+
   const finalDuration = Math.max(visualDuration, voiceDuration);
   const visualPath = await padVisualToMatch(rawVisualPath, workDir, index, finalDuration, visualDuration);
 
@@ -578,7 +614,9 @@ export async function generateSilentAssembly({
     const segmentPaths: string[] = [];
     let cursor = 0;
     for (const [index, scene] of scenes.entries()) {
-      const { path: visualPath } = await buildVisualSegment(scene, workDir, index, FULL_RES);
+      // No voice track exists yet at this picture-only stage — always the
+      // scene's own natural shot durations, never scaled.
+      const { path: visualPath } = await buildVisualSegment(scene, workDir, index, FULL_RES, null);
       const durationSeconds = await probeDuration(visualPath);
       segmentPaths.push(visualPath);
       manifest.push({

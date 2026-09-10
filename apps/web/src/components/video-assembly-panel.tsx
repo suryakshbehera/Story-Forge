@@ -6,12 +6,17 @@ import { Button } from "@/components/ui/button";
 import { ModelSelect } from "@/components/model-select";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Clapperboard, Trash2 } from "lucide-react";
+import { Clapperboard, Download, Link2, Trash2 } from "lucide-react";
+import { formatFileSize } from "@/lib/format";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 export interface FinalVideoItem {
   id: string;
   url: string;
   isSelected: boolean;
+  createdAt: string | Date;
+  fileName: string | null;
+  sizeBytes: number | null;
 }
 
 // parentType/parentId route to /api/stories/[id]/video/... or
@@ -33,6 +38,7 @@ export function VideoAssemblyPanel({
   // a video clip's own baked-in audio (e.g. Veo3 Lite's generated sound) in
   // favor of just narration/dialogue/music/sfx.
   const [includeClipAudio, setIncludeClipAudio] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   const base = parentType === "story" ? `/api/stories/${parentId}/video` : `/api/episodes/${parentId}/video`;
 
@@ -72,13 +78,28 @@ export function VideoAssemblyPanel({
   }
 
   async function deleteVideo(assetId: string) {
-    if (!confirm("Delete this final video? This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this final video?",
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch(`${base}/${assetId}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Couldn't delete this video.");
       return;
     }
     setFinalVideos((prev) => prev.filter((v) => v.id !== assetId));
+  }
+
+  async function copyLink(url: string) {
+    try {
+      await navigator.clipboard.writeText(new URL(url, window.location.origin).toString());
+      toast.success("Link copied.");
+    } catch {
+      toast.error("Couldn't copy link.");
+    }
   }
 
   return (
@@ -104,18 +125,54 @@ export function VideoAssemblyPanel({
       {finalVideos.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {finalVideos.map((video) => (
-            <div key={video.id} className={`flex items-center gap-2 rounded-md border p-1.5 ${video.isSelected ? "border-foreground" : ""}`}>
+            <div
+              key={video.id}
+              className={`flex flex-wrap items-center gap-2 rounded-md border p-1.5 ${video.isSelected ? "border-foreground" : ""}`}
+            >
               <video controls src={video.url} className="h-24 w-40 rounded object-cover" />
-              <Button size="sm" variant={video.isSelected ? "default" : "outline"} onClick={() => selectVideo(video.id)} disabled={video.isSelected}>
-                {video.isSelected ? "Selected" : "Use this render"}
-              </Button>
-              <Button size="icon-sm" variant="ghost" onClick={() => deleteVideo(video.id)} className="ml-auto text-destructive">
+              <div className="flex flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant={video.isSelected ? "default" : "outline"}
+                    onClick={() => selectVideo(video.id)}
+                    disabled={video.isSelected}
+                  >
+                    {video.isSelected ? "Selected" : "Use this render"}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => window.open(`${video.url}?download=1`, "_blank")}>
+                    <Download className="size-3.5" />
+                    Download
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => copyLink(video.url)}>
+                    <Link2 className="size-3.5" />
+                    Copy link
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {video.sizeBytes != null ? formatFileSize(video.sizeBytes) : null}
+                  {video.sizeBytes != null ? " · " : null}
+                  {new Date(video.createdAt).toLocaleDateString(undefined, {
+                    year: "numeric",
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </p>
+              </div>
+              <Button
+                size="icon-sm"
+                variant="destructive"
+                aria-label="Delete final video"
+                onClick={() => deleteVideo(video.id)}
+                className="ml-auto"
+              >
                 <Trash2 className="size-3.5" />
               </Button>
             </div>
           ))}
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }

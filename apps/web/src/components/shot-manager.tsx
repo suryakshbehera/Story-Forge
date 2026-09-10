@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { isImageGenerationActive } from "@/lib/shot-image-generation";
+import { effectiveShotSeconds, illustrationTimingMismatch } from "@/lib/illustration-timing";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -23,6 +24,7 @@ import {
   XCircle,
   HelpCircle,
 } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 export type CameraMovement = "STATIC" | "ZOOM_IN" | "ZOOM_OUT" | "PAN_LEFT" | "PAN_RIGHT" | "PAN_UP" | "PAN_DOWN";
 
@@ -94,11 +96,40 @@ export function ShotManager({
   const [shots, setShots] = useState(initialShots);
   const [planning, setPlanning] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [voiceDurationSeconds, setVoiceDurationSeconds] = useState<number | null>(null);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   useEffect(() => {
     onShotsChange?.(shots);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shots]);
+
+  // Mirrors SceneVideoPanel's own voice-duration fetch — same endpoint, same
+  // "fetch once on mount" idiom. Only meaningful for ILLUSTRATION, where
+  // shot durations are the picture's own timing rather than a slice of this
+  // (see lib/illustration-timing.ts for why the two can drift apart).
+  useEffect(() => {
+    if (sceneVisualMode !== "ILLUSTRATION") return;
+    let cancelled = false;
+    fetch(`/api/scenes/${sceneId}/voice-duration`)
+      .then((res) => res.json())
+      .then((data: { seconds: number | null }) => {
+        if (!cancelled) setVoiceDurationSeconds(data.seconds);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [sceneId, sceneVisualMode]);
+
+  const shotsTotalSeconds = useMemo(
+    () => shots.reduce((sum, s) => sum + effectiveShotSeconds(s.durationSeconds), 0),
+    [shots]
+  );
+  const timingMismatch =
+    sceneVisualMode === "ILLUSTRATION" && voiceDurationSeconds != null && shots.length > 0
+      ? illustrationTimingMismatch(shotsTotalSeconds, voiceDurationSeconds)
+      : false;
 
   async function generateShots() {
     if (!shotPlanningModelId) {
@@ -107,7 +138,12 @@ export function ShotManager({
     }
     const regenerateAll = shots.length > 0;
     if (regenerateAll) {
-      const ok = confirm(`This deletes all ${shots.length} existing shot(s) (and their images) and replaces them. Continue?`);
+      const ok = await confirm({
+        title: "Regenerate all shots?",
+        description: `This deletes all ${shots.length} existing shot(s) and their images before generating new ones. This can't be undone.`,
+        confirmLabel: "Regenerate",
+        destructive: true,
+      });
       if (!ok) return;
     }
     setPlanning(true);
@@ -176,20 +212,41 @@ export function ShotManager({
         <Label className="text-xs text-muted-foreground">
           {shots.length} shot{shots.length === 1 ? "" : "s"} — each is its own continuity frame, not an alternate of the others
         </Label>
-        <div className="flex items-center gap-2">
+        {shots.length > 0 && (
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" disabled={planning} onClick={generateShots}>
+              <Sparkles className="size-3.5" />
+              {planning ? "Planning…" : "Regenerate Shots"}
+            </Button>
+            <Button size="sm" variant="outline" disabled={adding} onClick={addShot}>
+              <Plus className="size-3.5" />
+              Add Shot
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {sceneVisualMode === "ILLUSTRATION" && shots.length > 0 && (
+        <p className={cn("text-xs", timingMismatch ? "text-amber-600" : "text-muted-foreground")}>
+          Shots total {shotsTotalSeconds.toFixed(1)}s
+          {voiceDurationSeconds != null && `, narration/dialogue audio is ${voiceDurationSeconds.toFixed(1)}s`}
+          {timingMismatch &&
+            " — Final Assembly stretches or compresses every shot by the same ratio to land on the voice exactly, so this won't break, but a gap this big means the actual pacing will look noticeably slower or faster than what's set below. Adjust shot durations above for better pacing, or fit narration to the picture via Assemble without Audio → Audio Cue Plan."}
+        </p>
+      )}
+
+      {shots.length === 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs text-muted-foreground">No shots yet —</p>
           <Button size="sm" variant="outline" disabled={planning} onClick={generateShots}>
             <Sparkles className="size-3.5" />
-            {planning ? "Planning…" : shots.length === 0 ? "Generate Shots" : "Regenerate Shots"}
+            {planning ? "Planning…" : "Generate Shots"}
           </Button>
           <Button size="sm" variant="outline" disabled={adding} onClick={addShot}>
             <Plus className="size-3.5" />
             Add Shot
           </Button>
         </div>
-      </div>
-
-      {shots.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No shots yet — generate with AI or add one manually.</p>
       ) : (
         <div className="flex flex-col gap-2">
           {shots.map((shot, index) => (
@@ -210,6 +267,7 @@ export function ShotManager({
           ))}
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }
@@ -249,6 +307,7 @@ function ShotCard({
   const [imageUploading, setImageUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const unmountedRef = useRef(false);
+  const { confirm, ConfirmDialog } = useConfirm();
   useEffect(() => () => {
     unmountedRef.current = true;
   }, []);
@@ -332,7 +391,13 @@ function ShotCard({
   }
 
   async function remove() {
-    if (!confirm(`Delete shot ${shot.order}? This can't be undone.`)) return;
+    const ok = await confirm({
+      title: `Delete shot ${shot.order}?`,
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/shots/${shot.id}`, { method: "DELETE" });
@@ -423,7 +488,13 @@ function ShotCard({
   }
 
   async function deleteImage(assetId: string) {
-    if (!confirm("Delete this generated image? This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this image?",
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/shots/${shot.id}/images/${assetId}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Couldn't delete image.");
@@ -437,13 +508,13 @@ function ShotCard({
       <CardHeader className="flex flex-row items-center justify-between gap-2 py-3">
         <CardTitle className="text-sm">Shot {shot.order}</CardTitle>
         <div className="flex items-center gap-1">
-          <Button size="icon-sm" variant="ghost" disabled={isFirst || moving} onClick={() => move("up")}>
+          <Button size="icon-sm" variant="ghost" aria-label="Move shot up" disabled={isFirst || moving} onClick={() => move("up")}>
             <ChevronUp className="size-3.5" />
           </Button>
-          <Button size="icon-sm" variant="ghost" disabled={isLast || moving} onClick={() => move("down")}>
+          <Button size="icon-sm" variant="ghost" aria-label="Move shot down" disabled={isLast || moving} onClick={() => move("down")}>
             <ChevronDown className="size-3.5" />
           </Button>
-          <Button size="icon-sm" variant="ghost" disabled={deleting} onClick={remove} className="text-destructive">
+          <Button size="icon-sm" variant="destructive" aria-label="Delete shot" disabled={deleting} onClick={remove}>
             <Trash2 className="size-3.5" />
           </Button>
         </div>
@@ -482,11 +553,11 @@ function ShotCard({
           <div className="flex flex-wrap gap-2">
             {shot.images.map((img) => (
               <div key={img.id} className="group relative">
-                <div
-                  role="button"
-                  tabIndex={0}
+                <button
+                  type="button"
                   onClick={() => selectImage(img.id)}
-                  onKeyDown={(e) => e.key === "Enter" && selectImage(img.id)}
+                  aria-pressed={img.isSelected}
+                  aria-label={`Use this image for shot ${shot.order}`}
                   title={img.validationNotes ?? undefined}
                   className={cn(
                     "cursor-pointer overflow-hidden rounded-md border-2",
@@ -494,8 +565,8 @@ function ShotCard({
                   )}
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={img.url} alt="" className="h-24 w-40 object-cover" />
-                </div>
+                  <img src={img.url} alt={`Shot ${shot.order} image`} className="h-24 w-40 object-cover" />
+                </button>
                 <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-background/80 p-0.5">
                   {img.validationPassed === true && <CheckCircle2 className="size-3.5 text-green-600" />}
                   {img.validationPassed === false && <XCircle className="size-3.5 text-amber-600" />}
@@ -504,7 +575,8 @@ function ShotCard({
                 <button
                   type="button"
                   onClick={() => deleteImage(img.id)}
-                  className="absolute left-1 top-1 hidden rounded-full bg-background/80 p-0.5 group-hover:block"
+                  aria-label="Delete image"
+                  className="absolute left-1 top-1 hidden rounded-full bg-background/80 p-0.5 group-hover:block group-focus-within:block"
                 >
                   <Trash2 className="size-3.5" />
                 </button>
@@ -536,6 +608,7 @@ function ShotCard({
           />
         </div>
       </CardContent>
+      {ConfirmDialog}
     </Card>
   );
 }

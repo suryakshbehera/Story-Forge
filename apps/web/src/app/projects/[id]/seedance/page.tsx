@@ -97,7 +97,7 @@ export default async function SeedancePage({ params }: { params: Promise<{ id: s
           ), then pick it below.
         </p>
       </div>
-      <SeedanceStudio scenes={scenes} />
+      <SeedanceStudio scenes={scenes} projectId={id} projectType={project.type} />
     </div>
   );
 }

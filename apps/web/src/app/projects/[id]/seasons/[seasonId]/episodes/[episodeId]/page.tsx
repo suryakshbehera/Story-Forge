@@ -14,6 +14,7 @@ import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
 import { StoryChatPanel } from "@/components/story-chat-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { TermHint } from "@/components/term-hint";
 import { ArrowLeft } from "lucide-react";
 
 const VOICE_INCLUDE = {
@@ -142,7 +143,10 @@ export default async function EpisodePage({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Assemble without Audio</CardTitle>
+          <CardTitle className="flex items-center gap-1.5 text-base">
+            Assemble without Audio
+            <TermHint text="Stitches every scene's selected image/clip, in order, with no narration/dialogue/music/sfx — a picture-only preview to review before drafting an Audio Cue Plan below." />
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <SilentAssemblyPanel parentType="episode" parentId={episodeId} initialSilentVideos={silentVideos} />
@@ -151,7 +155,10 @@ export default async function EpisodePage({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Audio Cue Plan</CardTitle>
+          <CardTitle className="flex items-center gap-1.5 text-base">
+            Audio Cue Plan
+            <TermHint text="Watches the selected silent picture above and proposes narration, dialogue, music, and sfx per scene, grounded in what actually happens on screen — review and edit, then apply." />
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <AudioCuePlanPanel parentType="episode" parentId={episodeId} hasSelectedSilentVideo={hasSelectedSilentVideo} />

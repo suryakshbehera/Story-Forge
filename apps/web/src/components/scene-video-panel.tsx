@@ -20,6 +20,7 @@ import { parseVideoModelConfig } from "@/lib/video-model-config";
 import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
 import { groupIntoTakes, clipLabel, type SceneVideoClipItem, type VideoTake } from "@/lib/video-takes";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { TermHint } from "@/components/term-hint";
 
 export type { SceneVideoClipItem };
 
@@ -411,6 +412,10 @@ export function SceneVideoPanel({
 
       {takes.length > 0 && (
         <div className="flex flex-col gap-1.5">
+          <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            Takes
+            <TermHint text="Every generation is kept, not overwritten — pick whichever take looks best with &quot;Use this take&quot;. Only the selected take is used in the final render; the rest stay here to compare or fall back to." />
+          </Label>
           {takes.map((take) => (
             <div key={take.key} className={`flex flex-col gap-1.5 rounded-md border p-1.5 ${take.isSelected ? "border-foreground" : ""}`}>
               <div className="flex flex-wrap items-center gap-2">

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { NewProjectDialog } from "@/components/new-project-dialog";
+import { TryDemoProjectButton } from "@/components/try-demo-project-button";
 import { ProjectCardMenu } from "@/components/project-card-menu";
 import { ProjectCoverImage } from "@/components/project-cover-image";
 import { getCurrentUser } from "@/lib/auth";
@@ -32,9 +33,13 @@ export default async function HomePage() {
 
       {projects.length === 0 ? (
         <Card>
-          <CardContent className="flex flex-col items-center gap-2 py-16 text-center text-muted-foreground">
+          <CardContent className="flex flex-col items-center gap-3 py-16 text-center text-muted-foreground">
             <p>No projects yet.</p>
             <p className="text-sm">Create your first Single Video or Series to get started.</p>
+            <div className="mt-1 flex items-center gap-2 text-xs">
+              Not sure where to start?
+              <TryDemoProjectButton />
+            </div>
           </CardContent>
         </Card>
       ) : (

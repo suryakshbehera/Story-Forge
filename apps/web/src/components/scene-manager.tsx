@@ -24,6 +24,7 @@ import { SceneAudioPanel } from "@/components/scene-audio-panel";
 import { ShotManager, type ShotItem } from "@/components/shot-manager";
 import { effectiveShotSeconds } from "@/lib/illustration-timing";
 import { Field } from "@/components/field";
+import { TermHint } from "@/components/term-hint";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "@/components/ui/collapsible";
 import {
   Sparkles,
@@ -471,7 +472,10 @@ function AddSceneDialog({
             <Textarea rows={4} value={description} onChange={(e) => setDescription(e.target.value)} />
           </div>
           <div className="grid gap-2">
-            <Label>Visual Mode</Label>
+            <Label className="flex items-center gap-1.5">
+              Visual Mode
+              <TermHint text="Illustration: a still image per shot, held with pan/zoom. Image → Video: each shot pair becomes a generated video clip. Text → Video: the whole scene is generated from text, no source image." />
+            </Label>
             <VisualModeSelect value={visualMode} onChange={setVisualMode} />
           </div>
         </div>
@@ -662,7 +666,12 @@ function SceneRow({
           <Textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Visual Mode">
+          <Field
+            label="Visual Mode"
+            hint={
+              <TermHint text="Illustration: a still image per shot, held with pan/zoom. Image → Video: each shot pair becomes a generated video clip. Text → Video: the whole scene is generated from text, no source image." />
+            }
+          >
             <VisualModeSelect value={visualMode} onChange={setVisualMode} />
           </Field>
           <Field label="AI reasoning (editable)">

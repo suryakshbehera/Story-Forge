@@ -25,6 +25,7 @@ import {
   HelpCircle,
 } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { TermHint } from "@/components/term-hint";
 
 export type CameraMovement = "STATIC" | "ZOOM_IN" | "ZOOM_OUT" | "PAN_LEFT" | "PAN_RIGHT" | "PAN_UP" | "PAN_DOWN";
 
@@ -506,7 +507,12 @@ function ShotCard({
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-2 py-3">
-        <CardTitle className="text-sm">Shot {shot.order}</CardTitle>
+        <CardTitle className="flex items-center gap-1.5 text-sm">
+          Shot {shot.order}
+          {isFirst && (
+            <TermHint text="Each shot is its own continuity frame, not an alternate of the others — shot 2 continues the scene from shot 1, it never re-generates the same moment. Alternates only exist within one shot's own image gallery below." />
+          )}
+        </CardTitle>
         <div className="flex items-center gap-1">
           <Button size="icon-sm" variant="ghost" aria-label="Move shot up" disabled={isFirst || moving} onClick={() => move("up")}>
             <ChevronUp className="size-3.5" />

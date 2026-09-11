@@ -18,18 +18,27 @@ export async function GET() {
 const createSchema = z.object({
   name: z.string().min(1),
   type: z.enum(["SINGLE", "SERIES"]),
+  premise: z.string().optional(),
+  genre: z.string().optional(),
+  duration: z.string().optional(),
 });
 
 export async function POST(req: NextRequest) {
   const user = await getCurrentUser();
   const body = createSchema.parse(await req.json());
+  const intent = { premise: body.premise || undefined, genre: body.genre || undefined };
 
   const project = await prisma.project.create({
     data: {
       name: body.name,
       type: body.type,
       ownerId: user!.id,
-      ...(body.type === "SINGLE" ? { story: { create: {} } } : { storyBible: { create: {} } }),
+      // duration has no equivalent field on StoryBible (that's
+      // SeriesBlueprint.runtimeTarget, a separate model created lazily
+      // elsewhere) — only carried through for SINGLE.
+      ...(body.type === "SINGLE"
+        ? { story: { create: { ...intent, duration: body.duration || undefined } } }
+        : { storyBible: { create: intent } }),
     },
     include: { story: true, storyBible: true },
   });

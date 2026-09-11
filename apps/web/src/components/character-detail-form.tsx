@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Save, Trash2, Lock } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { TermHint } from "@/components/term-hint";
 
 interface CharacterFields {
   name: string;
@@ -86,11 +87,14 @@ export function CharacterDetailForm({
           <Label className="text-xs text-muted-foreground">Name</Label>
           <Input value={fields.name} onChange={(e) => update("name", e.target.value)} />
         </div>
-        <label className="flex items-center gap-2 pb-1.5 text-sm">
-          <Lock className="size-3.5 text-muted-foreground" />
-          Lock
-          <Switch checked={fields.isLocked} onCheckedChange={(v) => update("isLocked", v)} />
-        </label>
+        <div className="flex items-center gap-1.5 pb-1.5 text-sm">
+          <label className="flex items-center gap-2">
+            <Lock className="size-3.5 text-muted-foreground" />
+            Lock
+            <Switch checked={fields.isLocked} onCheckedChange={(v) => update("isLocked", v)} />
+          </label>
+          <TermHint text="Locked characters are always included in the Context Engine, so they stay visually and narratively consistent across every generation." />
+        </div>
       </div>
       <p className="-mt-2 text-xs text-muted-foreground">
         Locked characters are always included in the Context Engine, so they stay visually and

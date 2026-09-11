@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/db";
+import { getProjectStatus } from "@/lib/project-status";
 import { Badge } from "@/components/ui/badge";
 import { ProjectNav } from "@/components/project-nav";
 import { ArrowLeft } from "lucide-react";
@@ -15,6 +16,8 @@ export default async function ProjectLayout({
   const { id } = await params;
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) notFound();
+
+  const status = await getProjectStatus(id, project.type);
 
   return (
     <div className="flex flex-col gap-4">
@@ -33,7 +36,7 @@ export default async function ProjectLayout({
           </Badge>
         </div>
       </div>
-      <ProjectNav projectId={project.id} type={project.type} />
+      <ProjectNav projectId={project.id} type={project.type} status={status} />
       <div>{children}</div>
     </div>
   );

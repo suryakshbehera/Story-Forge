@@ -308,13 +308,13 @@ Mirrors the phased plan in §3. Check off items as they ship.
 - [x] 0.7 Actionable empty states; replace save-blocking toasts with save-and-generate — F18, F19
 - [x] 0.8 Extract shared `Field` and `groupIntoTakes`/`clipLabel`; delete duplication — F11 (`TakeRow`/`TakeGallery` extraction deferred — optional/stretch per plan, not blocking)
 
-### Phase 1 — Activation (2–3 weeks)
+### Phase 1 — Activation (2–3 weeks) — shipped 2026-09-11
 
-- [ ] 1.1 Project workspace overview at `/projects/[id]` — pipeline status board with per-step links + one primary "Continue" action
-- [ ] 1.2 Ordered, stateful `ProjectNav` reflecting pipeline order + completion state; remove `Seedance 2.5` from nav
-- [ ] 1.3 First-run path: seeded 3-scene ILLUSTRATION demo project + shortest-loop checklist to one exported video
-- [ ] 1.4 New Project → short intent step (what/illustration-vs-video/length) pre-filling Story Setup
-- [ ] 1.5 First-use explanation pass on Visual Mode, take, shot, Silent Picture, Cue Plan, Lock (progressive disclosure)
+- [x] 1.1 Project workspace overview at `/projects/[id]` — pipeline status board with per-step links + one primary "Continue" action
+- [x] 1.2 Ordered, stateful `ProjectNav` reflecting pipeline order + completion state; remove `Seedance 2.5` from nav
+- [x] 1.3 First-run path: seeded 3-scene ILLUSTRATION demo project ("Try a demo project" on the empty project list); placeholder image/audio generated programmatically, no bundled media files
+- [x] 1.4 New Project → short intent step (premise/genre/length) pre-filling Story Setup — "illustration vs video" kept as guidance copy only, not a persisted field (nothing downstream reads a project-level default today)
+- [x] 1.5 First-use explanation pass on Visual Mode, take, shot, Silent Picture, Cue Plan, Lock — new `Tooltip`/`TermHint` primitive (none existed), reusing existing copy where it already existed
 
 ### Phase 2 — Generation feedback & trust (2–3 weeks; partly backend-blocked)
 

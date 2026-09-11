@@ -10,6 +10,7 @@ import { SilentAssemblyPanel } from "@/components/silent-assembly-panel";
 import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { TermHint } from "@/components/term-hint";
 
 const VOICE_INCLUDE = {
   narrationAudio: { orderBy: { createdAt: "desc" as const } },
@@ -71,7 +72,10 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Assemble without Audio</CardTitle>
+          <CardTitle className="flex items-center gap-1.5 text-base">
+            Assemble without Audio
+            <TermHint text="Stitches every scene's selected image/clip, in order, with no narration/dialogue/music/sfx — a picture-only preview to review before drafting an Audio Cue Plan below." />
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <SilentAssemblyPanel parentType="story" parentId={project.story.id} initialSilentVideos={silentVideos} />
@@ -80,7 +84,10 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Audio Cue Plan</CardTitle>
+          <CardTitle className="flex items-center gap-1.5 text-base">
+            Audio Cue Plan
+            <TermHint text="Watches the selected silent picture above and proposes narration, dialogue, music, and sfx per scene, grounded in what actually happens on screen — review and edit, then apply." />
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <AudioCuePlanPanel parentType="story" parentId={project.story.id} hasSelectedSilentVideo={hasSelectedSilentVideo} />

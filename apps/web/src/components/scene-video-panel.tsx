@@ -33,12 +33,12 @@ import {
 
 export type { SceneVideoClipItem };
 
-// Motion prompt/video prompt are user-written, never AI-drafted — same
-// pattern as Scene.narration in scene-voice-panel.tsx. Duration has an
-// optional AI suggestion (recommendVideoDuration in lib/scene-video.ts) but
-// stays a plain editable field otherwise — the AI only proposes a value into
-// it, same "draft, don't auto-apply" idiom as the motion prompt draft button
-// below. IMAGE_TO_VIDEO
+// Motion prompt has an optional AI draft (draftMotionPrompt in
+// lib/scene-video.ts, IMAGE_TO_VIDEO only) but stays a plain editable field
+// otherwise — the AI only proposes structured builder fields into it, same
+// "draft, don't auto-apply" idiom as duration's AI suggestion
+// (recommendVideoDuration) below. videoPrompt (TEXT_TO_VIDEO) is user-written
+// only, no draft step exists for it yet. IMAGE_TO_VIDEO
 // generation always reads the *saved* scene image (isSelected) as the
 // starting frame; this panel never lets the user override that per-call.
 // TEXT_TO_VIDEO has no source image at all — motionPrompt and videoPrompt
@@ -275,8 +275,9 @@ export function SceneVideoPanel({
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? "Drafting failed");
       }
-      const { motionPrompt: draft } = await res.json();
-      setMotionPrompt(draft);
+      const fields: PromptBuilderFields = await res.json();
+      setBuilderFields(fields);
+      setMotionPrompt(assembleVideoPrompt(fields));
       toast.success("Motion prompt drafted — review and save.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Drafting failed.");

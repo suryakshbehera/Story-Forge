@@ -21,8 +21,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const motionPrompt = await draftMotionPrompt({ sceneId, modelId: model.modelId });
-    return NextResponse.json({ motionPrompt });
+    const fields = await draftMotionPrompt({ sceneId, modelId: model.modelId });
+    return NextResponse.json(fields);
   } catch (error) {
     if (error instanceof OpenRouterError) {
       return NextResponse.json({ error: error.message }, { status: 502 });

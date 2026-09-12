@@ -13,6 +13,7 @@ import { loadReferenceDataUris, type ValidationEntity } from "@/lib/shot-images"
 import { parseVideoModelConfig, type VideoModelConfig } from "@/lib/video-model-config";
 import { listModelsForJob } from "@/lib/ai/models";
 import { STALE_MS } from "@/lib/generation-claims";
+import type { PromptBuilderFields } from "@/components/video-prompt-builder";
 
 // Same claim/release contract as claimShotForImageGeneration in
 // shot-images.ts — atomic updateMany so two concurrent requests can't both
@@ -731,14 +732,49 @@ export async function regenerateScenePairVideo({
 }
 
 const MOTION_PROMPT_SYSTEM_PROMPT = `You are the Motion Prompt drafting step inside Narrata, a manual-first AI story/video production studio.
-Write a short camera/motion direction prompt for an image-to-video model, continuing smoothly from the previous scene and animating the attached current-scene image.
-Describe only camera movement, subject motion, and action beats — not dialogue or narration, those are separate tracks handled elsewhere.
-Respond with the motion prompt text only — no labels, quotation marks, or commentary.`;
+Write a camera/motion direction for an image-to-video model, continuing smoothly from the previous scene and animating the attached current-scene image. Describe only camera movement, subject motion, and action beats — not dialogue or narration, those are separate tracks handled elsewhere.
+
+Direct the scene, don't describe an image — write in Subject → Action → Camera → Style order, matching this JSON shape:
+- subject: who/what is in frame (kept short — the image already shows this, so only note what matters for the motion, e.g. "the sealed stone door").
+- action: what happens/moves during the clip, in playback order.
+- camera: one explicit camera move (e.g. "slow dolly-in from a low angle"). Never leave this blank — an unstated camera reads as aimless drift.
+- style: lighting/mood/lens notes, or "" if the image's existing style needs no extra direction.
+- beatHook, beatDevelopment, beatEscalation, beatResolution: timed beats for longer clips (roughly 0-5s / 5-16s / 16-25s / 25-30s). Leave all four as "" for a short, single-beat clip — only fill them in when the action genuinely needs staged timing.
+- ending: how the clip resolves (a held frame, a pull-back, a specific gesture). Never leave this blank — always direct how it ends.`;
 
 interface DraftMotionPromptParams {
   sceneId: string;
   modelId: string;
 }
+
+const motionPromptDraftSchema = z.object({
+  subject: z.string(),
+  action: z.string(),
+  camera: z.string(),
+  style: z.string(),
+  beatHook: z.string(),
+  beatDevelopment: z.string(),
+  beatEscalation: z.string(),
+  beatResolution: z.string(),
+  ending: z.string(),
+});
+
+const MOTION_PROMPT_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    subject: { type: "string" },
+    action: { type: "string" },
+    camera: { type: "string" },
+    style: { type: "string" },
+    beatHook: { type: "string" },
+    beatDevelopment: { type: "string" },
+    beatEscalation: { type: "string" },
+    beatResolution: { type: "string" },
+    ending: { type: "string" },
+  },
+  required: ["subject", "action", "camera", "style", "beatHook", "beatDevelopment", "beatEscalation", "beatResolution", "ending"],
+  additionalProperties: false,
+} as const;
 
 // Reads the previous scene's generated clip (visually and, via OpenRouter's
 // video-input content part, its audio too) plus the current scene's selected
@@ -748,7 +784,7 @@ interface DraftMotionPromptParams {
 // yet (first scene, or video not generated yet). Returns a draft only — the
 // caller/UI decides whether to accept it into the editable motionPrompt
 // field, same "AI drafts, user approves" pattern as every other drafting job.
-export async function draftMotionPrompt({ sceneId, modelId }: DraftMotionPromptParams): Promise<string> {
+export async function draftMotionPrompt({ sceneId, modelId }: DraftMotionPromptParams): Promise<PromptBuilderFields> {
   const scene = await prisma.scene.findUniqueOrThrow({
     where: { id: sceneId },
     include: {
@@ -796,16 +832,29 @@ export async function draftMotionPrompt({ sceneId, modelId }: DraftMotionPromptP
 
   const userPrompt = `# Previous scene\n${previousContext}\n\n# Current scene\nDescription: ${scene.description}\nThe attached image is this scene's starting frame — motion should build on what's actually in it, not a generic description.\n\nWrite the motion prompt now.`;
 
-  const draft = await callChatModel({
+  const raw = await callChatModel({
     modelId,
     systemPrompt: MOTION_PROMPT_SYSTEM_PROMPT,
     userPrompt,
     images: [currentImageDataUri],
     videos: previousVideoDataUri ? [previousVideoDataUri] : undefined,
+    jsonSchema: { name: "motion_prompt_draft", schema: MOTION_PROMPT_JSON_SCHEMA },
     temperature: 0.7,
   });
 
-  return draft.trim();
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    throw new OpenRouterError("AI returned invalid JSON.");
+  }
+
+  const parsed = motionPromptDraftSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new OpenRouterError("AI returned an unexpected shape.");
+  }
+
+  return parsed.data;
 }
 
 const DURATION_RECOMMENDATION_SYSTEM_PROMPT = `You are the Duration Recommendation step inside Narrata, a manual-first AI story/video production studio.

@@ -5,6 +5,16 @@ export interface SceneVideoClipItem {
   batchId?: string | null;
   segmentOrder?: number | null;
   pairIndex?: number | null;
+  // Advisory-only auto-QC signal (see checkSegmentFrozen in
+  // lib/scene-video.ts) — null means not checked, never a failure.
+  qcPassed?: boolean | null;
+  qcNotes?: string | null;
+  // Per-clip generation details, surfaced in an expandable panel so an
+  // off-looking scene can be diagnosed pair-by-pair — see
+  // SerializedSceneVideoClip in lib/scene-video.ts.
+  modelId?: string | null;
+  prompt?: string | null;
+  usedEndFrame?: boolean | null;
 }
 
 export interface VideoTake {

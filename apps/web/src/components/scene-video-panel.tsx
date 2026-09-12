@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -15,12 +15,21 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ModelSelect, type ModelOption } from "@/components/model-select";
-import { Clapperboard, Save, Sparkles, Trash2 } from "lucide-react";
+import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "@/components/ui/collapsible";
+import { Clapperboard, Save, Sparkles, Trash2, TriangleAlert, ChevronDown } from "lucide-react";
 import { parseVideoModelConfig } from "@/lib/video-model-config";
 import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
 import { groupIntoTakes, clipLabel, type SceneVideoClipItem, type VideoTake } from "@/lib/video-takes";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { TermHint } from "@/components/term-hint";
+import { isGenerationActive } from "@/lib/generation-claims";
+import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
+import {
+  assembleVideoPrompt,
+  EMPTY_PROMPT_BUILDER_FIELDS,
+  PromptBuilderFieldsForm,
+  type PromptBuilderFields,
+} from "@/components/video-prompt-builder";
 
 export type { SceneVideoClipItem };
 
@@ -48,6 +57,7 @@ export function SceneVideoPanel({
   initialVideoResolution,
   initialVideoGenerateAudio,
   initialVideoClips,
+  initialVideoGenerationStartedAt,
 }: {
   sceneId: string;
   mode: "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
@@ -62,6 +72,7 @@ export function SceneVideoPanel({
   initialVideoResolution: string | null;
   initialVideoGenerateAudio: boolean;
   initialVideoClips: SceneVideoClipItem[];
+  initialVideoGenerationStartedAt: string | null;
 }) {
   const [motionPrompt, setMotionPrompt] = useState(initialMotionPrompt);
   const [savedMotionPrompt, setSavedMotionPrompt] = useState(initialMotionPrompt);
@@ -76,15 +87,61 @@ export function SceneVideoPanel({
   const [saving, setSaving] = useState(false);
   const [modelId, setModelId] = useState("");
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [generating, setGenerating] = useState(false);
+  const [generating, setGenerating] = useState(() => isGenerationActive(initialVideoGenerationStartedAt, "video"));
   const [videoClips, setVideoClips] = useState(initialVideoClips);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
+  const unmountedRef = useRef(false);
   const [draftModelId, setDraftModelId] = useState("");
   const [drafting, setDrafting] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState<number | null>(null);
   const [durationModelId, setDurationModelId] = useState("");
   const [suggestingDuration, setSuggestingDuration] = useState(false);
   const [durationReason, setDurationReason] = useState("");
+  const [retakingPairIndex, setRetakingPairIndex] = useState<number | null>(null);
+  // Actual playable duration per clip, read off the <video> element itself
+  // once its metadata loads — no backend field for this, the file already
+  // carries it. Part of the per-clip generation-details disclosure below.
+  const [clipDurations, setClipDurations] = useState<Record<string, number>>({});
+  // Structured alternate input mode for motionPrompt/videoPrompt — same
+  // fields/technique Seedance Studio uses, generalized (Phase 13). Purely a
+  // UI-side helper: builderFields never gets read at save/generate time,
+  // only used to compute the assembled string that's written into the same
+  // motionPrompt/videoPrompt state the plain Textarea also writes to, so
+  // save/generate/dirty-tracking below are all untouched by this.
+  const [useBuilder, setUseBuilder] = useState(false);
+  const [builderFields, setBuilderFields] = useState<PromptBuilderFields>(EMPTY_PROMPT_BUILDER_FIELDS);
   const { confirm, ConfirmDialog } = useConfirm();
+
+  useEffect(() => () => {
+    unmountedRef.current = true;
+  }, []);
+
+  // Watches a generation claimed by someone/somewhen else — this tab before
+  // a reload, or another tab — until it finishes, same contract as
+  // shot-manager.tsx's pollUntilGenerationIdle.
+  async function pollUntilGenerationIdle() {
+    while (!unmountedRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (unmountedRef.current) return;
+      const res = await fetch(`/api/scenes/${sceneId}/status`).catch(() => null);
+      if (!res?.ok) continue;
+      const updated: { videoGenerationStartedAt: string | null; videoClips: SceneVideoClipItem[] } = await res.json();
+      if (!isGenerationActive(updated.videoGenerationStartedAt, "video")) {
+        if (!unmountedRef.current) {
+          setVideoClips(updated.videoClips);
+          setGenerating(false);
+        }
+        return;
+      }
+    }
+  }
+
+  // Mount-only: picks up a generation already in flight when this panel
+  // first renders — must not re-run on every prop update.
+  useEffect(() => {
+    if (isGenerationActive(initialVideoGenerationStartedAt, "video")) pollUntilGenerationIdle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,15 +225,23 @@ export function SceneVideoPanel({
       if (!ok) return;
     }
     setGenerating(true);
+    setLastError(null);
     try {
       const res = await fetch(`/api/scenes/${sceneId}/video/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelId }),
       });
+      if (res.status === 409) {
+        toast.warning("Already generating for this scene — watching for it to finish.");
+        pollUntilGenerationIdle();
+        return;
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Generation failed");
+        const message = body.error ?? "Generation failed";
+        setLastError({ message, modelId: body.modelId, provider: body.provider });
+        throw new Error(message);
       }
       const clips: SceneVideoClipItem[] = await res.json();
       setVideoClips((prev) => [...clips, ...prev.map((c) => ({ ...c, isSelected: false }))]);
@@ -187,9 +252,9 @@ export function SceneVideoPanel({
             ? `${clips.length} video segments generated.`
             : "Video clip generated."
       );
+      setGenerating(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
-    } finally {
       setGenerating(false);
     }
   }
@@ -275,6 +340,43 @@ export function SceneVideoPanel({
     setVideoClips((prev) => prev.filter((c) => !idsToRemove.has(c.id)));
   }
 
+  // Regenerates just this one shot pair within the *selected* take, in place
+  // — see regenerateScenePairVideo in lib/scene-video.ts. Pairs are
+  // independent generation units, so a bad 6s pair inside a 45s scene
+  // doesn't need the rest of the scene regenerated (and re-paid-for) to fix
+  // it. Replaces the whole returned batch in state since the retake's own
+  // segment order/count can differ from what it replaced.
+  async function retakePair(pairIndex: number) {
+    if (!modelId) {
+      toast.error("Pick a video generation model first.");
+      return;
+    }
+    setRetakingPairIndex(pairIndex);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/video/pairs/${pairIndex}/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId }),
+      });
+      if (res.status === 409) {
+        toast.warning("Already generating for this scene — try again once it finishes.");
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Retake failed");
+      }
+      const updatedBatch: SceneVideoClipItem[] = await res.json();
+      const updatedBatchId = updatedBatch[0]?.batchId;
+      setVideoClips((prev) => [...prev.filter((c) => c.batchId !== updatedBatchId), ...updatedBatch]);
+      toast.success(`Shot ${pairIndex + 1}→${pairIndex + 2} retaken.`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Retake failed.");
+    } finally {
+      setRetakingPairIndex(null);
+    }
+  }
+
   const takes = groupIntoTakes(videoClips);
   const resolutionOptions = modelConfig?.resolutions ?? [];
 
@@ -282,14 +384,34 @@ export function SceneVideoPanel({
     <div className="flex flex-col gap-3 border-t pt-3">
       {mode === "IMAGE_TO_VIDEO" ? (
         <div>
-          <Label className="text-xs text-muted-foreground">Motion prompt (camera/motion direction)</Label>
-          <Textarea
-            rows={2}
-            placeholder="e.g. slow push in, hair moves in the wind — falls back to the scene description if left blank"
-            value={motionPrompt}
-            onChange={(e) => setMotionPrompt(e.target.value)}
-            className="mt-1.5"
-          />
+          <div className="flex items-center justify-between gap-2">
+            <Label className="text-xs text-muted-foreground">Motion prompt (camera/motion direction)</Label>
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Switch checked={useBuilder} onCheckedChange={setUseBuilder} />
+              Prompt builder
+            </label>
+          </div>
+          {useBuilder ? (
+            <div className="mt-1.5">
+              <PromptBuilderFieldsForm
+                fields={builderFields}
+                onChange={(f) => {
+                  setBuilderFields(f);
+                  setMotionPrompt(assembleVideoPrompt(f));
+                }}
+                assembled={motionPrompt}
+                savedPrompt={savedMotionPrompt || null}
+              />
+            </div>
+          ) : (
+            <Textarea
+              rows={2}
+              placeholder="e.g. slow push in, hair moves in the wind — falls back to the scene description if left blank"
+              value={motionPrompt}
+              onChange={(e) => setMotionPrompt(e.target.value)}
+              className="mt-1.5"
+            />
+          )}
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <ModelSelect jobType="MOTION_PROMPT_DRAFTING" value={draftModelId} onChange={setDraftModelId} />
             <Button
@@ -310,14 +432,34 @@ export function SceneVideoPanel({
         </div>
       ) : (
         <div>
-          <Label className="text-xs text-muted-foreground">Video prompt (describes the whole shot, no source image)</Label>
-          <Textarea
-            rows={2}
-            placeholder="e.g. a lone figure walks through a neon-lit alley in the rain — falls back to the scene description if left blank"
-            value={videoPrompt}
-            onChange={(e) => setVideoPrompt(e.target.value)}
-            className="mt-1.5"
-          />
+          <div className="flex items-center justify-between gap-2">
+            <Label className="text-xs text-muted-foreground">Video prompt (describes the whole shot, no source image)</Label>
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Switch checked={useBuilder} onCheckedChange={setUseBuilder} />
+              Prompt builder
+            </label>
+          </div>
+          {useBuilder ? (
+            <div className="mt-1.5">
+              <PromptBuilderFieldsForm
+                fields={builderFields}
+                onChange={(f) => {
+                  setBuilderFields(f);
+                  setVideoPrompt(assembleVideoPrompt(f));
+                }}
+                assembled={videoPrompt}
+                savedPrompt={savedVideoPrompt || null}
+              />
+            </div>
+          ) : (
+            <Textarea
+              rows={2}
+              placeholder="e.g. a lone figure walks through a neon-lit alley in the rain — falls back to the scene description if left blank"
+              value={videoPrompt}
+              onChange={(e) => setVideoPrompt(e.target.value)}
+              className="mt-1.5"
+            />
+          )}
         </div>
       )}
       <div className="flex flex-wrap items-end gap-3">
@@ -410,6 +552,10 @@ export function SceneVideoPanel({
         </div>
       )}
 
+      {lastError && (
+        <GenerationErrorBanner error={lastError} onRetry={generate} onDismiss={() => setLastError(null)} />
+      )}
+
       {takes.length > 0 && (
         <div className="flex flex-col gap-1.5">
           <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -419,9 +565,77 @@ export function SceneVideoPanel({
           {takes.map((take) => (
             <div key={take.key} className={`flex flex-col gap-1.5 rounded-md border p-1.5 ${take.isSelected ? "border-foreground" : ""}`}>
               <div className="flex flex-wrap items-center gap-2">
-                {take.clips.map((clip, i) => (
-                  <video key={clip.id} controls src={clip.url} className="h-24 w-40 rounded object-cover" title={clipLabel(take.clips, i)} />
-                ))}
+                {take.clips.map((clip, i) => {
+                  const isFirstOfPair = i === 0 || take.clips[i - 1].pairIndex !== clip.pairIndex;
+                  return (
+                    <div key={clip.id} className="flex flex-col items-center gap-1">
+                      <div className="relative">
+                        <video
+                          controls
+                          src={clip.url}
+                          className="h-24 w-40 rounded object-cover"
+                          title={clipLabel(take.clips, i)}
+                          onLoadedMetadata={(e) => {
+                            const seconds = e.currentTarget.duration;
+                            if (Number.isFinite(seconds)) setClipDurations((prev) => ({ ...prev, [clip.id]: seconds }));
+                          }}
+                        />
+                        {clip.qcPassed === false && (
+                          <span
+                            className="absolute right-1 top-1 rounded-full bg-amber-500 p-0.5 text-white"
+                            title={clip.qcNotes ?? "Auto-QC flagged this clip as possibly frozen/near-static — consider retaking it."}
+                          >
+                            <TriangleAlert className="size-3" />
+                          </span>
+                        )}
+                      </div>
+                      {mode === "IMAGE_TO_VIDEO" && take.isSelected && clip.pairIndex != null && isFirstOfPair && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="w-full text-xs"
+                          disabled={retakingPairIndex !== null}
+                          onClick={() => retakePair(clip.pairIndex!)}
+                        >
+                          {retakingPairIndex === clip.pairIndex ? "Retaking…" : "Retake this pair"}
+                        </Button>
+                      )}
+                      <Collapsible className="w-40">
+                        <CollapsibleTrigger className="flex w-full items-center justify-center gap-1 text-[10px] text-muted-foreground hover:text-foreground">
+                          Details
+                          <ChevronDown className="size-2.5" />
+                        </CollapsibleTrigger>
+                        <CollapsiblePanel>
+                          <div className="mt-1 flex flex-col gap-0.5 rounded bg-muted/50 p-1.5 text-[10px] text-muted-foreground">
+                            <div>
+                              <span className="font-medium text-foreground">Model:</span> {clip.modelId ?? "—"}
+                            </div>
+                            <div>
+                              <span className="font-medium text-foreground">Duration:</span>{" "}
+                              {clipDurations[clip.id] != null ? `${clipDurations[clip.id].toFixed(1)}s` : "…"}
+                            </div>
+                            {mode === "IMAGE_TO_VIDEO" && (
+                              <div>
+                                <span className="font-medium text-foreground">End-frame used:</span>{" "}
+                                {clip.usedEndFrame == null ? "n/a" : clip.usedEndFrame ? "Yes" : "No"}
+                              </div>
+                            )}
+                            {clip.qcNotes && (
+                              <div>
+                                <span className="font-medium text-foreground">QC:</span> {clip.qcNotes}
+                              </div>
+                            )}
+                            {clip.prompt && (
+                              <div className="whitespace-pre-wrap break-words">
+                                <span className="font-medium text-foreground">Prompt:</span> {clip.prompt}
+                              </div>
+                            )}
+                          </div>
+                        </CollapsiblePanel>
+                      </Collapsible>
+                    </div>
+                  );
+                })}
                 <Button size="sm" variant={take.isSelected ? "default" : "outline"} onClick={() => selectTake(take.clips[0].id)} disabled={take.isSelected}>
                   {take.isSelected ? "Selected" : "Use this take"}
                 </Button>

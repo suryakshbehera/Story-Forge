@@ -25,6 +25,7 @@ import { ShotManager, type ShotItem } from "@/components/shot-manager";
 import { effectiveShotSeconds } from "@/lib/illustration-timing";
 import { Field } from "@/components/field";
 import { TermHint } from "@/components/term-hint";
+import { VoicePicker } from "@/components/voice-picker";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "@/components/ui/collapsible";
 import {
   Sparkles,
@@ -71,10 +72,14 @@ export interface SceneItem {
   videoResolution: string | null;
   videoGenerateAudio: boolean;
   videoClips: SceneVideoClipItem[];
+  videoGenerationStartedAt: string | null;
+  narrationGenerationStartedAt: string | null;
   musicPrompt: string | null;
   sfxPrompt: string | null;
   musicVolume: number;
   sfxVolume: number;
+  musicGenerationStartedAt: string | null;
+  sfxGenerationStartedAt: string | null;
   music: AudioTake[];
   sfx: AudioTake[];
 }
@@ -299,7 +304,7 @@ export function SceneManager({
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <Field label="Model">
-            <ModelSelect jobType="SCENE_PLANNING" value={modelId} onChange={setModelId} />
+            <ModelSelect jobType="SCENE_PLANNING" value={modelId} onChange={setModelId} projectId={projectId} />
           </Field>
           <Field label="Instructions">
             <Textarea
@@ -323,16 +328,16 @@ export function SceneManager({
         <CardContent className="flex flex-col gap-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <Field label="Shot Planning Model">
-              <ModelSelect jobType="SHOT_PLANNING" value={shotPlanningModelId} onChange={setShotPlanningModelId} />
+              <ModelSelect jobType="SHOT_PLANNING" value={shotPlanningModelId} onChange={setShotPlanningModelId} projectId={projectId} />
             </Field>
             <Field label="Image Prompt Model">
-              <ModelSelect jobType="IMAGE_PROMPTS" value={promptModelId} onChange={setPromptModelId} />
+              <ModelSelect jobType="IMAGE_PROMPTS" value={promptModelId} onChange={setPromptModelId} projectId={projectId} />
             </Field>
             <Field label="Image Generation Model">
-              <ModelSelect jobType="IMAGE_GENERATION" value={imageModelId} onChange={setImageModelId} />
+              <ModelSelect jobType="IMAGE_GENERATION" value={imageModelId} onChange={setImageModelId} projectId={projectId} />
             </Field>
             <Field label="Validation Model">
-              <ModelSelect jobType="IMAGE_VALIDATION" value={validationModelId} onChange={setValidationModelId} />
+              <ModelSelect jobType="IMAGE_VALIDATION" value={validationModelId} onChange={setValidationModelId} projectId={projectId} />
             </Field>
           </div>
           <Field label="Instructions (applies whenever you generate a shot image)">
@@ -354,14 +359,11 @@ export function SceneManager({
           <CardTitle className="text-base">Voice Settings</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <Field label="Narrator voice (ElevenLabs voice ID or Sarvam speaker name, matching whichever provider you pick when generating — used for every scene's narration in this project)">
+          <Field label="Narrator voice — used for every scene's narration in this project">
             <div className="flex gap-2">
-              <Input
-                className="max-w-xs"
-                placeholder='e.g. "21m00Tcm4TlvDq8ikWAM" (ElevenLabs) or "shubh" (Sarvam)'
-                value={narratorVoiceName}
-                onChange={(e) => setNarratorVoiceName(e.target.value)}
-              />
+              <div className="max-w-md flex-1">
+                <VoicePicker value={narratorVoiceName} onChange={setNarratorVoiceName} />
+              </div>
               <Button
                 size="sm"
                 variant="outline"
@@ -755,6 +757,7 @@ function SceneRow({
                 initialVideoResolution={scene.videoResolution}
                 initialVideoGenerateAudio={scene.videoGenerateAudio}
                 initialVideoClips={scene.videoClips}
+                initialVideoGenerationStartedAt={scene.videoGenerationStartedAt}
               />
             </CollapsiblePanel>
           </Collapsible>
@@ -773,6 +776,7 @@ function SceneRow({
               initialNarrationDeliveryNotes={scene.narrationDeliveryNotes}
               initialNarrationSpeed={scene.narrationSpeed}
               initialNarrationAudio={scene.narrationAudio}
+              initialNarrationGenerationStartedAt={scene.narrationGenerationStartedAt}
               initialDialogueLines={scene.dialogueLines}
             />
           </CollapsiblePanel>
@@ -789,6 +793,8 @@ function SceneRow({
               initialSfxVolume={scene.sfxVolume}
               initialMusic={scene.music}
               initialSfx={scene.sfx}
+              initialMusicGenerationStartedAt={scene.musicGenerationStartedAt}
+              initialSfxGenerationStartedAt={scene.sfxGenerationStartedAt}
             />
           </CollapsiblePanel>
         </Collapsible>

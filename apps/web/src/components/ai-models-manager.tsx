@@ -24,7 +24,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Trash2, Pencil } from "lucide-react";
-import type { VideoModelConfig } from "@/lib/video-model-config";
+import { CAMERA_MOVEMENTS, type CameraMovementValue, type VideoModelConfig } from "@/lib/video-model-config";
 import { invalidateModelCache } from "@/lib/model-registry-cache";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
@@ -225,6 +225,16 @@ export function AiModelsManager({ initialModels }: { initialModels: ModelRow[] }
 // video-model-config.ts / video-segmentation.ts) — how many clips a scene
 // needs and at what duration/resolution is computed from this, since
 // OpenRouter has no confirmed live endpoint for per-model capabilities.
+const CAMERA_MOVEMENT_LABELS: Record<CameraMovementValue, string> = {
+  STATIC: "Static",
+  ZOOM_IN: "Zoom in",
+  ZOOM_OUT: "Zoom out",
+  PAN_LEFT: "Pan left",
+  PAN_RIGHT: "Pan right",
+  PAN_UP: "Pan up",
+  PAN_DOWN: "Pan down",
+};
+
 function VideoConfigFields({
   config,
   onChange,
@@ -233,6 +243,14 @@ function VideoConfigFields({
   onChange: (config: VideoModelConfig) => void;
 }) {
   const durationMode = config.durationMode ?? "fixed";
+  const preferredCameraMovements = config.preferredCameraMovements ?? [];
+
+  function toggleCameraMovement(movement: CameraMovementValue) {
+    const next = preferredCameraMovements.includes(movement)
+      ? preferredCameraMovements.filter((m) => m !== movement)
+      : [...preferredCameraMovements, movement];
+    onChange({ ...config, preferredCameraMovements: next });
+  }
   const fixedDurationsText = (config.fixedDurations ?? []).join(", ");
   const resolutionsText = (config.resolutions ?? []).join(", ");
 
@@ -321,6 +339,39 @@ function VideoConfigFields({
         />
         Supports native audio generation
       </label>
+
+      <label className="flex items-center gap-2 text-sm">
+        <Switch
+          checked={config.supportsLastFrame ?? true}
+          onCheckedChange={(v) => onChange({ ...config, supportsLastFrame: v })}
+        />
+        Supports end-frame (last frame) conditioning
+      </label>
+
+      <div className="grid gap-2">
+        <Label>Preferred for camera movements</Label>
+        <p className="text-xs text-muted-foreground">
+          When a shot has no manual model override, IMAGE_TO_VIDEO scenes auto-route that shot&apos;s pair to the
+          first enabled model preferring its camera movement, before falling back to the scene&apos;s default model.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {CAMERA_MOVEMENTS.map((movement) => {
+            const active = preferredCameraMovements.includes(movement);
+            return (
+              <button
+                key={movement}
+                type="button"
+                onClick={() => toggleCameraMovement(movement)}
+                className={`rounded-full border px-3 py-1 text-xs ${
+                  active ? "border-primary bg-primary text-primary-foreground" : "border-input text-muted-foreground"
+                }`}
+              >
+                {CAMERA_MOVEMENT_LABELS[movement]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

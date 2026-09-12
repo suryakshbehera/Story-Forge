@@ -39,7 +39,7 @@ export function ProjectNav({
         ];
 
   return (
-    <nav className="flex gap-1 border-b">
+    <nav className="flex gap-1 overflow-x-auto border-b">
       {tabs.map((tab) => {
         const active = pathname === tab.href || pathname.startsWith(`${tab.href}/`);
         return (
@@ -47,7 +47,7 @@ export function ProjectNav({
             key={tab.href}
             href={tab.href}
             className={cn(
-              "flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+              "flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",
               active ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
             )}
           >

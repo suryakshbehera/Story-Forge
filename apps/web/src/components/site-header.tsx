@@ -2,38 +2,44 @@ import Link from "next/link";
 import { Settings, Users } from "lucide-react";
 import { getCurrentUserDetail } from "@/lib/auth";
 import { LogoutButton } from "@/components/logout-button";
+import { JobTray } from "@/components/job-tray";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 export async function SiteHeader() {
   const user = await getCurrentUserDetail();
 
   return (
     <header className="border-b bg-background">
-      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
-        <Link href="/" className="font-semibold tracking-tight">
+      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-4">
+        <Link href="/" className="shrink-0 font-semibold tracking-tight">
           Narrata
         </Link>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 sm:gap-4">
+          <JobTray />
+          <ThemeToggle />
           {user?.role === "ADMIN" && (
             <>
               <Link
                 href="/settings/ai-models"
+                aria-label="AI Models"
                 className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
               >
                 <Settings className="size-4" />
-                AI Models
+                <span className="hidden sm:inline">AI Models</span>
               </Link>
               <Link
                 href="/settings/people"
+                aria-label="People"
                 className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
               >
                 <Users className="size-4" />
-                People
+                <span className="hidden sm:inline">People</span>
               </Link>
             </>
           )}
           {user && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <span>{user.email}</span>
+              <span className="hidden sm:inline">{user.email}</span>
               <LogoutButton />
             </div>
           )}

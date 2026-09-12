@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ModelSelect } from "@/components/model-select";
 import { Clapperboard, Trash2 } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { isGenerationActive } from "@/lib/generation-claims";
+import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
 
 export interface SilentVideoItem {
   id: string;
@@ -21,18 +23,52 @@ export function SilentAssemblyPanel({
   parentType,
   parentId,
   initialSilentVideos,
+  initialSilentVideoGenerationStartedAt,
 }: {
   parentType: "story" | "episode";
   parentId: string;
   initialSilentVideos: SilentVideoItem[];
+  initialSilentVideoGenerationStartedAt: string | null;
 }) {
   const router = useRouter();
   const [modelId, setModelId] = useState("");
-  const [generating, setGenerating] = useState(false);
+  const [generating, setGenerating] = useState(() =>
+    isGenerationActive(initialSilentVideoGenerationStartedAt, "silentAssembly")
+  );
   const [silentVideos, setSilentVideos] = useState(initialSilentVideos);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
   const { confirm, ConfirmDialog } = useConfirm();
+  const unmountedRef = useRef(false);
 
   const base = parentType === "story" ? `/api/stories/${parentId}/silent-video` : `/api/episodes/${parentId}/silent-video`;
+  const statusUrl = parentType === "story" ? `/api/stories/${parentId}/status` : `/api/episodes/${parentId}/status`;
+
+  useEffect(() => () => {
+    unmountedRef.current = true;
+  }, []);
+
+  async function pollUntilGenerationIdle() {
+    while (!unmountedRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (unmountedRef.current) return;
+      const res = await fetch(statusUrl).catch(() => null);
+      if (!res?.ok) continue;
+      const updated: { silentVideoGenerationStartedAt: string | null; silentVideos: SilentVideoItem[] } = await res.json();
+      if (!isGenerationActive(updated.silentVideoGenerationStartedAt, "silentAssembly")) {
+        if (!unmountedRef.current) {
+          setSilentVideos(updated.silentVideos);
+          setGenerating(false);
+          router.refresh();
+        }
+        return;
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (isGenerationActive(initialSilentVideoGenerationStartedAt, "silentAssembly")) pollUntilGenerationIdle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function generate() {
     if (!modelId) {
@@ -40,23 +76,31 @@ export function SilentAssemblyPanel({
       return;
     }
     setGenerating(true);
+    setLastError(null);
     try {
       const res = await fetch(`${base}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelId }),
       });
+      if (res.status === 409) {
+        toast.warning("Already assembling — watching for it to finish.");
+        pollUntilGenerationIdle();
+        return;
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Assembly failed");
+        const message = body.error ?? "Assembly failed";
+        setLastError({ message, modelId: body.modelId, provider: body.provider });
+        throw new Error(message);
       }
       const video: SilentVideoItem = await res.json();
       setSilentVideos((prev) => [video, ...prev.map((v) => ({ ...v, isSelected: false }))]);
       toast.success("Silent picture assembled.");
       router.refresh();
+      setGenerating(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Assembly failed.");
-    } finally {
       setGenerating(false);
     }
   }
@@ -101,6 +145,10 @@ export function SilentAssemblyPanel({
           {generating ? "Assembling…" : "Assemble Silent Picture"}
         </Button>
       </div>
+
+      {lastError && (
+        <GenerationErrorBanner error={lastError} onRetry={generate} onDismiss={() => setLastError(null)} />
+      )}
 
       {silentVideos.length > 0 && (
         <div className="flex flex-col gap-1.5">

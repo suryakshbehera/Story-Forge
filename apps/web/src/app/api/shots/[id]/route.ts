@@ -7,6 +7,7 @@ const patchSchema = z.object({
   description: z.string().min(1).optional(),
   cameraMovement: z.enum(["STATIC", "ZOOM_IN", "ZOOM_OUT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN"]).optional(),
   durationSeconds: z.number().int().positive().optional().nullable(),
+  videoModelId: z.string().optional().nullable(),
 });
 
 // Polled by the client while a persisted "Generating…" state is active (see

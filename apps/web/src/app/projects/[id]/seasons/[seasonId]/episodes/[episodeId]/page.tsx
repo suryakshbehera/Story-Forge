@@ -144,19 +144,24 @@ export default async function EpisodePage({
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-1.5 text-base">
-            Assemble without Audio
+            Step 1 of 4 — Assemble without Audio
             <TermHint text="Stitches every scene's selected image/clip, in order, with no narration/dialogue/music/sfx — a picture-only preview to review before drafting an Audio Cue Plan below." />
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <SilentAssemblyPanel parentType="episode" parentId={episodeId} initialSilentVideos={silentVideos} />
+          <SilentAssemblyPanel
+            parentType="episode"
+            parentId={episodeId}
+            initialSilentVideos={silentVideos}
+            initialSilentVideoGenerationStartedAt={episodeVideo.silentVideoGenerationStartedAt?.toISOString() ?? null}
+          />
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-1.5 text-base">
-            Audio Cue Plan
+            Step 2 of 4 — Audio Cue Plan
             <TermHint text="Watches the selected silent picture above and proposes narration, dialogue, music, and sfx per scene, grounded in what actually happens on screen — review and edit, then apply." />
           </CardTitle>
         </CardHeader>
@@ -165,18 +170,13 @@ export default async function EpisodePage({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Final Assembly</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <VideoAssemblyPanel
-            parentType="episode"
-            parentId={episodeId}
-            initialFinalVideos={mapFinalVideos(episodeVideo).finalVideos}
-          />
-        </CardContent>
-      </Card>
+      <VideoAssemblyPanel
+        parentType="episode"
+        parentId={episodeId}
+        initialFinalVideos={mapFinalVideos(episodeVideo).finalVideos}
+        initialFinalVideoGenerationStartedAt={episodeVideo.finalVideoGenerationStartedAt?.toISOString() ?? null}
+        hasSelectedSilentVideo={hasSelectedSilentVideo}
+      />
     </div>
   );
 }

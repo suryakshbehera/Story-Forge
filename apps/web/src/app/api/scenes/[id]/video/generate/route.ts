@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
 import { OpenRouterError } from "@/lib/ai/openrouter";
-import { generateSceneVideo } from "@/lib/scene-video";
+import { generateSceneVideo, claimSceneVideoGeneration, releaseSceneVideoGeneration } from "@/lib/scene-video";
 import { parseVideoModelConfig } from "@/lib/video-model-config";
 
 const bodySchema = z.object({
@@ -24,6 +24,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     );
   }
 
+  const claimed = await claimSceneVideoGeneration(sceneId);
+  if (!claimed) {
+    return NextResponse.json(
+      { error: "Video generation is already in progress for this scene." },
+      { status: 409 }
+    );
+  }
+
   try {
     const clips = await generateSceneVideo({
       sceneId,
@@ -36,8 +44,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json(clips, { status: 201 });
   } catch (error) {
     if (error instanceof OpenRouterError) {
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      return NextResponse.json({ error: error.message, modelId: model.modelId, provider: model.provider }, { status: 502 });
     }
     throw error;
+  } finally {
+    await releaseSceneVideoGeneration(sceneId);
   }
 }

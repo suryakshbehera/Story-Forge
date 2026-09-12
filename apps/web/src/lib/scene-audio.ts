@@ -6,6 +6,7 @@ import { generateMusic, generateSoundEffect, ElevenLabsError } from "@/lib/ai/el
 import { generateAudioClip } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { probeDuration } from "@/lib/ffmpeg";
+import { STALE_MS } from "@/lib/generation-claims";
 
 // Music/SFX have two providers now (see lib/ai/elevenlabs.ts's generateMusic/
 // generateSoundEffect and lib/ai/openrouter.ts's generateAudioClip) —
@@ -303,10 +304,47 @@ export async function deleteSceneSfx(sceneId: string, assetId: string): Promise<
 
 // Mirrors mapSceneVideoData in lib/scene-video.ts — for the scene pages'
 // initial SSR load.
-export function mapSceneAudioData<T extends { music: Asset[]; sfx: Asset[] }>(scene: T) {
+export function mapSceneAudioData<
+  T extends { music: Asset[]; sfx: Asset[]; musicGenerationStartedAt: Date | null; sfxGenerationStartedAt: Date | null },
+>(scene: T) {
   return {
     ...scene,
     music: scene.music.map(serializeAudioAsset),
     sfx: scene.sfx.map(serializeAudioAsset),
+    musicGenerationStartedAt: scene.musicGenerationStartedAt?.toISOString() ?? null,
+    sfxGenerationStartedAt: scene.sfxGenerationStartedAt?.toISOString() ?? null,
   };
+}
+
+// Same claim/release contract as claimShotForImageGeneration in
+// shot-images.ts, parameterized over music vs sfx since both live on Scene
+// with their own independent claim field.
+async function claimSceneAudioSlot(
+  field: "musicGenerationStartedAt" | "sfxGenerationStartedAt",
+  sceneId: string,
+  staleMs: number
+): Promise<boolean> {
+  const staleThreshold = new Date(Date.now() - staleMs);
+  const result = await prisma.scene.updateMany({
+    where: { id: sceneId, OR: [{ [field]: null }, { [field]: { lt: staleThreshold } }] },
+    data: { [field]: new Date() },
+  });
+  return result.count > 0;
+}
+
+async function releaseSceneAudioSlot(field: "musicGenerationStartedAt" | "sfxGenerationStartedAt", sceneId: string): Promise<void> {
+  await prisma.scene.update({ where: { id: sceneId }, data: { [field]: null } });
+}
+
+export function claimMusicGeneration(sceneId: string) {
+  return claimSceneAudioSlot("musicGenerationStartedAt", sceneId, STALE_MS.music);
+}
+export function releaseMusicGeneration(sceneId: string) {
+  return releaseSceneAudioSlot("musicGenerationStartedAt", sceneId);
+}
+export function claimSfxGeneration(sceneId: string) {
+  return claimSceneAudioSlot("sfxGenerationStartedAt", sceneId, STALE_MS.sfx);
+}
+export function releaseSfxGeneration(sceneId: string) {
+  return releaseSceneAudioSlot("sfxGenerationStartedAt", sceneId);
 }

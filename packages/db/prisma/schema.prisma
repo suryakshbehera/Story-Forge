@@ -83,6 +83,12 @@ model Project {
   ownerId String?
   owner   User?   @relation(fields: [ownerId], references: [id], onDelete: SetNull)
 
+  // Phase 13 — per-project preferred model per job type, one resolution
+  // tier above AiModelOption.isDefault (the global fallback) and one tier
+  // below a per-action override where one exists (e.g. Shot.videoModelId).
+  // See ProjectModelDefault below.
+  modelDefaults ProjectModelDefault[]
+
   @@map("projects")
 }
 
@@ -121,6 +127,11 @@ model Story {
   // (previously an ephemeral, low-res proxy rebuilt on every Audio Cue Plan
   // draft — see Asset.storySilentVideoId).
   silentVideos Asset[] @relation("StorySilentVideo")
+
+  // Phase 12 — same in-flight generation lock contract as
+  // Scene.narrationGenerationStartedAt above, for this story's assembly jobs.
+  silentVideoGenerationStartedAt DateTime?
+  finalVideoGenerationStartedAt  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -220,6 +231,10 @@ model Episode {
 
   // Same reasoning as Story.silentVideos above.
   silentVideos Asset[] @relation("EpisodeSilentVideo")
+
+  // Same in-flight generation lock contract as Story's fields above.
+  silentVideoGenerationStartedAt DateTime?
+  finalVideoGenerationStartedAt  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -338,6 +353,18 @@ model Scene {
   music Asset[] @relation("SceneMusic")
   sfx   Asset[] @relation("SceneSfx")
 
+  // Phase 12 — in-flight generation locks, same contract as
+  // Shot.imageGenerationStartedAt below: stamped right before a call starts,
+  // cleared in a finally once it ends (success or failure either way), and
+  // treated as stale (i.e. nothing is actually running) past each job's own
+  // staleness threshold in lib/generation-claims.ts — a crashed request can't
+  // block that slot forever. One field per independently-generated slot on
+  // this model, mirroring musicPrompt/sfxPrompt already being separate.
+  narrationGenerationStartedAt DateTime?
+  videoGenerationStartedAt     DateTime?
+  musicGenerationStartedAt     DateTime?
+  sfxGenerationStartedAt       DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -376,14 +403,16 @@ model Shot {
   order       Int
   description String @db.Text
 
-  // Only meaningful for ILLUSTRATION scenes — each shot's image is held via
-  // Ken Burns for its own explicit duration, then concatenated in order (see
+  // ILLUSTRATION scenes: each shot's image is held via Ken Burns for its own
+  // explicit duration in this direction, then concatenated in order (see
   // durationSeconds below — the picture's timing no longer derives from
-  // scene audio). For IMAGE_TO_VIDEO scenes, each consecutive shot pair
-  // (shot[i]->shot[i+1]) generates its own clip instead, using the pair's
-  // two images as start/end keyframes — see generateSceneVideo() in
-  // scene-video.ts. TEXT_TO_VIDEO scenes don't use shots at all (no source
-  // image to speak of).
+  // scene audio). IMAGE_TO_VIDEO scenes: each consecutive shot pair
+  // (shot[i]->shot[i+1]) generates its own clip using the pair's two images
+  // as start/end keyframes, and the starting shot's cameraMovement is
+  // surfaced as an explicit camera instruction in that pair's prompt (see
+  // cameraMovementInstruction() in scene-video.ts) — free-text prompts alone
+  // get inconsistent camera-motion adherence across providers. TEXT_TO_VIDEO
+  // scenes don't use shots at all (no source image to speak of).
   cameraMovement CameraMovement @default(STATIC)
 
   // Optional explicit length. ILLUSTRATION (Phase 11+): the picture is
@@ -397,6 +426,16 @@ model Shot {
   // shots left unset evenly split the scene's target duration across its
   // pairs (see splitFixedDurations in video-segmentation.ts).
   durationSeconds Int?
+
+  // IMAGE_TO_VIDEO only — manual per-shot override of which VIDEO_GENERATION
+  // AiModelOption.id generates this shot's pair (shot[i]->shot[i+1], keyed
+  // by the pair's starting shot). Unset falls back to a CameraMovement-based
+  // preferred-model rule (AiModelOption.config.preferredCameraMovements),
+  // then to the scene's own default model — see resolvePairModel() in
+  // scene-video.ts. No relation (same reasoning as Asset.modelId): the
+  // referenced AiModelOption can be edited/deleted independently, and a
+  // dangling id is just treated as unset.
+  videoModelId String?
 
   images Asset[] @relation("ShotImages")
 
@@ -506,6 +545,10 @@ model DialogueLine {
   speed         Float?
 
   audio Asset[]
+
+  // Phase 12 — same in-flight generation lock contract as
+  // Scene.narrationGenerationStartedAt above, for this line's own voice call.
+  audioGenerationStartedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -663,6 +706,28 @@ model Asset {
   validationNotes   String?  @db.Text
   validationModelId String?
 
+  // Advisory-only auto-QC signal for generated VIDEO_CLIP assets — currently
+  // freeze/near-static detection only (see checkSegmentFrozen and
+  // generatePairSegments in scene-video.ts), a local ffmpeg check, not an AI
+  // call. Deliberately separate from validationPassed/validationNotes above:
+  // that field checks cast/location consistency against reference images,
+  // this one checks whether the clip's own motion looks broken. null = not
+  // checked (e.g. a STATIC-camera shot, where looking still is the intent) —
+  // never treated as a hard failure; a flagged clip is already auto-retried
+  // once before being kept, so this only fires when the retry still failed.
+  qcPassed Boolean?
+  qcNotes  String?  @db.Text
+
+  // Observability for IMAGE_TO_VIDEO shot-pair clips: whether this segment's
+  // generateVideo call actually included the pair's end-frame keyframe
+  // (OpenRouter's lastFrameDataUri) — false when the pair had no end shot,
+  // the resolved model declared supportsLastFrame: false, or this wasn't the
+  // pair's last sub-segment; null for TEXT_TO_VIDEO/legacy rows where the
+  // concept doesn't apply. Surfaced in the Takes panel so a scene that looks
+  // "off" can be diagnosed per-clip instead of guessed at — see
+  // generatePairSegments in scene-video.ts.
+  usedEndFrame Boolean?
+
   createdAt DateTime @default(now())
 
   @@map("assets")
@@ -804,10 +869,37 @@ model AiModelOption {
   isEnabled   Boolean @default(true)
   config      Json?
 
+  projectDefaults ProjectModelDefault[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("ai_model_options")
+}
+
+// Phase 13 — a project's preferred model for a given job type, overriding
+// the global AiModelOption.isDefault for calls made within that project.
+// Resolution order everywhere a model is picked: per-action override (e.g.
+// Shot.videoModelId) > this row, if one exists for the project+jobType and
+// aiModelOptionId isn't null > AiModelOption.isDefault (global fallback).
+// aiModelOptionId is nullable with onDelete SetNull (not Cascade) so
+// deleting the referenced AiModelOption row degrades this project back to
+// the global default instead of erroring or silently deleting the project's
+// preference row.
+model ProjectModelDefault {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  jobType   AiJobType
+
+  aiModelOptionId String?
+  aiModelOption   AiModelOption? @relation(fields: [aiModelOptionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, jobType])
+  @@map("project_model_defaults")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

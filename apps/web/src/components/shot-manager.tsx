@@ -26,6 +26,9 @@ import {
 } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { TermHint } from "@/components/term-hint";
+import { getModelsForJobType } from "@/lib/model-registry-cache";
+import type { ModelOption } from "@/components/model-select";
+import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
 
 export type CameraMovement = "STATIC" | "ZOOM_IN" | "ZOOM_OUT" | "PAN_LEFT" | "PAN_RIGHT" | "PAN_UP" | "PAN_DOWN";
 
@@ -53,6 +56,10 @@ export interface ShotItem {
   description: string;
   cameraMovement: CameraMovement;
   durationSeconds: number | null;
+  // IMAGE_TO_VIDEO only — manual override of which VIDEO_GENERATION model
+  // generates this shot's pair (shot[i]->shot[i+1]). null = no override, use
+  // the CameraMovement-based preferred-model rule, then the scene's default.
+  videoModelId: string | null;
   images: ShotImageItem[];
   // Non-null and recent means a generation is genuinely in flight (this tab,
   // another tab, or before a reload) — see lib/shot-image-generation.ts for
@@ -301,11 +308,13 @@ function ShotCard({
   const [description, setDescription] = useState(shot.description);
   const [cameraMovement, setCameraMovement] = useState<CameraMovement>(shot.cameraMovement);
   const [durationSeconds, setDurationSeconds] = useState(shot.durationSeconds?.toString() ?? "");
+  const [videoModelId, setVideoModelId] = useState(shot.videoModelId ?? "");
   const [saving, setSaving] = useState(false);
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [imageGenerating, setImageGenerating] = useState(() => isImageGenerationActive(shot.imageGenerationStartedAt));
   const [imageUploading, setImageUploading] = useState(false);
+  const [imageLastError, setImageLastError] = useState<GenerationErrorInfo | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const unmountedRef = useRef(false);
   const { confirm, ConfirmDialog } = useConfirm();
@@ -348,7 +357,8 @@ function ShotCard({
   const dirty =
     description !== shot.description ||
     cameraMovement !== shot.cameraMovement ||
-    durationSeconds !== (shot.durationSeconds?.toString() ?? "");
+    durationSeconds !== (shot.durationSeconds?.toString() ?? "") ||
+    videoModelId !== (shot.videoModelId ?? "");
 
   async function save() {
     setSaving(true);
@@ -360,6 +370,7 @@ function ShotCard({
           description,
           cameraMovement,
           durationSeconds: durationSeconds ? Number(durationSeconds) : null,
+          videoModelId: videoModelId || null,
         }),
       });
       if (!res.ok) throw new Error();
@@ -417,6 +428,7 @@ function ShotCard({
       return;
     }
     setImageGenerating(true);
+    setImageLastError(null);
     try {
       const res = await fetch(`/api/shots/${shot.id}/images/generate`, {
         method: "POST",
@@ -439,7 +451,9 @@ function ShotCard({
       }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Image generation failed.");
+        const message = body.error ?? "Image generation failed.";
+        setImageLastError({ message, modelId: body.modelId, provider: body.provider });
+        throw new Error(message);
       }
       const data: { image: ShotImageItem; missingReferenceFor: string[] } = await res.json();
       onUpdate({
@@ -538,6 +552,12 @@ function ShotCard({
               <CameraMovementSelect value={cameraMovement} onChange={setCameraMovement} />
             </div>
           )}
+          {sceneVisualMode === "IMAGE_TO_VIDEO" && (
+            <div className="grid gap-1.5">
+              <Label className="text-xs text-muted-foreground">Video model (optional override)</Label>
+              <ShotVideoModelSelect value={videoModelId} onChange={setVideoModelId} />
+            </div>
+          )}
           <div className="grid gap-1.5">
             <Label className="text-xs text-muted-foreground">Duration (s, optional override)</Label>
             <Input
@@ -591,6 +611,14 @@ function ShotCard({
           </div>
         )}
 
+        {imageLastError && (
+          <GenerationErrorBanner
+            error={imageLastError}
+            onRetry={generateImage}
+            onDismiss={() => setImageLastError(null)}
+          />
+        )}
+
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" disabled={imageGenerating} onClick={generateImage}>
             <ImagePlus className="size-3.5" />
@@ -629,6 +657,51 @@ function CameraMovementSelect({ value, onChange }: { value: CameraMovement; onCh
         {(Object.keys(CAMERA_MOVEMENT_LABELS) as CameraMovement[]).map((movement) => (
           <SelectItem key={movement} value={movement}>
             {CAMERA_MOVEMENT_LABELS[movement]}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+// Deliberately not @/components/model-select's ModelSelect — that component
+// auto-picks a fallback model whenever `value` is empty, which is right for
+// a required "which model generates this" field but wrong here: empty must
+// stay empty, meaning "no override, use the scene's CameraMovement-routed or
+// default model" (see resolvePairModel in scene-video.ts), not silently pin
+// this shot to whatever model happens to load first.
+const SCENE_DEFAULT_VALUE = "__scene_default__";
+
+function ShotVideoModelSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [models, setModels] = useState<ModelOption[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getModelsForJobType("VIDEO_GENERATION").then((data) => {
+      if (!cancelled) setModels(data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const items: Record<string, string> = { [SCENE_DEFAULT_VALUE]: "Scene default" };
+  for (const model of models ?? []) items[model.id] = model.displayName;
+
+  return (
+    <Select
+      value={value || SCENE_DEFAULT_VALUE}
+      onValueChange={(v) => v && onChange(v === SCENE_DEFAULT_VALUE ? "" : v)}
+      items={items}
+    >
+      <SelectTrigger className="w-48">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={SCENE_DEFAULT_VALUE}>Scene default</SelectItem>
+        {(models ?? []).map((model) => (
+          <SelectItem key={model.id} value={model.id}>
+            {model.displayName}
           </SelectItem>
         ))}
       </SelectContent>

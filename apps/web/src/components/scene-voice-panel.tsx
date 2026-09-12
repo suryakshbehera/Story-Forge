@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,6 +18,8 @@ import { ModelSelect } from "@/components/model-select";
 import { Mic, Plus, Save, Trash2, ChevronUp, ChevronDown, Wand2 } from "lucide-react";
 import { illustrationTimingMismatch } from "@/lib/illustration-timing";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { isGenerationActive } from "@/lib/generation-claims";
+import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
 
 // Only meaningful for ILLUSTRATION — IMAGE_TO_VIDEO already self-fits clip
 // length to voice via autoPairTargets (scene-video.ts). Fires right after a
@@ -62,6 +64,7 @@ export interface DialogueLineItem {
   speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: AudioTake[];
+  audioGenerationStartedAt: string | null;
 }
 
 export interface VoiceCharacterOption {
@@ -85,6 +88,7 @@ export function SceneVoicePanel({
   initialNarrationDeliveryNotes,
   initialNarrationSpeed,
   initialNarrationAudio,
+  initialNarrationGenerationStartedAt,
   initialDialogueLines,
 }: {
   sceneId: string;
@@ -98,6 +102,7 @@ export function SceneVoicePanel({
   initialNarrationDeliveryNotes: string | null;
   initialNarrationSpeed: number | null;
   initialNarrationAudio: AudioTake[];
+  initialNarrationGenerationStartedAt: string | null;
   initialDialogueLines: DialogueLineItem[];
 }) {
   const [narration, setNarration] = useState(initialNarration);
@@ -109,9 +114,39 @@ export function SceneVoicePanel({
   const [savingNarration, setSavingNarration] = useState(false);
   const [narrationAudio, setNarrationAudio] = useState(initialNarrationAudio);
   const [narrationModelId, setNarrationModelId] = useState("");
-  const [generatingNarration, setGeneratingNarration] = useState(false);
+  const [generatingNarration, setGeneratingNarration] = useState(() =>
+    isGenerationActive(initialNarrationGenerationStartedAt, "narration")
+  );
+  const [narrationLastError, setNarrationLastError] = useState<GenerationErrorInfo | null>(null);
   const [narrationDirectionModelId, setNarrationDirectionModelId] = useState("");
   const [directingNarration, setDirectingNarration] = useState(false);
+  const unmountedRef = useRef(false);
+
+  useEffect(() => () => {
+    unmountedRef.current = true;
+  }, []);
+
+  async function pollNarrationUntilIdle() {
+    while (!unmountedRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (unmountedRef.current) return;
+      const res = await fetch(`/api/scenes/${sceneId}/status`).catch(() => null);
+      if (!res?.ok) continue;
+      const updated: { narrationGenerationStartedAt: string | null; narrationAudio: AudioTake[] } = await res.json();
+      if (!isGenerationActive(updated.narrationGenerationStartedAt, "narration")) {
+        if (!unmountedRef.current) {
+          setNarrationAudio(updated.narrationAudio);
+          setGeneratingNarration(false);
+        }
+        return;
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (isGenerationActive(initialNarrationGenerationStartedAt, "narration")) pollNarrationUntilIdle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const narrationDirty =
     narration !== savedNarration ||
@@ -189,15 +224,23 @@ export function SceneVoicePanel({
       if (!ok) return;
     }
     setGeneratingNarration(true);
+    setNarrationLastError(null);
     try {
       const res = await fetch(`/api/scenes/${sceneId}/narration/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelId: narrationModelId }),
       });
+      if (res.status === 409) {
+        toast.warning("Already generating — watching for it to finish.");
+        pollNarrationUntilIdle();
+        return;
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Generation failed");
+        const message = body.error ?? "Generation failed";
+        setNarrationLastError({ message, modelId: body.modelId, provider: body.provider });
+        throw new Error(message);
       }
       const take: AudioTake = await res.json();
       setNarrationAudio((prev) => [take, ...prev.map((t) => ({ ...t, isSelected: false }))]);
@@ -205,9 +248,9 @@ export function SceneVoicePanel({
       if (sceneVisualMode === "ILLUSTRATION") {
         warnIfIllustrationTimingMismatch(sceneId, illustrationShotsTotalSeconds);
       }
+      setGeneratingNarration(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
-    } finally {
       setGeneratingNarration(false);
     }
   }
@@ -401,6 +444,15 @@ export function SceneVoicePanel({
             {generatingNarration ? "Generating…" : "Generate Audio"}
           </Button>
         </div>
+        {narrationLastError && (
+          <div className="mt-2">
+            <GenerationErrorBanner
+              error={narrationLastError}
+              onRetry={generateNarration}
+              onDismiss={() => setNarrationLastError(null)}
+            />
+          </div>
+        )}
         {narrationAudio.length > 0 && (
           <div className="mt-2 flex flex-col gap-1.5">
             {narrationAudio.map((take) => (
@@ -583,9 +635,37 @@ function DialogueLineRow({
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const [modelId, setModelId] = useState("");
-  const [generating, setGenerating] = useState(false);
+  const [generating, setGenerating] = useState(() => isGenerationActive(line.audioGenerationStartedAt, "dialogueAudio"));
   const [audio, setAudio] = useState(line.audio);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
   const { confirm, ConfirmDialog } = useConfirm();
+  const unmountedRef = useRef(false);
+
+  useEffect(() => () => {
+    unmountedRef.current = true;
+  }, []);
+
+  async function pollUntilGenerationIdle() {
+    while (!unmountedRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (unmountedRef.current) return;
+      const res = await fetch(`/api/dialogue-lines/${line.id}/status`).catch(() => null);
+      if (!res?.ok) continue;
+      const updated: DialogueLineItem = await res.json();
+      if (!isGenerationActive(updated.audioGenerationStartedAt, "dialogueAudio")) {
+        if (!unmountedRef.current) {
+          setAudio(updated.audio);
+          setGenerating(false);
+        }
+        return;
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (isGenerationActive(line.audioGenerationStartedAt, "dialogueAudio")) pollUntilGenerationIdle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const dirty =
     text !== line.text ||
@@ -670,15 +750,23 @@ function DialogueLineRow({
       if (!ok) return;
     }
     setGenerating(true);
+    setLastError(null);
     try {
       const res = await fetch(`/api/dialogue-lines/${line.id}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelId }),
       });
+      if (res.status === 409) {
+        toast.warning("Already generating — watching for it to finish.");
+        pollUntilGenerationIdle();
+        return;
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Generation failed");
+        const message = body.error ?? "Generation failed";
+        setLastError({ message, modelId: body.modelId, provider: body.provider });
+        throw new Error(message);
       }
       const take: AudioTake = await res.json();
       setAudio((prev) => [take, ...prev.map((t) => ({ ...t, isSelected: false }))]);
@@ -686,9 +774,9 @@ function DialogueLineRow({
       if (sceneVisualMode === "ILLUSTRATION") {
         warnIfIllustrationTimingMismatch(sceneId, illustrationShotsTotalSeconds);
       }
+      setGenerating(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
-    } finally {
       setGenerating(false);
     }
   }
@@ -778,6 +866,11 @@ function DialogueLineRow({
           {generating ? "Generating…" : "Generate Audio"}
         </Button>
       </div>
+      {lastError && (
+        <div className="mt-1.5">
+          <GenerationErrorBanner error={lastError} onRetry={generate} onDismiss={() => setLastError(null)} />
+        </div>
+      )}
       {audio.length > 0 && (
         <div className="mt-1.5 flex flex-col gap-1.5">
           {audio.map((take) => (

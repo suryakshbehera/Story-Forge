@@ -14,6 +14,32 @@
 
 export class SarvamError extends Error {}
 
+// Sarvam has no list-speakers endpoint (confirmed against their docs
+// 2026-09-11: docs.sarvam.ai/api-reference-docs/api-guides-tutorials/
+// text-to-speech/how-to/change-the-speaker-voice) — the roster is a fixed,
+// documented set, hardcoded here rather than faked as an API call. This is
+// the bulbul:v3 roster specifically (the model this app defaults new voice
+// selections to); bulbul:v2 has a different, smaller roster ("anushka" is
+// its default) not fully enumerated in Sarvam's own docs, so it isn't
+// listed here — a project still on bulbul:v2 keeps working (voiceId stays
+// free text, unvalidated), it just won't appear pre-populated in the picker.
+export interface SarvamSpeaker {
+  voiceId: string;
+  gender: "male" | "female";
+}
+
+export const SARVAM_SPEAKERS: SarvamSpeaker[] = [
+  ...[
+    "shubh", "aditya", "rahul", "rohan", "amit", "dev", "ratan", "varun", "manan", "sumit",
+    "kabir", "aayan", "ashutosh", "advait", "anand", "tarun", "sunny", "mani", "gokul", "vijay",
+    "mohit", "rehan", "soham",
+  ].map((voiceId) => ({ voiceId, gender: "male" as const })),
+  ...[
+    "ritu", "priya", "neha", "pooja", "simran", "kavya", "ishita", "shreya", "roopa", "tanya",
+    "shruti", "suhani", "kavitha", "rupali",
+  ].map((voiceId) => ({ voiceId, gender: "female" as const })),
+];
+
 function requireApiKey(): string {
   const apiKey = process.env.SARVAM_API_KEY;
   if (!apiKey) {

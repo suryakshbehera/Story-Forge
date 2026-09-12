@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,6 +9,8 @@ import { ModelSelect } from "@/components/model-select";
 import type { AudioTake } from "@/components/scene-voice-panel";
 import { Sparkles, Upload, Trash2, Save } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { isGenerationActive } from "@/lib/generation-claims";
+import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
 
 // Two independent slots (Music, SFX). musicPrompt/sfxPrompt are hand-edited
 // here (or populated by the Audio Cue Plan panel above the Scenes card —
@@ -23,6 +25,8 @@ export function SceneAudioPanel({
   initialSfxVolume,
   initialMusic,
   initialSfx,
+  initialMusicGenerationStartedAt,
+  initialSfxGenerationStartedAt,
 }: {
   sceneId: string;
   initialMusicPrompt: string;
@@ -31,6 +35,8 @@ export function SceneAudioPanel({
   initialSfxVolume: number;
   initialMusic: AudioTake[];
   initialSfx: AudioTake[];
+  initialMusicGenerationStartedAt: string | null;
+  initialSfxGenerationStartedAt: string | null;
 }) {
   const [musicPrompt, setMusicPrompt] = useState(initialMusicPrompt);
   const [savedMusicPrompt, setSavedMusicPrompt] = useState(initialMusicPrompt);
@@ -91,6 +97,8 @@ export function SceneAudioPanel({
         dirty={dirty}
         onSave={save}
         initialTakes={initialMusic}
+        staleKey="music"
+        initialGenerationStartedAt={initialMusicGenerationStartedAt}
       />
 
       <AudioTrackSection
@@ -106,6 +114,8 @@ export function SceneAudioPanel({
         dirty={dirty}
         onSave={save}
         initialTakes={initialSfx}
+        staleKey="sfx"
+        initialGenerationStartedAt={initialSfxGenerationStartedAt}
       />
 
       <Button size="sm" onClick={() => save()} disabled={!dirty || saving} className="self-start">
@@ -129,6 +139,8 @@ function AudioTrackSection({
   dirty,
   onSave,
   initialTakes,
+  staleKey,
+  initialGenerationStartedAt,
 }: {
   label: string;
   sceneId: string;
@@ -142,13 +154,49 @@ function AudioTrackSection({
   dirty: boolean;
   onSave: (opts?: { silent?: boolean }) => Promise<boolean>;
   initialTakes: AudioTake[];
+  staleKey: "music" | "sfx";
+  initialGenerationStartedAt: string | null;
 }) {
   const [modelId, setModelId] = useState("");
-  const [generating, setGenerating] = useState(false);
+  const [generating, setGenerating] = useState(() => isGenerationActive(initialGenerationStartedAt, staleKey));
   const [uploading, setUploading] = useState(false);
   const [takes, setTakes] = useState(initialTakes);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const { confirm, ConfirmDialog } = useConfirm();
+  const unmountedRef = useRef(false);
+
+  useEffect(() => () => {
+    unmountedRef.current = true;
+  }, []);
+
+  async function pollUntilGenerationIdle() {
+    while (!unmountedRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (unmountedRef.current) return;
+      const res = await fetch(`/api/scenes/${sceneId}/status`).catch(() => null);
+      if (!res?.ok) continue;
+      const updated: {
+        musicGenerationStartedAt: string | null;
+        sfxGenerationStartedAt: string | null;
+        music: AudioTake[];
+        sfx: AudioTake[];
+      } = await res.json();
+      const startedAt = staleKey === "music" ? updated.musicGenerationStartedAt : updated.sfxGenerationStartedAt;
+      if (!isGenerationActive(startedAt, staleKey)) {
+        if (!unmountedRef.current) {
+          setTakes(staleKey === "music" ? updated.music : updated.sfx);
+          setGenerating(false);
+        }
+        return;
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (isGenerationActive(initialGenerationStartedAt, staleKey)) pollUntilGenerationIdle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function generate() {
     if (!modelId) {
@@ -164,22 +212,30 @@ function AudioTrackSection({
       return;
     }
     setGenerating(true);
+    setLastError(null);
     try {
       const res = await fetch(`/api/scenes/${sceneId}/${basePath}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelId }),
       });
+      if (res.status === 409) {
+        toast.warning("Already generating — watching for it to finish.");
+        pollUntilGenerationIdle();
+        return;
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Generation failed");
+        const message = body.error ?? "Generation failed";
+        setLastError({ message, modelId: body.modelId, provider: body.provider });
+        throw new Error(message);
       }
       const take: AudioTake = await res.json();
       setTakes((prev) => [take, ...prev.map((t) => ({ ...t, isSelected: false }))]);
       toast.success(`${label} generated.`);
+      setGenerating(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed.");
-    } finally {
       setGenerating(false);
     }
   }
@@ -271,6 +327,10 @@ function AudioTrackSection({
           }}
         />
       </div>
+
+      {lastError && (
+        <GenerationErrorBanner error={lastError} onRetry={generate} onDismiss={() => setLastError(null)} />
+      )}
 
       {takes.length > 0 && (
         <div className="flex flex-col gap-1.5">

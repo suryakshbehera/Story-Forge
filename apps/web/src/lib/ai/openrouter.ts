@@ -307,7 +307,14 @@ async function pollVideoJob(jobId: string, apiKey: string): Promise<string> {
       return url;
     }
     if (data.status === "failed") {
-      throw new OpenRouterError("OpenRouter video generation job failed.");
+      // OpenRouter's job status payload carries the actual failure reason
+      // under one of a few possible keys depending on which upstream
+      // provider ran the job — surface whatever's there instead of a bare
+      // "failed" with no way to diagnose it.
+      const reason = data.error?.message ?? data.error ?? data.failure_reason ?? data.reason;
+      throw new OpenRouterError(
+        `OpenRouter video generation job failed.${reason ? ` ${typeof reason === "string" ? reason : JSON.stringify(reason)}` : ` Raw status: ${JSON.stringify(data)}`}`
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }

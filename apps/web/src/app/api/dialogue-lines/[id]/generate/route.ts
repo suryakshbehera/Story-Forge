@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
 import { ElevenLabsError } from "@/lib/ai/elevenlabs";
 import { SarvamError } from "@/lib/ai/sarvam";
-import { generateDialogueAudio } from "@/lib/voice";
+import { generateDialogueAudio, claimDialogueAudioGeneration, releaseDialogueAudioGeneration } from "@/lib/voice";
 
 const bodySchema = z.object({
   modelId: z.string().optional(),
@@ -21,16 +21,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     );
   }
 
+  const claimed = await claimDialogueAudioGeneration(dialogueLineId);
+  if (!claimed) {
+    return NextResponse.json({ error: "Audio is already generating for this line." }, { status: 409 });
+  }
+
   try {
     const audio = await generateDialogueAudio({ dialogueLineId, modelId: model.modelId, provider: model.provider });
     return NextResponse.json(audio, { status: 201 });
   } catch (error) {
     if (error instanceof ElevenLabsError || error instanceof SarvamError) {
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      return NextResponse.json({ error: error.message, modelId: model.modelId, provider: model.provider }, { status: 502 });
     }
     if (error instanceof Error) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return NextResponse.json({ error: error.message, modelId: model.modelId, provider: model.provider }, { status: 400 });
     }
     throw error;
+  } finally {
+    await releaseDialogueAudioGeneration(dialogueLineId);
   }
 }

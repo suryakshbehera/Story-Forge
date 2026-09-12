@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Save, Trash2, Lock } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { TermHint } from "@/components/term-hint";
+import { VoicePicker } from "@/components/voice-picker";
 
 interface CharacterFields {
   name: string;
@@ -135,8 +136,8 @@ export function CharacterDetailForm({
           onChange={(e) => update("characterArc", e.target.value)}
         />
       </Field>
-      <Field label={`Voice (ElevenLabs voice ID, or Sarvam speaker name e.g. "shubh" — must match whichever provider you pick when generating)`}>
-        <Input value={fields.voiceName} onChange={(e) => update("voiceName", e.target.value)} />
+      <Field label="Voice — must match whichever provider you pick when generating">
+        <VoicePicker value={fields.voiceName} onChange={(v) => update("voiceName", v)} />
       </Field>
       <p className="-mt-2 text-xs text-muted-foreground">
         Used for every dialogue line this character speaks, in every scene — set it once here so the

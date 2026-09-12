@@ -3,9 +3,10 @@ import os from "os";
 import path from "path";
 import { prisma, type Asset, type Prisma, type CameraMovement } from "@/lib/db";
 import { parentWhere, type ScenesParentType } from "@/lib/scenes";
-import { runFfmpeg, probeDuration, hasAudioStream } from "@/lib/ffmpeg";
+import { runFfmpeg, probeDuration, probeFps, hasAudioStream } from "@/lib/ffmpeg";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { effectiveShotSeconds, MIN_SHOT_SECONDS } from "@/lib/illustration-timing";
+import { STALE_MS } from "@/lib/generation-claims";
 
 // Canonical output format every intermediate segment is normalized to, so
 // ffmpeg's concat demuxer can stream-copy them together at the end without
@@ -35,6 +36,30 @@ const FULL_RES: VisualTarget = { width: WIDTH, height: HEIGHT, fps: FPS };
 
 function scalePadFilter({ width, height, fps }: VisualTarget): string {
   return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps}`;
+}
+
+// Same scale/pad as scalePadFilter, but without its trailing fps= stage —
+// used only for real generated clips (buildVisualSegment's needsClip branch),
+// where the frame-rate stage is decided per-clip by frameRateFilter below
+// instead of always being a plain fps conversion. ILLUSTRATION's Ken Burns
+// output has no "native fps" to speak of (it's synthesized by ffmpeg
+// directly at the target rate), so it keeps using scalePadFilter unchanged.
+function scalePadOnlyFilter({ width, height }: Pick<VisualTarget, "width" | "height">): string {
+  return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`;
+}
+
+// Many image-to-video providers output well below the assembly's 30fps
+// target (8-16fps is common) — plain frame duplication (ffmpeg's `fps`
+// filter) still hits the target rate but stays visibly choppy. minterpolate
+// does true motion-compensated interpolation instead, at real CPU cost and
+// with some risk of ghosting/warping on fast or complex motion, so it's only
+// used when the source is meaningfully below target; a clip already close to
+// 30fps gets the cheap, artifact-free conversion it always got.
+const LOW_FPS_INTERPOLATION_THRESHOLD = 20;
+
+function frameRateFilter(sourceFps: number, targetFps: number): string {
+  if (sourceFps >= LOW_FPS_INTERPOLATION_THRESHOLD) return `fps=${targetFps}`;
+  return `minterpolate=fps=${targetFps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`;
 }
 
 // Ken Burns pan/zoom for ILLUSTRATION scenes — a deterministic ffmpeg
@@ -98,6 +123,49 @@ export function serializeFinalVideo(asset: Asset): SerializedFinalVideo {
 
 function parentVideoWhere(parentType: ScenesParentType, parentId: string): Prisma.AssetWhereInput {
   return parentType === "story" ? { storyVideoId: parentId } : { episodeVideoId: parentId };
+}
+
+// Same claim/release contract as claimShotForImageGeneration in
+// shot-images.ts, parameterized over the dual-optional Story/Episode parent
+// (same pattern as parentVideoWhere above) since both assembly jobs are
+// single-instance-per-parent, not per-scene.
+async function claimAssembly(
+  field: "silentVideoGenerationStartedAt" | "finalVideoGenerationStartedAt",
+  parentType: ScenesParentType,
+  parentId: string,
+  staleMs: number
+): Promise<boolean> {
+  const staleThreshold = new Date(Date.now() - staleMs);
+  const where = { id: parentId, OR: [{ [field]: null }, { [field]: { lt: staleThreshold } }] };
+  const data = { [field]: new Date() };
+  const result =
+    parentType === "story"
+      ? await prisma.story.updateMany({ where, data })
+      : await prisma.episode.updateMany({ where, data });
+  return result.count > 0;
+}
+
+async function releaseAssembly(
+  field: "silentVideoGenerationStartedAt" | "finalVideoGenerationStartedAt",
+  parentType: ScenesParentType,
+  parentId: string
+): Promise<void> {
+  const data = { [field]: null };
+  if (parentType === "story") await prisma.story.update({ where: { id: parentId }, data });
+  else await prisma.episode.update({ where: { id: parentId }, data });
+}
+
+export function claimSilentAssembly(parentType: ScenesParentType, parentId: string) {
+  return claimAssembly("silentVideoGenerationStartedAt", parentType, parentId, STALE_MS.silentAssembly);
+}
+export function releaseSilentAssembly(parentType: ScenesParentType, parentId: string) {
+  return releaseAssembly("silentVideoGenerationStartedAt", parentType, parentId);
+}
+export function claimFinalAssembly(parentType: ScenesParentType, parentId: string) {
+  return claimAssembly("finalVideoGenerationStartedAt", parentType, parentId, STALE_MS.finalAssembly);
+}
+export function releaseFinalAssembly(parentType: ScenesParentType, parentId: string) {
+  return releaseAssembly("finalVideoGenerationStartedAt", parentType, parentId);
 }
 
 function belongsToParent(asset: Asset, parentType: ScenesParentType, parentId: string): boolean {
@@ -303,9 +371,26 @@ async function buildVisualSegment(
   }
 
   const clipPath = await resolveSceneClipPath(scene.videoClips, workDir, index);
-  await runFfmpeg(["-i", clipPath, "-vf", scalePadFilter(target), "-pix_fmt", "yuv420p", "-an", outPath]);
+  // A probe failure (corrupt/unusual file) falls back to treating the source
+  // as already at-target-fps — skips interpolation rather than blocking the
+  // whole scene's assembly on a smoothness nice-to-have.
+  const sourceFps = await probeFps(clipPath).catch(() => target.fps);
+  const visualFilter = `${scalePadOnlyFilter(target)},${frameRateFilter(sourceFps, target.fps)}`;
+  await runFfmpeg(["-i", clipPath, "-vf", visualFilter, "-pix_fmt", "yuv420p", "-an", outPath]);
   return { path: outPath, clipPath };
 }
+
+// Per-frame color normalization (stretches each frame's own range toward a
+// shared black/white point, channels locked together via independence=0 so
+// it corrects exposure/contrast without shifting color balance/tint) applied
+// wherever independently-generated clips get concatenated. smoothing=0
+// disables temporal blending so it reacts instantly at a cut instead of
+// bleeding across it — each clip is normalized on its own terms, not toward
+// its neighbor. This is a real but modest fix for the common "one clip came
+// back washed-out/dark next to a normal one" case; it does not do true
+// pairwise tone-matching between clips (see the comment on
+// resolveSceneClipPath below for why that's out of scope here).
+const COLOR_NORMALIZE_FILTER = "normalize=smoothing=0:independence=0";
 
 // A scene's selected take may be one clip (legacy/single-segment) or several
 // frame-chained segments generated by one call (see Asset.videoBatchId).
@@ -314,7 +399,13 @@ async function buildVisualSegment(
 // (the scale/pad step above, and extractClipAudioLayer below) can keep
 // treating "this scene's clip" as a single file. Re-encodes rather than
 // `-c copy`: independently generated segments aren't guaranteed to share
-// identical codec parameters.
+// identical codec parameters. This is also the more visible seam than
+// scene-to-scene cuts (see crossfadeConcatSegments) — these are hard cuts
+// with zero smoothing at all between shot-pair clips inside one scene, so
+// COLOR_NORMALIZE_FILTER is applied here rather than attempting true
+// pairwise color-matching (which would need per-clip stats extraction and a
+// switch from this concat demuxer to a filter-graph concat — real new
+// surface area for a per-clip fix that's already "good enough" here).
 async function resolveSceneClipPath(clips: Asset[], workDir: string, index: number): Promise<string> {
   if (clips.length <= 1) {
     return writeAssetToTemp(clips[0], workDir, `scene${index}-clip`);
@@ -323,7 +414,14 @@ async function resolveSceneClipPath(clips: Asset[], workDir: string, index: numb
   const listPath = path.join(workDir, `scene${index}-clips-list.txt`);
   await fs.writeFile(listPath, concatListFile(rawPaths));
   const outPath = path.join(workDir, `scene${index}-clip-concat.mp4`);
-  await runFfmpeg(["-f", "concat", "-safe", "0", "-i", listPath, "-pix_fmt", "yuv420p", outPath]);
+  await runFfmpeg([
+    "-f", "concat",
+    "-safe", "0",
+    "-i", listPath,
+    "-vf", COLOR_NORMALIZE_FILTER,
+    "-pix_fmt", "yuv420p",
+    outPath,
+  ]);
   return outPath;
 }
 
@@ -509,6 +607,14 @@ async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, 
     audioLabel = aOut;
     runningDuration = runningDuration + durations[i] - d;
   }
+
+  // Applied once to the fully-crossfaded output rather than per-input —
+  // same COLOR_NORMALIZE_FILTER as resolveSceneClipPath's within-scene cuts,
+  // reacting per-frame (smoothing=0) so it still corrects each scene's own
+  // clip on its own terms even inside a blended transition frame, without
+  // needing a separate normalize stage per input in this filter graph.
+  filterParts.push(`[${videoLabel}]${COLOR_NORMALIZE_FILTER}[normv]`);
+  videoLabel = "normv";
 
   const inputArgs = segmentPaths.flatMap((p) => ["-i", p]);
   await runFfmpeg([

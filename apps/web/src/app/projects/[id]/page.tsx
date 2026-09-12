@@ -97,9 +97,14 @@ export default async function ProjectOverviewPage({ params }: { params: Promise<
         </CardContent>
       </Card>
 
-      <Button size="lg" className="self-start" render={<Link href={status.nextStepHref} />}>
-        {allDone ? "Review your final render" : "Continue"}
-      </Button>
+      <div className="flex items-center gap-3">
+        <Button size="lg" render={<Link href={status.nextStepHref} />}>
+          {allDone ? "Review your final render" : "Continue"}
+        </Button>
+        <Button variant="outline" render={<Link href={`/projects/${id}/model-settings`} />}>
+          Model Settings
+        </Button>
+      </div>
     </div>
   );
 }

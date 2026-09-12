@@ -8,7 +8,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { getModelsForJobType } from "@/lib/model-registry-cache";
+import { getModelsForJobType, getProjectModelDefaults } from "@/lib/model-registry-cache";
 import type { AiJobType } from "db";
 
 export interface ModelOption {
@@ -26,6 +26,7 @@ export function ModelSelect({
   value,
   onChange,
   onModelsChange,
+  projectId,
 }: {
   jobType: AiJobType;
   // Always a defined string ("" = nothing selected yet) — Base UI's Select
@@ -38,26 +39,37 @@ export function ModelSelect({
   // scene video panel) read the currently selected model's `config` for
   // segment-duration/resolution suggestions without re-fetching themselves.
   onModelsChange?: (models: ModelOption[]) => void;
+  // Optional — when given, the auto-selected fallback checks this project's
+  // ProjectModelDefault for this jobType before falling back to the global
+  // AiModelOption.isDefault. Omitted call sites keep today's behavior
+  // (global default only). A per-action override the caller already has in
+  // `value` always wins over both — this only affects what an *empty*
+  // value resolves to.
+  projectId?: string;
 }) {
   const [models, setModels] = useState<ModelOption[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    getModelsForJobType(jobType)
-      .then((data) => {
-        if (cancelled) return;
-        setModels(data);
-        onModelsChange?.(data);
-        if (!value) {
-          const fallback = data.find((m) => m.isDefault) ?? data[0];
-          if (fallback) onChange(fallback.id);
-        }
-      });
+    Promise.all([
+      getModelsForJobType(jobType),
+      projectId ? getProjectModelDefaults(projectId) : Promise.resolve<Record<string, string | null>>({}),
+    ]).then(([data, projectDefaults]) => {
+      if (cancelled) return;
+      setModels(data);
+      onModelsChange?.(data);
+      if (!value) {
+        const projectDefaultId = projectDefaults[jobType];
+        const projectDefault = projectDefaultId ? data.find((m) => m.id === projectDefaultId) : undefined;
+        const fallback = projectDefault ?? data.find((m) => m.isDefault) ?? data[0];
+        if (fallback) onChange(fallback.id);
+      }
+    });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobType]);
+  }, [jobType, projectId]);
 
   if (models !== null && models.length === 0) {
     return (

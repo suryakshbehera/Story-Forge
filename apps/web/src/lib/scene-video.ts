@@ -3,14 +3,35 @@ import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { prisma, type Asset } from "@/lib/db";
+import { prisma, type Asset, type CameraMovement } from "@/lib/db";
 import { callChatModel, generateVideo, OpenRouterError } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
-import { extractLastFrame } from "@/lib/ffmpeg";
+import { extractLastFrame, detectFrozenSeconds, probeDuration } from "@/lib/ffmpeg";
 import { getSceneVoiceDurationSeconds } from "@/lib/scene-audio";
 import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
 import { loadReferenceDataUris, type ValidationEntity } from "@/lib/shot-images";
-import type { VideoModelConfig } from "@/lib/video-model-config";
+import { parseVideoModelConfig, type VideoModelConfig } from "@/lib/video-model-config";
+import { listModelsForJob } from "@/lib/ai/models";
+import { STALE_MS } from "@/lib/generation-claims";
+
+// Same claim/release contract as claimShotForImageGeneration in
+// shot-images.ts — atomic updateMany so two concurrent requests can't both
+// win the claim.
+export async function claimSceneVideoGeneration(sceneId: string): Promise<boolean> {
+  const staleThreshold = new Date(Date.now() - STALE_MS.video);
+  const result = await prisma.scene.updateMany({
+    where: {
+      id: sceneId,
+      OR: [{ videoGenerationStartedAt: null }, { videoGenerationStartedAt: { lt: staleThreshold } }],
+    },
+    data: { videoGenerationStartedAt: new Date() },
+  });
+  return result.count > 0;
+}
+
+export async function releaseSceneVideoGeneration(sceneId: string): Promise<void> {
+  await prisma.scene.update({ where: { id: sceneId }, data: { videoGenerationStartedAt: null } });
+}
 
 export interface SerializedSceneVideoClip {
   id: string;
@@ -25,6 +46,20 @@ export interface SerializedSceneVideoClip {
   // Which consecutive shot pair this clip belongs to (0-based). Null for
   // TEXT_TO_VIDEO clips and legacy rows predating per-pair generation.
   pairIndex: number | null;
+  // Advisory-only auto-QC signal (see checkSegmentFrozen in this file) —
+  // null means not checked (e.g. a STATIC-camera shot), never a failure.
+  qcPassed: boolean | null;
+  qcNotes: string | null;
+  // Which model actually generated this segment (a pair's own resolved
+  // model, not necessarily the scene's default — see resolvePairModel in
+  // buildImageToVideoPlan) and the exact prompt sent to it. Surfaced in the
+  // Takes panel's per-clip details so an off-looking 45s scene can be
+  // diagnosed pair-by-pair instead of guessed at.
+  modelId: string | null;
+  prompt: string | null;
+  // Whether this segment's generateVideo call actually included the pair's
+  // end-frame keyframe. null for TEXT_TO_VIDEO/legacy rows.
+  usedEndFrame: boolean | null;
 }
 
 export function serializeSceneVideoClip(asset: Asset): SerializedSceneVideoClip {
@@ -36,12 +71,345 @@ export function serializeSceneVideoClip(asset: Asset): SerializedSceneVideoClip 
     batchId: asset.videoBatchId,
     segmentOrder: asset.videoSegmentOrder,
     pairIndex: asset.videoPairIndex,
+    qcPassed: asset.qcPassed,
+    qcNotes: asset.qcNotes,
+    modelId: asset.modelId,
+    prompt: asset.prompt,
+    usedEndFrame: asset.usedEndFrame,
   };
 }
 
 function extFromMime(mimeType: string): string {
   if (mimeType === "video/webm") return "webm";
   return "mp4";
+}
+
+// Shot.cameraMovement (set by generateShots' shot breakdown, see shots.ts) is
+// otherwise never read again — this is what actually surfaces it to the
+// video model, since free-text prompts alone get inconsistent camera-motion
+// adherence across providers.
+function cameraMovementInstruction(movement: CameraMovement): string {
+  switch (movement) {
+    case "ZOOM_IN":
+      return "Camera: slow zoom in.";
+    case "ZOOM_OUT":
+      return "Camera: slow zoom out.";
+    case "PAN_LEFT":
+      return "Camera: pans left.";
+    case "PAN_RIGHT":
+      return "Camera: pans right.";
+    case "PAN_UP":
+      return "Camera: tilts up.";
+    case "PAN_DOWN":
+      return "Camera: tilts down.";
+    case "STATIC":
+    default:
+      return "Camera: static, no camera movement.";
+  }
+}
+
+// A pair/scene leg longer than the model's own max duration is frame-chained
+// into several calls (see chainNextFrame) — each one after the first is
+// seeded with the previous call's own last frame. Sending every sub-segment
+// the same unqualified prompt reads, to the model, as "start this action from
+// scratch," so a mid-motion frame tends to get the opening action replayed
+// instead of continued. Tagging each call with its position fixes that.
+function subSegmentPrompt(basePrompt: string, subIndex: number, total: number): string {
+  if (total <= 1) return basePrompt;
+  const isLast = subIndex === total - 1;
+  const positionNote =
+    subIndex === 0
+      ? `This is segment 1 of ${total} — begin the motion described above.`
+      : isLast
+        ? `This is segment ${subIndex + 1} of ${total}, continuing directly from the motion already in progress — do not restart or repeat the earlier action. Bring the motion to completion.`
+        : `This is segment ${subIndex + 1} of ${total}, continuing directly from the motion already in progress — do not restart or repeat the earlier action.`;
+  return `${basePrompt}\n\n${positionNote}`;
+}
+
+async function loadSceneForVideoGeneration(sceneId: string) {
+  return prisma.scene.findUniqueOrThrow({
+    where: { id: sceneId },
+    include: {
+      shots: { orderBy: { order: "asc" }, include: { images: { where: { isSelected: true }, take: 1 } } },
+      characters: { include: { referenceImages: true } },
+      locations: { include: { referenceImages: true } },
+    },
+  });
+}
+
+type SceneForVideo = Awaited<ReturnType<typeof loadSceneForVideoGeneration>>;
+type SceneShot = SceneForVideo["shots"][number];
+
+async function loadShotImageDataUri(shot: SceneShot): Promise<string> {
+  const image = shot.images[0];
+  if (!image) {
+    throw new OpenRouterError(`Shot ${shot.order} needs a selected image before generating a video clip.`);
+  }
+  const bytes = await storage.get(image.storageKey);
+  if (!bytes) {
+    throw new OpenRouterError(`Shot ${shot.order}'s selected image is missing from storage.`);
+  }
+  return `data:${image.mimeType ?? "image/png"};base64,${bytes.toString("base64")}`;
+}
+
+// Same roster generateShotImage() uses for image-generation consistency —
+// locked characters (an unlocked character's look is allowed to vary, so
+// it isn't a reference worth pinning) plus every tagged location.
+async function resolveCastReferenceDataUris(scene: SceneForVideo, includeCastReferences: boolean | undefined): Promise<string[]> {
+  const castTargets: ValidationEntity[] = [
+    ...scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
+    ...scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
+  ].filter((t) => t.referenceImages.length > 0);
+  return includeCastReferences && castTargets.length > 0 ? loadReferenceDataUris(castTargets) : [];
+}
+
+async function chainNextFrame(workDir: string, buffer: Buffer, mimeType: string, label: string): Promise<string> {
+  const ext = extFromMime(mimeType);
+  const rawPath = path.join(workDir, `${label}.${ext}`);
+  await fs.writeFile(rawPath, buffer);
+  const framePath = path.join(workDir, `${label}-lastframe.png`);
+  await extractLastFrame(rawPath, framePath);
+  const frameBytes = await fs.readFile(framePath);
+  return `data:image/png;base64,${frameBytes.toString("base64")}`;
+}
+
+// motionPrompt is pure camera/motion direction "layered on top of" the scene
+// (see its schema comment and MOTION_PROMPT_SYSTEM_PROMPT below), so the
+// description/transition text is always included and motionPrompt — when
+// set — is appended rather than replacing it. cameraMovementInstruction adds
+// the pair's starting shot's own camera direction on top of that.
+function buildPairPrompt(scene: SceneForVideo, pair: PairPlan): string {
+  const descriptionOrTransition = pair.endShot
+    ? `${scene.description}\n\nTransition: from "${pair.startShot.description}" to "${pair.endShot.description}"`
+    : scene.description;
+  const basePairPrompt = scene.motionPrompt?.trim()
+    ? `${descriptionOrTransition}\n\nMotion: ${scene.motionPrompt.trim()}`
+    : descriptionOrTransition;
+  return `${basePairPrompt}\n\n${cameraMovementInstruction(pair.startShot.cameraMovement)}`;
+}
+
+interface PairPlan {
+  startShot: SceneShot;
+  endShot: SceneShot | undefined;
+}
+
+interface ResolvedPairModel {
+  modelId: string;
+  modelConfig: VideoModelConfig | null;
+}
+
+// Builds the consecutive shot-pair breakdown for an IMAGE_TO_VIDEO scene,
+// resolves each pair's model (manual Shot.videoModelId override, else a
+// CameraMovement-routing rule, else the scene-level fallback — see
+// resolvePairModel below), and plans each pair's target duration. Shared by
+// generateSceneVideo (the whole scene) and regenerateScenePairVideo (a
+// single pair retake) so both use identical planning.
+async function buildImageToVideoPlan(
+  scene: SceneForVideo,
+  sceneId: string,
+  fallback: ResolvedPairModel
+): Promise<{
+  pairs: PairPlan[];
+  pairModels: ResolvedPairModel[];
+  sceneTargetDuration: number | null;
+  autoPairTargets: (number | undefined)[];
+}> {
+  const sceneTargetDuration = scene.videoDurationSeconds ?? (await getSceneVoiceDurationSeconds(sceneId));
+
+  const pairs: PairPlan[] =
+    scene.shots.length === 1
+      ? [{ startShot: scene.shots[0], endShot: undefined }]
+      : scene.shots.slice(0, -1).map((startShot, i) => ({ startShot, endShot: scene.shots[i + 1] }));
+
+  const overrideIds = [...new Set(pairs.map((p) => p.startShot.videoModelId).filter((id): id is string => !!id))];
+  const overrideOptions = overrideIds.length
+    ? await prisma.aiModelOption.findMany({
+        where: { id: { in: overrideIds }, jobType: "VIDEO_GENERATION", isEnabled: true },
+      })
+    : [];
+  const overrideById = new Map(overrideOptions.map((o) => [o.id, o]));
+
+  // Only fetched if at least one pair actually needs the rule lookup — most
+  // scenes have no preferredCameraMovements configured at all.
+  let cameraMovementOptions: Awaited<ReturnType<typeof listModelsForJob>> | null = null;
+  async function resolveCameraMovementModel(movement: CameraMovement) {
+    cameraMovementOptions ??= await listModelsForJob("VIDEO_GENERATION");
+    return (
+      cameraMovementOptions.find((o) => parseVideoModelConfig(o.config)?.preferredCameraMovements?.includes(movement)) ?? null
+    );
+  }
+
+  async function resolvePairModel(shot: SceneShot): Promise<ResolvedPairModel> {
+    const override = shot.videoModelId ? overrideById.get(shot.videoModelId) : undefined;
+    if (override) return { modelId: override.modelId, modelConfig: parseVideoModelConfig(override.config) };
+    const ruled = await resolveCameraMovementModel(shot.cameraMovement);
+    if (ruled) return { modelId: ruled.modelId, modelConfig: parseVideoModelConfig(ruled.config) };
+    return fallback;
+  }
+
+  const pairModels = await Promise.all(pairs.map((pair) => resolvePairModel(pair.startShot)));
+
+  function sameFixedDurations(a: VideoModelConfig | null, b: VideoModelConfig | null): boolean {
+    if (a?.durationMode !== "fixed" || b?.durationMode !== "fixed") return false;
+    const av = [...(a.fixedDurations ?? [])].sort((x, y) => x - y);
+    const bv = [...(b.fixedDurations ?? [])].sort((x, y) => x - y);
+    return av.length === bv.length && av.every((v, i) => v === bv[i]);
+  }
+  // splitFixedDurations jointly optimizes every pair's duration against one
+  // shared set of fixed-duration steps (e.g. 14s over 2 pairs on [4,6,8]s
+  // options -> [8,6], not two independently-rounded 8s legs overshooting to
+  // 16s). That optimization only means something when every routed pair
+  // actually shares the same fixed-duration model — once routing sends pairs
+  // to different models, fall back to a plain even split and let each pair's
+  // own planVideoSegments call clamp independently to its own model.
+  const sharedFixedConfig =
+    pairModels[0]?.modelConfig?.durationMode === "fixed" &&
+    pairModels.every((pm) => sameFixedDurations(pm.modelConfig, pairModels[0].modelConfig))
+      ? pairModels[0].modelConfig
+      : null;
+
+  const autoPairTargets =
+    sceneTargetDuration && sharedFixedConfig
+      ? splitFixedDurations(sceneTargetDuration, pairs.length, sharedFixedConfig.fixedDurations ?? [])
+      : pairs.map(() => (sceneTargetDuration ? sceneTargetDuration / pairs.length : undefined));
+
+  return { pairs, pairModels, sceneTargetDuration, autoPairTargets };
+}
+
+interface GeneratedSegment {
+  buffer: Buffer;
+  mimeType: string;
+  prompt: string;
+  sourceImageId?: string;
+  // null = not checked (see checkSegmentFrozen) — never treated as a hard
+  // failure, only surfaced as an advisory flag on the stored Asset.
+  qcPassed: boolean | null;
+  qcNotes: string | null;
+  usedEndFrame: boolean;
+}
+
+// A STATIC-camera shot is allowed to look still — that's the point — so only
+// shots that actually requested camera movement get checked at all. Frozen
+// for most of the clip despite requested movement means the model likely
+// just returned the starting image with a codec wrapper around it, the most
+// common image-to-video failure mode. Advisory-only: a tool failure here
+// (ffmpeg missing, corrupt temp file, etc.) must never block a successful
+// generation, so it's swallowed into "not checked" rather than thrown.
+const FREEZE_FLAG_FRACTION = 0.6;
+
+async function checkSegmentFrozen(
+  filePath: string,
+  cameraMovement: CameraMovement
+): Promise<{ checked: boolean; flagged: boolean; note: string | null }> {
+  if (cameraMovement === "STATIC") return { checked: false, flagged: false, note: null };
+  try {
+    const [durationSeconds, frozenSeconds] = await Promise.all([probeDuration(filePath), detectFrozenSeconds(filePath)]);
+    const flagged = frozenSeconds >= durationSeconds * FREEZE_FLAG_FRACTION;
+    return {
+      checked: true,
+      flagged,
+      note: flagged
+        ? `Looked frozen for ~${frozenSeconds.toFixed(1)}s of ${durationSeconds.toFixed(1)}s despite requesting ${cameraMovement}.`
+        : null,
+    };
+  } catch {
+    return { checked: false, flagged: false, note: null };
+  }
+}
+
+// Runs one pair's frame-chained generation loop (start image -> N sub-segment
+// calls, seeded with the previous call's own last frame — see
+// chainNextFrame), invoking `onSegment` for each generated buffer rather than
+// persisting anything itself. generateSceneVideo's onSegment stores each
+// segment immediately as it's generated (matches the pre-existing
+// crash-safety behavior: a mid-batch failure still leaves earlier segments
+// persisted); regenerateScenePairVideo's instead collects them so the
+// existing take's clips for this pair are only replaced once every
+// sub-segment of the retake has actually succeeded.
+async function generatePairSegments(params: {
+  pair: PairPlan;
+  pairIndex: number;
+  pairModel: ResolvedPairModel;
+  pairTarget: number | undefined;
+  pairPrompt: string;
+  resolvedResolution: string | undefined;
+  resolvedGenerateAudio: boolean | undefined;
+  castReferenceDataUris: string[];
+  workDir: string;
+  onSegment: (segment: GeneratedSegment) => Promise<void>;
+}): Promise<void> {
+  const {
+    pair,
+    pairIndex,
+    pairModel,
+    pairTarget,
+    pairPrompt,
+    resolvedResolution,
+    resolvedGenerateAudio,
+    castReferenceDataUris,
+    workDir,
+    onSegment,
+  } = params;
+
+  const startDataUri = await loadShotImageDataUri(pair.startShot);
+  const supportsLastFrame = pairModel.modelConfig?.supportsLastFrame !== false;
+  const endDataUri = pair.endShot && supportsLastFrame ? await loadShotImageDataUri(pair.endShot) : undefined;
+
+  const subSegmentDurations = pairTarget ? planVideoSegments(pairTarget, pairModel.modelConfig).durations : [undefined];
+
+  async function generateOnce(subDuration: number | undefined, isLastSub: boolean, segmentPrompt: string, imageDataUri: string) {
+    const generated = await generateVideo({
+      modelId: pairModel.modelId,
+      prompt: segmentPrompt,
+      imageDataUri,
+      lastFrameDataUri: isLastSub ? endDataUri : undefined,
+      durationSeconds: subDuration,
+      generateAudio: resolvedGenerateAudio,
+      resolution: resolvedResolution,
+      inputReferenceDataUris: castReferenceDataUris,
+    });
+    return { buffer: Buffer.from(generated.base64, "base64"), mimeType: generated.mimeType };
+  }
+
+  let chainedFrame = startDataUri;
+  for (const [subIndex, subDuration] of subSegmentDurations.entries()) {
+    const isLastSub = subIndex === subSegmentDurations.length - 1;
+    const segmentPrompt = subSegmentPrompt(pairPrompt, subIndex, subSegmentDurations.length);
+
+    let { buffer, mimeType } = await generateOnce(subDuration, isLastSub, segmentPrompt, chainedFrame);
+    const qcPath = path.join(workDir, `qc-pair${pairIndex}-seg${subIndex}-a1.${extFromMime(mimeType)}`);
+    await fs.writeFile(qcPath, buffer);
+    let qc = await checkSegmentFrozen(qcPath, pair.startShot.cameraMovement);
+
+    if (qc.checked && qc.flagged) {
+      // One automatic retry on a flagged result — same model/prompt/input,
+      // just rolling the dice again. Whatever the retry produces is kept
+      // either way (even if it's flagged too), matching validationPassed's
+      // existing "advisory only, never blocking" contract elsewhere on
+      // Asset: the flag is a signal for the user to notice and manually
+      // retake if they want, not a hard gate on generation completing.
+      const retry = await generateOnce(subDuration, isLastSub, segmentPrompt, chainedFrame);
+      buffer = retry.buffer;
+      mimeType = retry.mimeType;
+      const retryQcPath = path.join(workDir, `qc-pair${pairIndex}-seg${subIndex}-a2.${extFromMime(mimeType)}`);
+      await fs.writeFile(retryQcPath, buffer);
+      qc = await checkSegmentFrozen(retryQcPath, pair.startShot.cameraMovement);
+    }
+
+    await onSegment({
+      buffer,
+      mimeType,
+      prompt: segmentPrompt,
+      sourceImageId: subIndex === 0 ? pair.startShot.images[0]?.id : undefined,
+      qcPassed: qc.checked ? !qc.flagged : null,
+      qcNotes: qc.note,
+      usedEndFrame: isLastSub && endDataUri !== undefined,
+    });
+
+    if (!isLastSub) {
+      chainedFrame = await chainNextFrame(workDir, buffer, mimeType, `pair${pairIndex}-seg${subIndex}`);
+    }
+  }
 }
 
 interface GenerateSceneVideoParams {
@@ -87,14 +455,7 @@ export async function generateSceneVideo({
   generateAudio,
   includeCastReferences,
 }: GenerateSceneVideoParams): Promise<SerializedSceneVideoClip[]> {
-  const scene = await prisma.scene.findUniqueOrThrow({
-    where: { id: sceneId },
-    include: {
-      shots: { orderBy: { order: "asc" }, include: { images: { where: { isSelected: true }, take: 1 } } },
-      characters: { include: { referenceImages: true } },
-      locations: { include: { referenceImages: true } },
-    },
-  });
+  const scene = await loadSceneForVideoGeneration(sceneId);
 
   if (scene.visualMode !== "IMAGE_TO_VIDEO" && scene.visualMode !== "TEXT_TO_VIDEO") {
     throw new OpenRouterError("This scene's Visual Mode isn't Image → Video or Text → Video.");
@@ -102,30 +463,7 @@ export async function generateSceneVideo({
 
   const resolvedResolution = resolution ?? scene.videoResolution ?? modelConfig?.resolutions?.[0] ?? undefined;
   const resolvedGenerateAudio = generateAudio ?? scene.videoGenerateAudio;
-
-  // Same roster generateShotImage() uses for image-generation consistency —
-  // locked characters (an unlocked character's look is allowed to vary, so
-  // it isn't a reference worth pinning) plus every tagged location.
-  const castTargets: ValidationEntity[] = [
-    ...scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
-    ...scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
-  ].filter((t) => t.referenceImages.length > 0);
-  const castReferenceDataUris =
-    includeCastReferences && castTargets.length > 0 ? await loadReferenceDataUris(castTargets) : [];
-
-  type SceneShot = (typeof scene.shots)[number];
-
-  async function loadShotImageDataUri(shot: SceneShot): Promise<string> {
-    const image = shot.images[0];
-    if (!image) {
-      throw new OpenRouterError(`Shot ${shot.order} needs a selected image before generating a video clip.`);
-    }
-    const bytes = await storage.get(image.storageKey);
-    if (!bytes) {
-      throw new OpenRouterError(`Shot ${shot.order}'s selected image is missing from storage.`);
-    }
-    return `data:${image.mimeType ?? "image/png"};base64,${bytes.toString("base64")}`;
-  }
+  const castReferenceDataUris = await resolveCastReferenceDataUris(scene, includeCastReferences);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-video-segment-"));
   try {
@@ -143,8 +481,20 @@ export async function generateSceneVideo({
     async function storeClip(
       buffer: Buffer,
       mimeType: string,
-      fields: { prompt: string; sourceImageId?: string; videoPairIndex?: number }
-    ): Promise<Buffer> {
+      // modelId is per-call, not the outer scene-level default — IMAGE_TO_VIDEO
+      // pairs can each resolve to a different model (see resolvePairModel in
+      // buildImageToVideoPlan), and the stored Asset.modelId should reflect
+      // which one actually generated that segment.
+      fields: {
+        prompt: string;
+        modelId: string;
+        sourceImageId?: string;
+        videoPairIndex?: number;
+        qcPassed?: boolean | null;
+        qcNotes?: string | null;
+        usedEndFrame?: boolean | null;
+      }
+    ): Promise<void> {
       const ext = extFromMime(mimeType);
       const order = globalOrder++;
       const fileName = `scene-video-segment${order}.${ext}`;
@@ -159,7 +509,6 @@ export async function generateSceneVideo({
           sizeBytes: buffer.byteLength,
           videoSceneId: sceneId,
           isSelected: true,
-          modelId,
           createdBy: "AI",
           videoBatchId: batchId,
           videoSegmentOrder: order,
@@ -167,17 +516,6 @@ export async function generateSceneVideo({
         },
       });
       created.push(asset);
-      return buffer;
-    }
-
-    async function chainNextFrame(buffer: Buffer, mimeType: string, label: string): Promise<string> {
-      const ext = extFromMime(mimeType);
-      const rawPath = path.join(workDir, `${label}.${ext}`);
-      await fs.writeFile(rawPath, buffer);
-      const framePath = path.join(workDir, `${label}-lastframe.png`);
-      await extractLastFrame(rawPath, framePath);
-      const frameBytes = await fs.readFile(framePath);
-      return `data:image/png;base64,${frameBytes.toString("base64")}`;
     }
 
     if (scene.visualMode === "IMAGE_TO_VIDEO") {
@@ -190,67 +528,34 @@ export async function generateSceneVideo({
         }
       });
 
-      // Target duration: an explicit manual override wins; otherwise fall
-      // back to the scene's actual narration+dialogue length (ffprobe'd real
-      // audio, not an estimate). Split evenly across pairs unless a pair's
-      // own starting shot has an explicit durationSeconds override.
-      const sceneTargetDuration = scene.videoDurationSeconds ?? (await getSceneVoiceDurationSeconds(sceneId));
-
-      const pairs: { startShot: SceneShot; endShot: SceneShot | undefined }[] =
-        scene.shots.length === 1
-          ? [{ startShot: scene.shots[0], endShot: undefined }]
-          : scene.shots.slice(0, -1).map((startShot, i) => ({ startShot, endShot: scene.shots[i + 1] }));
-
-      // Auto-split baseline for pairs with no explicit Shot.durationSeconds
-      // override: for a fixed-duration model, distribute the scene's whole
-      // target across every pair at once (see splitFixedDurations) so the
-      // total lands close to the target — e.g. 14s over 2 pairs on [4,6,8]s
-      // options becomes [8,6], not two independently-rounded 8s legs
-      // overshooting to 16s. Anything else (range-mode/unconfigured) falls
-      // back to a plain even split; each leg's own planVideoSegments call
-      // below still clamps it sensibly on its own in that case.
-      const autoPairTargets =
-        sceneTargetDuration && modelConfig?.durationMode === "fixed"
-          ? splitFixedDurations(sceneTargetDuration, pairs.length, modelConfig.fixedDurations ?? [])
-          : pairs.map(() => (sceneTargetDuration ? sceneTargetDuration / pairs.length : undefined));
+      const { pairs, pairModels, autoPairTargets } = await buildImageToVideoPlan(scene, sceneId, { modelId, modelConfig });
 
       for (const [pairIndex, pair] of pairs.entries()) {
-        const startDataUri = await loadShotImageDataUri(pair.startShot);
-        const endDataUri = pair.endShot ? await loadShotImageDataUri(pair.endShot) : undefined;
-        const pairPrompt =
-          scene.motionPrompt?.trim() ||
-          (pair.endShot
-            ? `${scene.description}\n\nTransition: from "${pair.startShot.description}" to "${pair.endShot.description}"`
-            : scene.description);
-
+        const pairModel = pairModels[pairIndex];
         const pairTarget = pair.startShot.durationSeconds ?? autoPairTargets[pairIndex];
-        const subSegmentDurations = pairTarget ? planVideoSegments(pairTarget, modelConfig).durations : [undefined];
+        const pairPrompt = buildPairPrompt(scene, pair);
 
-        let chainedFrame = startDataUri;
-        for (const [subIndex, subDuration] of subSegmentDurations.entries()) {
-          const isLastSub = subIndex === subSegmentDurations.length - 1;
-          const generated = await generateVideo({
-            modelId,
-            prompt: pairPrompt,
-            imageDataUri: chainedFrame,
-            lastFrameDataUri: isLastSub ? endDataUri : undefined,
-            durationSeconds: subDuration,
-            generateAudio: resolvedGenerateAudio,
-            resolution: resolvedResolution,
-            inputReferenceDataUris: castReferenceDataUris,
-          });
-
-          const buffer = Buffer.from(generated.base64, "base64");
-          await storeClip(buffer, generated.mimeType, {
-            prompt: pairPrompt,
-            sourceImageId: subIndex === 0 ? pair.startShot.images[0]?.id : undefined,
-            videoPairIndex: pairIndex,
-          });
-
-          if (!isLastSub) {
-            chainedFrame = await chainNextFrame(buffer, generated.mimeType, `pair${pairIndex}-seg${subIndex}`);
-          }
-        }
+        await generatePairSegments({
+          pair,
+          pairIndex,
+          pairModel,
+          pairTarget,
+          pairPrompt,
+          resolvedResolution,
+          resolvedGenerateAudio,
+          castReferenceDataUris,
+          workDir,
+          onSegment: (seg) =>
+            storeClip(seg.buffer, seg.mimeType, {
+              prompt: seg.prompt,
+              modelId: pairModel.modelId,
+              sourceImageId: seg.sourceImageId,
+              videoPairIndex: pairIndex,
+              qcPassed: seg.qcPassed,
+              qcNotes: seg.qcNotes,
+              usedEndFrame: seg.usedEndFrame,
+            }),
+        });
       }
     } else {
       const prompt = scene.videoPrompt?.trim() || scene.description;
@@ -259,9 +564,10 @@ export async function generateSceneVideo({
 
       let chainedFrame: string | undefined;
       for (const [index, segmentDuration] of segmentDurations.entries()) {
+        const segmentPrompt = subSegmentPrompt(prompt, index, segmentDurations.length);
         const generated = await generateVideo({
           modelId,
-          prompt,
+          prompt: segmentPrompt,
           imageDataUri: chainedFrame,
           durationSeconds: segmentDuration,
           generateAudio: resolvedGenerateAudio,
@@ -270,15 +576,155 @@ export async function generateSceneVideo({
         });
 
         const buffer = Buffer.from(generated.base64, "base64");
-        await storeClip(buffer, generated.mimeType, { prompt });
+        await storeClip(buffer, generated.mimeType, { prompt: segmentPrompt, modelId });
 
         if (index < segmentDurations.length - 1) {
-          chainedFrame = await chainNextFrame(buffer, generated.mimeType, `segment${index}`);
+          chainedFrame = await chainNextFrame(workDir, buffer, generated.mimeType, `segment${index}`);
         }
       }
     }
 
     return created.map(serializeSceneVideoClip);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+}
+
+interface RegenerateScenePairVideoParams {
+  sceneId: string;
+  pairIndex: number;
+  modelId: string;
+  modelConfig: VideoModelConfig | null;
+  resolution?: string;
+  generateAudio?: boolean;
+  includeCastReferences?: boolean;
+}
+
+// Retakes a single shot pair within the scene's currently *selected* take,
+// instead of regenerating the whole scene. Pairs are independent generation
+// units — each starts from its own shot's fixed image, not chained from the
+// previous pair's output — so a bad 6s pair inside a 45s scene doesn't need
+// the other 39s regenerated (and re-paid-for) just to fix it. Replaces that
+// pair's segment(s) in place within the same batchId and renumbers the
+// batch's segment order (the retake's own sub-segment count can differ from
+// what it's replacing), rather than creating a whole new take — the Takes
+// panel's "Use this take"/delete-take actions stay whole-batch, unaffected.
+export async function regenerateScenePairVideo({
+  sceneId,
+  pairIndex,
+  modelId,
+  modelConfig,
+  resolution,
+  generateAudio,
+  includeCastReferences,
+}: RegenerateScenePairVideoParams): Promise<SerializedSceneVideoClip[]> {
+  const scene = await loadSceneForVideoGeneration(sceneId);
+
+  if (scene.visualMode !== "IMAGE_TO_VIDEO") {
+    throw new OpenRouterError("Retaking a single shot pair only applies to Image → Video scenes.");
+  }
+  if (scene.shots.length === 0 || !scene.shots.every((shot) => shot.images[0])) {
+    throw new OpenRouterError("Every shot needs a selected image before retaking a video clip.");
+  }
+
+  const selectedClips = await prisma.asset.findMany({
+    where: { videoSceneId: sceneId, isSelected: true },
+    orderBy: { videoSegmentOrder: "asc" },
+  });
+  const batchId = selectedClips[0]?.videoBatchId;
+  if (!batchId || selectedClips.some((c) => c.videoBatchId !== batchId)) {
+    throw new OpenRouterError("Generate a full video take before retaking a single shot pair.");
+  }
+  const oldPairAssets = selectedClips.filter((c) => c.videoPairIndex === pairIndex);
+  if (oldPairAssets.length === 0) {
+    throw new OpenRouterError("The selected take has no clip for that shot pair.");
+  }
+
+  const resolvedResolution = resolution ?? scene.videoResolution ?? modelConfig?.resolutions?.[0] ?? undefined;
+  const resolvedGenerateAudio = generateAudio ?? scene.videoGenerateAudio;
+  const castReferenceDataUris = await resolveCastReferenceDataUris(scene, includeCastReferences);
+
+  const { pairs, pairModels, autoPairTargets } = await buildImageToVideoPlan(scene, sceneId, { modelId, modelConfig });
+  const pair = pairs[pairIndex];
+  if (!pair) {
+    throw new OpenRouterError("That shot pair no longer exists — the scene's shots may have changed.");
+  }
+  const pairModel = pairModels[pairIndex];
+  const pairTarget = pair.startShot.durationSeconds ?? autoPairTargets[pairIndex];
+  const pairPrompt = buildPairPrompt(scene, pair);
+
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-video-retake-"));
+  try {
+    // Collected, not persisted, as they're generated — the existing take's
+    // clips for this pair are only touched once every sub-segment of the
+    // retake has actually succeeded, so a mid-generation failure leaves the
+    // take exactly as it was.
+    const newSegments: GeneratedSegment[] = [];
+    await generatePairSegments({
+      pair,
+      pairIndex,
+      pairModel,
+      pairTarget,
+      pairPrompt,
+      resolvedResolution,
+      resolvedGenerateAudio,
+      castReferenceDataUris,
+      workDir,
+      onSegment: async (seg) => {
+        newSegments.push(seg);
+      },
+    });
+
+    for (const old of oldPairAssets) {
+      await storage.remove(old.storageKey);
+    }
+    await prisma.asset.deleteMany({ where: { id: { in: oldPairAssets.map((a) => a.id) } } });
+
+    for (const [i, seg] of newSegments.entries()) {
+      const ext = extFromMime(seg.mimeType);
+      const key = buildStorageKey("scenes", sceneId, `${batchId}-retake-pair${pairIndex}-${randomUUID()}.${ext}`);
+      await storage.put(key, seg.buffer);
+      await prisma.asset.create({
+        data: {
+          type: "VIDEO_CLIP",
+          storageKey: key,
+          fileName: `scene-video-segment.${ext}`,
+          mimeType: seg.mimeType,
+          sizeBytes: seg.buffer.byteLength,
+          videoSceneId: sceneId,
+          isSelected: true,
+          createdBy: "AI",
+          videoBatchId: batchId,
+          // Temporary — the whole batch is renumbered by (pairIndex, this
+          // relative order) right below, since the retake's own sub-segment
+          // count may differ from what it's replacing.
+          videoSegmentOrder: 1_000_000 + i,
+          videoPairIndex: pairIndex,
+          modelId: pairModel.modelId,
+          prompt: seg.prompt,
+          sourceImageId: seg.sourceImageId,
+          qcPassed: seg.qcPassed,
+          qcNotes: seg.qcNotes,
+          usedEndFrame: seg.usedEndFrame,
+        },
+      });
+    }
+
+    const batchAssets = await prisma.asset.findMany({ where: { videoSceneId: sceneId, videoBatchId: batchId } });
+    batchAssets.sort(
+      (a, b) => (a.videoPairIndex ?? 0) - (b.videoPairIndex ?? 0) || (a.videoSegmentOrder ?? 0) - (b.videoSegmentOrder ?? 0)
+    );
+    for (const [order, asset] of batchAssets.entries()) {
+      if (asset.videoSegmentOrder !== order) {
+        await prisma.asset.update({ where: { id: asset.id }, data: { videoSegmentOrder: order } });
+      }
+    }
+
+    const finalBatch = await prisma.asset.findMany({
+      where: { videoSceneId: sceneId, videoBatchId: batchId },
+      orderBy: { videoSegmentOrder: "asc" },
+    });
+    return finalBatch.map(serializeSceneVideoClip);
   } finally {
     await fs.rm(workDir, { recursive: true, force: true });
   }
@@ -493,9 +939,10 @@ export async function deleteSceneVideoClip(sceneId: string, assetId: string): Pr
 // Mirrors mapSceneVoiceData in lib/voice.ts — for the scene pages' initial
 // SSR load, serializing the videoClips relation the same way the API routes
 // below do, so the client gets an identical shape regardless of source.
-export function mapSceneVideoData<T extends { videoClips: Asset[] }>(scene: T) {
+export function mapSceneVideoData<T extends { videoClips: Asset[]; videoGenerationStartedAt: Date | null }>(scene: T) {
   return {
     ...scene,
     videoClips: scene.videoClips.map(serializeSceneVideoClip),
+    videoGenerationStartedAt: scene.videoGenerationStartedAt?.toISOString() ?? null,
   };
 }

@@ -76,6 +76,51 @@ async function readAudioResponse(response: Response, context: string): Promise<{
   return { base64: buffer.toString("base64"), mimeType };
 }
 
+export interface ElevenLabsVoice {
+  voiceId: string;
+  name: string;
+  category: string | null;
+  description: string | null;
+  previewUrl: string | null;
+  gender: string | null;
+  accent: string | null;
+  language: string | null;
+}
+
+// GET /v1/voices — confirmed live 2026-09-11: top-level `{ voices: [...] }`,
+// each entry carrying `voice_id`/`name`/`preview_url` plus a `labels` object
+// (gender/accent/language/use_case/age/descriptive, all optional/inconsistent
+// across voices — premade ElevenLabs voices have them, custom/cloned voices
+// may not).
+export async function listVoices(): Promise<ElevenLabsVoice[]> {
+  const apiKey = requireApiKey();
+  const response = await fetchWithTimeout(
+    "https://api.elevenlabs.io/v1/voices",
+    { headers: { "xi-api-key": apiKey } },
+    15_000
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new ElevenLabsError(`ElevenLabs list-voices request failed (${response.status}): ${body}`);
+  }
+  const data = await response.json();
+  const voices: unknown[] = Array.isArray(data?.voices) ? data.voices : [];
+  return voices.map((v) => {
+    const voice = v as Record<string, unknown>;
+    const labels = (voice.labels as Record<string, string> | undefined) ?? {};
+    return {
+      voiceId: String(voice.voice_id ?? ""),
+      name: String(voice.name ?? "Unnamed voice"),
+      category: typeof voice.category === "string" ? voice.category : null,
+      description: typeof voice.description === "string" ? voice.description : null,
+      previewUrl: typeof voice.preview_url === "string" ? voice.preview_url : null,
+      gender: labels.gender ?? null,
+      accent: labels.accent ?? null,
+      language: labels.language ?? null,
+    };
+  });
+}
+
 export interface GenerateSpeechParams {
   modelId: string; // ElevenLabs model id, e.g. "eleven_multilingual_v2"
   text: string;

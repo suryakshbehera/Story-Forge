@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getModelOrDefault } from "@/lib/ai/models";
-import { assembleVideo } from "@/lib/video-assembly";
+import { assembleVideo, claimFinalAssembly, releaseFinalAssembly } from "@/lib/video-assembly";
 import { FfmpegError } from "@/lib/ffmpeg";
 
 const bodySchema = z.object({
@@ -21,6 +21,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     );
   }
 
+  const claimed = await claimFinalAssembly("episode", episodeId);
+  if (!claimed) {
+    return NextResponse.json({ error: "A final render is already in progress for this episode." }, { status: 409 });
+  }
+
   try {
     const video = await assembleVideo({
       parentType: "episode",
@@ -31,11 +36,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json(video, { status: 201 });
   } catch (error) {
     if (error instanceof FfmpegError) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: error.message, modelId: model.modelId, provider: model.provider }, { status: 500 });
     }
     if (error instanceof Error) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return NextResponse.json({ error: error.message, modelId: model.modelId, provider: model.provider }, { status: 400 });
     }
     throw error;
+  } finally {
+    await releaseFinalAssembly("episode", episodeId);
   }
 }

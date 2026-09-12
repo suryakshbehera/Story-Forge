@@ -15,13 +15,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ModelSelect, type ModelOption } from "@/components/model-select";
 import { parseVideoModelConfig } from "@/lib/video-model-config";
 import { groupIntoTakes, type SceneVideoClipItem, type VideoTake as Take } from "@/lib/video-takes";
 import { Clapperboard, Trash2 } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import Link from "next/link";
+import {
+  assembleVideoPrompt,
+  EMPTY_PROMPT_BUILDER_FIELDS,
+  PromptBuilderFieldsForm,
+  VideoPromptTroubleshooting,
+  type PromptBuilderFields,
+} from "@/components/video-prompt-builder";
 
 export interface SeedanceSceneOption {
   id: string;
@@ -42,58 +48,6 @@ export interface SeedanceSceneOption {
     locations: { id: string; name: string; imageUrl: string | null }[];
   };
 }
-
-interface PromptBuilderFields {
-  subject: string;
-  action: string;
-  camera: string;
-  style: string;
-  beatHook: string;
-  beatDevelopment: string;
-  beatEscalation: string;
-  beatResolution: string;
-  ending: string;
-}
-
-const EMPTY_FIELDS: PromptBuilderFields = {
-  subject: "",
-  action: "",
-  camera: "",
-  style: "",
-  beatHook: "",
-  beatDevelopment: "",
-  beatEscalation: "",
-  beatResolution: "",
-  ending: "",
-};
-
-// Seedance has no separate timestamp field — timing only works as in-prompt
-// text (per ByteDance/platform guidance: "0-5s: ...", read as planning aids,
-// not frame-exact contracts), so beats are appended straight into the flat
-// prompt string the backend already expects.
-function assemblePrompt(f: PromptBuilderFields): string {
-  const lines: string[] = [];
-  const core = [f.subject.trim(), f.action.trim()].filter(Boolean).join(" ");
-  if (core) lines.push(core);
-  if (f.camera.trim()) lines.push(`Camera: ${f.camera.trim()}.`);
-  if (f.style.trim()) lines.push(`Style: ${f.style.trim()}.`);
-  const beats = [
-    f.beatHook.trim() && `0-5s: ${f.beatHook.trim()}.`,
-    f.beatDevelopment.trim() && `5-16s: ${f.beatDevelopment.trim()}.`,
-    f.beatEscalation.trim() && `16-25s: ${f.beatEscalation.trim()}.`,
-    f.beatResolution.trim() && `25-30s: ${f.beatResolution.trim()}.`,
-  ].filter((b): b is string => Boolean(b));
-  if (beats.length) lines.push(`Timeline — ${beats.join(" ")}`);
-  if (f.ending.trim()) lines.push(`End on: ${f.ending.trim()}.`);
-  return lines.join("\n\n");
-}
-
-const FAILURE_MODES: { symptom: string; fix: string }[] = [
-  { symptom: "Character/outfit drifts mid-clip", fix: "Keep the scene to 8 or fewer identifiable people; lock “must not change” details in Style." },
-  { symptom: "Camera wanders aimlessly", fix: "Name one explicit move in Camera instead of leaving it blank." },
-  { symptom: "Reactions/events feel jumbled", fix: "Fill in the timed beats so cause is stated before effect." },
-  { symptom: "Clip trails off with no resolution", fix: "Fill in “Ending” — a held frame, pull-back, or specific gesture." },
-];
 
 export function SeedanceStudio({
   scenes: initialScenes,
@@ -236,22 +190,7 @@ export function SeedanceStudio({
           <CardTitle className="text-base">Troubleshooting</CardTitle>
         </CardHeader>
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Symptom</TableHead>
-                <TableHead>Likely fix</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {FAILURE_MODES.map((row) => (
-                <TableRow key={row.symptom}>
-                  <TableCell className="whitespace-normal text-sm">{row.symptom}</TableCell>
-                  <TableCell className="whitespace-normal text-sm text-muted-foreground">{row.fix}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <VideoPromptTroubleshooting />
         </CardContent>
       </Card>
     </div>
@@ -278,7 +217,7 @@ function SeedanceSceneForm({
   onModelsChange: (models: ModelOption[]) => void;
   onSceneUpdate: (updater: (s: SeedanceSceneOption) => SeedanceSceneOption) => void;
 }) {
-  const [fields, setFields] = useState<PromptBuilderFields>(EMPTY_FIELDS);
+  const [fields, setFields] = useState<PromptBuilderFields>(EMPTY_PROMPT_BUILDER_FIELDS);
   const [duration, setDuration] = useState(scene.videoDurationSeconds?.toString() ?? "");
   const [resolution, setResolution] = useState(scene.videoResolution ?? "");
   const [generateAudio, setGenerateAudio] = useState(scene.videoGenerateAudio);
@@ -286,7 +225,7 @@ function SeedanceSceneForm({
   const [generating, setGenerating] = useState(false);
   const { confirm, ConfirmDialog } = useConfirm();
 
-  const assembled = useMemo(() => assemblePrompt(fields), [fields]);
+  const assembled = useMemo(() => assembleVideoPrompt(fields), [fields]);
   const savedPrompt = scene.visualMode === "IMAGE_TO_VIDEO" ? scene.motionPrompt : scene.videoPrompt;
 
   const selectedModel = models.find((m) => m.id === modelId);
@@ -374,101 +313,9 @@ function SeedanceSceneForm({
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Prompt builder</CardTitle>
-          <p className="text-xs text-muted-foreground">
-            Direct the scene, don&apos;t describe an image — Subject → Action → Camera → Style, in playback order.
-          </p>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <Label className="text-xs text-muted-foreground">Subject</Label>
-              <Textarea
-                rows={2}
-                placeholder="e.g. A woman in a red coat"
-                value={fields.subject}
-                onChange={(e) => setFields((f) => ({ ...f, subject: e.target.value }))}
-                className="mt-1.5"
-              />
-            </div>
-            <div>
-              <Label className="text-xs text-muted-foreground">Action</Label>
-              <Textarea
-                rows={2}
-                placeholder="e.g. walks briskly through falling snow, glancing over her shoulder"
-                value={fields.action}
-                onChange={(e) => setFields((f) => ({ ...f, action: e.target.value }))}
-                className="mt-1.5"
-              />
-            </div>
-            <div>
-              <Label className="text-xs text-muted-foreground">Camera</Label>
-              <Input
-                placeholder="e.g. slow dolly-in from a low angle"
-                value={fields.camera}
-                onChange={(e) => setFields((f) => ({ ...f, camera: e.target.value }))}
-                className="mt-1.5"
-              />
-            </div>
-            <div>
-              <Label className="text-xs text-muted-foreground">Style</Label>
-              <Input
-                placeholder="e.g. cinematic, moody blue-hour lighting, shallow depth of field"
-                value={fields.style}
-                onChange={(e) => setFields((f) => ({ ...f, style: e.target.value }))}
-                className="mt-1.5"
-              />
-            </div>
-          </div>
-
-          <details className="rounded-md border p-2.5">
-            <summary className="cursor-pointer text-sm font-medium">Timed beats (optional — for longer clips)</summary>
-            <div className="mt-2.5 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <Label className="text-xs text-muted-foreground">Hook (0–5s)</Label>
-                <Textarea rows={2} value={fields.beatHook} onChange={(e) => setFields((f) => ({ ...f, beatHook: e.target.value }))} className="mt-1.5" />
-              </div>
-              <div>
-                <Label className="text-xs text-muted-foreground">Development (5–16s)</Label>
-                <Textarea rows={2} value={fields.beatDevelopment} onChange={(e) => setFields((f) => ({ ...f, beatDevelopment: e.target.value }))} className="mt-1.5" />
-              </div>
-              <div>
-                <Label className="text-xs text-muted-foreground">Escalation / proof (16–25s)</Label>
-                <Textarea rows={2} value={fields.beatEscalation} onChange={(e) => setFields((f) => ({ ...f, beatEscalation: e.target.value }))} className="mt-1.5" />
-              </div>
-              <div>
-                <Label className="text-xs text-muted-foreground">Resolution (25–30s)</Label>
-                <Textarea rows={2} value={fields.beatResolution} onChange={(e) => setFields((f) => ({ ...f, beatResolution: e.target.value }))} className="mt-1.5" />
-              </div>
-            </div>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Planning aids, not frame-exact contracts — Seedance has no separate timestamp field, so these are written into the prompt as
-              plain timed stage directions.
-            </p>
-          </details>
-
-          <div>
-            <Label className="text-xs text-muted-foreground">Ending (always direct how it ends)</Label>
-            <Input
-              placeholder="e.g. she stops, turns to face camera, hold on her expression"
-              value={fields.ending}
-              onChange={(e) => setFields((f) => ({ ...f, ending: e.target.value }))}
-              className="mt-1.5"
-            />
-          </div>
-
-          <div>
-            <Label className="text-xs text-muted-foreground">Assembled prompt (what actually gets sent)</Label>
-            <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2.5 text-xs">
-              {assembled || "(blank — falls back to the scene description at generation time)"}
-            </pre>
-          </div>
-
-          {savedPrompt && (
-            <p className="text-xs text-muted-foreground">
-              Currently saved on this scene: <span className="italic">&quot;{savedPrompt}&quot;</span> — generating below replaces it with the
-              assembled prompt above.
-            </p>
-          )}
+        <CardContent>
+          <PromptBuilderFieldsForm fields={fields} onChange={setFields} assembled={assembled} savedPrompt={savedPrompt} />
         </CardContent>
       </Card>
 

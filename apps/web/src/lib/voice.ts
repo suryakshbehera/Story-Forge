@@ -5,6 +5,7 @@ import { generateSpeech as generateElevenLabsSpeech, ElevenLabsError } from "@/l
 import { generateSpeech as generateSarvamSpeech, SarvamError } from "@/lib/ai/sarvam";
 import { sarvamLanguageCode } from "@/lib/languages";
 import { storage, buildStorageKey } from "@/lib/storage";
+import { STALE_MS } from "@/lib/generation-claims";
 
 export interface SerializedAudioTake {
   id: string;
@@ -288,6 +289,7 @@ interface DialogueLineRow {
   speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: Asset[];
+  audioGenerationStartedAt: Date | null;
 }
 
 export interface SerializedDialogueLine {
@@ -299,6 +301,7 @@ export interface SerializedDialogueLine {
   speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: SerializedAudioTake[];
+  audioGenerationStartedAt: string | null;
 }
 
 export function serializeDialogueLine(line: DialogueLineRow): SerializedDialogueLine {
@@ -311,7 +314,36 @@ export function serializeDialogueLine(line: DialogueLineRow): SerializedDialogue
     speed: line.speed,
     character: line.character,
     audio: line.audio.map(serializeAudioTake),
+    audioGenerationStartedAt: line.audioGenerationStartedAt?.toISOString() ?? null,
   };
+}
+
+// Same claim/release contract as claimShotForImageGeneration in
+// shot-images.ts.
+export async function claimNarrationGeneration(sceneId: string): Promise<boolean> {
+  const staleThreshold = new Date(Date.now() - STALE_MS.narration);
+  const result = await prisma.scene.updateMany({
+    where: { id: sceneId, OR: [{ narrationGenerationStartedAt: null }, { narrationGenerationStartedAt: { lt: staleThreshold } }] },
+    data: { narrationGenerationStartedAt: new Date() },
+  });
+  return result.count > 0;
+}
+
+export async function releaseNarrationGeneration(sceneId: string): Promise<void> {
+  await prisma.scene.update({ where: { id: sceneId }, data: { narrationGenerationStartedAt: null } });
+}
+
+export async function claimDialogueAudioGeneration(dialogueLineId: string): Promise<boolean> {
+  const staleThreshold = new Date(Date.now() - STALE_MS.dialogueAudio);
+  const result = await prisma.dialogueLine.updateMany({
+    where: { id: dialogueLineId, OR: [{ audioGenerationStartedAt: null }, { audioGenerationStartedAt: { lt: staleThreshold } }] },
+    data: { audioGenerationStartedAt: new Date() },
+  });
+  return result.count > 0;
+}
+
+export async function releaseDialogueAudioGeneration(dialogueLineId: string): Promise<void> {
+  await prisma.dialogueLine.update({ where: { id: dialogueLineId }, data: { audioGenerationStartedAt: null } });
 }
 
 export async function getSceneDialogueLines(sceneId: string): Promise<SerializedDialogueLine[]> {
@@ -695,11 +727,13 @@ export function mapSceneVoiceData<
     narration: string | null;
     narrationAudio: Asset[];
     dialogueLines: DialogueLineRow[];
+    narrationGenerationStartedAt: Date | null;
   },
 >(scene: T) {
   return {
     ...scene,
     narrationAudio: scene.narrationAudio.map(serializeAudioTake),
     dialogueLines: scene.dialogueLines.map(serializeDialogueLine),
+    narrationGenerationStartedAt: scene.narrationGenerationStartedAt?.toISOString() ?? null,
   };
 }

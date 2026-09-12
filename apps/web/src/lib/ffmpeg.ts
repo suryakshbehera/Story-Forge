@@ -56,6 +56,40 @@ export async function extractLastFrame(videoPath: string, outPath: string): Prom
   await runFfmpeg(["-sseof", "-1", "-i", videoPath, "-update", "1", "-frames:v", "1", outPath]);
 }
 
+// Total seconds ffmpeg's freezedetect filter reports as frozen/near-static —
+// used as an advisory auto-QC signal for generated video clips (see
+// checkSegmentFrozen in scene-video.ts): a common image-to-video failure
+// mode is the model returning essentially the starting image with no real
+// motion. `-f null -` runs the filter without writing output; freezedetect
+// logs its findings as plain info-level lines on stderr (not machine-readable
+// JSON), so they're parsed out of the raw text. Not run through runFfmpeg
+// above because that helper forces `-loglevel error`, which would suppress
+// freezedetect's own info-level log lines entirely.
+export async function detectFrozenSeconds(filePath: string): Promise<number> {
+  try {
+    const { stderr } = await execFileAsync(
+      "ffmpeg",
+      ["-hide_banner", "-i", filePath, "-vf", "freezedetect=n=-60dB:d=0.5", "-map", "0:v:0", "-f", "null", "-"],
+      { maxBuffer: MAX_BUFFER }
+    );
+    return sumFreezeDurations(stderr);
+  } catch (error) {
+    if (isMissingBinaryError(error)) {
+      throw new FfmpegError(
+        "ffmpeg isn't installed or isn't on PATH. Install ffmpeg and confirm `ffmpeg -version` works, then try again."
+      );
+    }
+    throw new FfmpegError(
+      `ffmpeg freeze detection failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function sumFreezeDurations(stderr: string): number {
+  const durations = [...stderr.matchAll(/freeze_duration:\s*([\d.]+)/g)].map((m) => Number(m[1]));
+  return durations.reduce((sum, d) => sum + d, 0);
+}
+
 export async function probeDuration(filePath: string): Promise<number> {
   try {
     const { stdout } = await execFileAsync(
@@ -78,5 +112,34 @@ export async function probeDuration(filePath: string): Promise<number> {
     throw new FfmpegError(
       `ffprobe failed: ${error instanceof Error ? error.message : String(error)}`
     );
+  }
+}
+
+// A generated clip's native frame rate — used to decide whether a real
+// image-to-video clip needs true motion interpolation instead of plain frame
+// duplication when normalized to the assembly's target fps (see
+// frameRateFilter in video-assembly.ts). r_frame_rate comes back as a
+// fraction string (e.g. "24/1", "30000/1001"), not a decimal.
+export async function probeFps(filePath: string): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", filePath],
+      { maxBuffer: MAX_BUFFER }
+    );
+    const [num, den] = stdout.trim().split("/").map(Number);
+    const fps = den ? num / den : num;
+    if (!Number.isFinite(fps) || fps <= 0) {
+      throw new FfmpegError(`ffprobe returned an invalid frame rate for ${filePath}: "${stdout.trim()}"`);
+    }
+    return fps;
+  } catch (error) {
+    if (error instanceof FfmpegError) throw error;
+    if (isMissingBinaryError(error)) {
+      throw new FfmpegError(
+        "ffprobe isn't installed or isn't on PATH. It normally ships alongside ffmpeg — reinstall ffmpeg and confirm `ffprobe -version` works."
+      );
+    }
+    throw new FfmpegError(`ffprobe failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

@@ -58,7 +58,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof OpenRouterError) {
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      // Two models are involved (prompt writing, then image generation);
+      // attribute to the image model since that's the call most likely to
+      // fail (rate limits, unsupported params) and the one the user picked
+      // most deliberately.
+      return NextResponse.json({ error: error.message, modelId: imageModel.modelId, provider: imageModel.provider }, { status: 502 });
     }
     throw error;
   } finally {

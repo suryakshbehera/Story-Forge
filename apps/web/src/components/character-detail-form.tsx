@@ -17,6 +17,7 @@ import { VoicePicker } from "@/components/voice-picker";
 interface CharacterFields {
   name: string;
   identity: string;
+  age: string;
   appearance: string;
   personality: string;
   clothing: string;
@@ -104,6 +105,9 @@ export function CharacterDetailForm({
 
       <Field label="Identity">
         <Textarea rows={2} value={fields.identity} onChange={(e) => update("identity", e.target.value)} />
+      </Field>
+      <Field label="Age">
+        <Input value={fields.age} onChange={(e) => update("age", e.target.value)} placeholder="e.g. 17, mid-30s, looks older than her 20 years" />
       </Field>
       <Field label="Appearance">
         <Textarea

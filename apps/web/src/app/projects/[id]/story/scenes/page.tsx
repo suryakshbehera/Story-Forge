@@ -5,6 +5,7 @@ import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
 import { mapFinalVideos, mapSilentVideos } from "@/lib/video-assembly";
+import { getActiveFailures, failuresByEntity, sceneVideoFailure, assemblyFailure, toErrorInfo } from "@/lib/generation-events";
 import { SceneManager } from "@/components/scene-manager";
 import { SilentAssemblyPanel } from "@/components/silent-assembly-panel";
 import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
@@ -38,7 +39,7 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
   if (!project) notFound();
   if (project.type !== "SINGLE" || !project.story) redirect(`/projects/${id}/story`);
 
-  const [scenes, characters, locations, story] = await Promise.all([
+  const [scenes, characters, locations, story, failures] = await Promise.all([
     prisma.scene.findMany({
       where: { storyId: project.story.id },
       orderBy: { order: "asc" },
@@ -53,10 +54,32 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
         silentVideos: { orderBy: { createdAt: "desc" } },
       },
     }),
+    getActiveFailures(id),
   ]);
 
   const { silentVideos } = mapSilentVideos(story);
   const hasSelectedSilentVideo = silentVideos.some((v) => v.isSelected);
+
+  // Merge durable failure state (audit 2.2's gap) onto the initial scene
+  // tree — see generation-events.ts's getActiveFailures for what "active"
+  // means and shot-manager.tsx's ShotItem.lastImageError for why this is a
+  // one-shot seed, not something the panels poll for.
+  const shotFailures = failuresByEntity(failures, "IMAGE_GENERATION", "SHOT");
+  const narrationFailures = failuresByEntity(failures, "VOICE", "SCENE");
+  const dialogueFailures = failuresByEntity(failures, "VOICE", "DIALOGUE_LINE");
+  const musicFailures = failuresByEntity(failures, "MUSIC_GENERATION", "SCENE");
+  const sfxFailures = failuresByEntity(failures, "SFX_GENERATION", "SCENE");
+  function withFailures<T extends { id: string; shots: { id: string }[]; dialogueLines: { id: string }[] }>(scene: T) {
+    return {
+      ...scene,
+      shots: scene.shots.map((shot) => ({ ...shot, lastImageError: toErrorInfo(shotFailures.get(shot.id)) })),
+      dialogueLines: scene.dialogueLines.map((line) => ({ ...line, lastAudioError: toErrorInfo(dialogueFailures.get(line.id)) })),
+      lastNarrationError: toErrorInfo(narrationFailures.get(scene.id)),
+      lastVideoError: toErrorInfo(sceneVideoFailure(failures, scene.id, scene.shots.map((s) => s.id))),
+      lastMusicError: toErrorInfo(musicFailures.get(scene.id)),
+      lastSfxError: toErrorInfo(sfxFailures.get(scene.id)),
+    };
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -64,7 +87,7 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
         parentType="story"
         parentId={project.story.id}
         projectId={id}
-        initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
+        initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData).map(withFailures)}
         characters={characters}
         locations={locations}
         initialNarratorVoiceName={project.narratorVoiceName}
@@ -81,8 +104,10 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
           <SilentAssemblyPanel
             parentType="story"
             parentId={project.story.id}
+            projectId={id}
             initialSilentVideos={silentVideos}
             initialSilentVideoGenerationStartedAt={story.silentVideoGenerationStartedAt?.toISOString() ?? null}
+            initialError={toErrorInfo(assemblyFailure(failures, "ffmpeg-silent-assembly", project.story.id))}
           />
         </CardContent>
       </Card>
@@ -102,9 +127,11 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
       <VideoAssemblyPanel
         parentType="story"
         parentId={project.story.id}
+        projectId={id}
         initialFinalVideos={mapFinalVideos(story).finalVideos}
         initialFinalVideoGenerationStartedAt={story.finalVideoGenerationStartedAt?.toISOString() ?? null}
         hasSelectedSilentVideo={hasSelectedSilentVideo}
+        initialError={toErrorInfo(assemblyFailure(failures, "ffmpeg-final-assembly", project.story.id))}
       />
     </div>
   );

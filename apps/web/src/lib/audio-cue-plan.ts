@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { callChatModel, OpenRouterError } from "@/lib/ai/openrouter";
 import { getSelectedSilentPicture, type SceneManifestEntry } from "@/lib/video-assembly";
 import type { ScenesParentType } from "@/lib/scenes";
+import { parseClosingState, describeClosingState } from "@/lib/scene-continuity";
 
 // Phase 11 — AUDIO_CUE_PLANNING. One whole-story/episode pass that watches
 // the selected Assemble-without-Audio take (see silent-assembly-panel.tsx /
@@ -38,11 +39,17 @@ function buildManifestText(manifest: SceneManifestEntry[]): string {
   return manifest
     .map((s) => {
       const roster = s.characterNames.length > 0 ? s.characterNames.join(", ") : "(no characters tagged on this scene)";
+      // Shot Planning's resolved closing state (see scene-continuity.ts) —
+      // grounds ambience/music continuity in the same environment/story-state
+      // facts the visual pipeline already resolved, rather than having this
+      // pass re-infer them from the video alone.
+      const closingStateLines = describeClosingState(parseClosingState(s.closingState));
       const existing = [
         s.narration && `Current narration: ${s.narration}`,
         s.dialogueLines.length > 0 && `Current dialogue: ${s.dialogueLines.map((l) => `${l.character}: ${l.text}`).join(" / ")}`,
         s.musicPrompt && `Current music prompt: ${s.musicPrompt}`,
         s.sfxPrompt && `Current sfx prompt: ${s.sfxPrompt}`,
+        closingStateLines.length > 0 && `State as of the end of this scene: ${closingStateLines.join("; ")}`,
       ]
         .filter(Boolean)
         .join("\n");
@@ -56,6 +63,12 @@ function buildManifestText(manifest: SceneManifestEntry[]): string {
 const CUE_PLAN_SYSTEM_PROMPT = `You are the Audio Cue Plan step of Narrata's post-assembly audio pipeline. You're given the fully assembled, currently-silent picture for an entire story/episode as a video, plus a per-scene manifest of that video's exact timing, which characters are available to speak in each scene, and whatever narration/dialogue/music/sfx prompts already exist.
 
 Watch the video and propose, for every scene, the narrator's voiceover script, spoken dialogue lines, a background music prompt, and a sound-effect prompt — grounded in what actually happens on screen in that scene's time range, not just its written description. You may keep existing text as-is, refine it, or replace it if it doesn't fit what the picture shows. Respect each scene's known duration: don't write narration/dialogue so long it can't plausibly be spoken within that scene's time range. Only write dialogue for characters in that scene's listed roster — never invent a speaker or use a character not listed for that scene.
+
+The manifest lists scenes in story order, each with the state Shot Planning resolved as of its end (environment, unfinished actions, continuity anchors, story state) when available — treat adjacent scenes as continuous, not independent, the same way a film's sound design carries across a cut:
+- Ambience/sfx: when a scene's resolved environment (location/weather/time of day) is unchanged from the previous scene, continue that ambience rather than resetting it — rain doesn't stop between two scenes still in the storm. When the environment does change, let the sfx prompt reflect the new one.
+- Music: give recurring characters, relationships, or emotional arcs a consistent musical motif/instrumentation across the scenes they appear in, evolving in intensity rather than switching styles scene to scene without reason.
+- Dialogue and narration: never write a line that contradicts a listed continuity anchor or story state (e.g. a character speaking as if an established fact isn't true, or referencing something that hasn't happened yet in story order).
+- A scene with no resolved state listed (older scenes, or scenes generated before this existed) has no such constraint — use the video alone for it, same as before.
 
 Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
 {

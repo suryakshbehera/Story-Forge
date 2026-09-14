@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { SHOT_INCLUDE, mapShotImages } from "@/lib/shots";
+import { CAMERA_MOVEMENTS } from "@/lib/video-model-config";
 
 const createSchema = z.object({
   order: z.number().int().positive(),
   description: z.string().min(1),
-  cameraMovement: z.enum(["STATIC", "ZOOM_IN", "ZOOM_OUT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN"]).default("STATIC"),
+  cameraMovement: z.enum(CAMERA_MOVEMENTS).default("STATIC"),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

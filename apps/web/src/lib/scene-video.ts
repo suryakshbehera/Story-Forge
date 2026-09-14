@@ -9,10 +9,20 @@ import { storage, buildStorageKey } from "@/lib/storage";
 import { extractLastFrame, detectFrozenSeconds, probeDuration } from "@/lib/ffmpeg";
 import { getSceneVoiceDurationSeconds } from "@/lib/scene-audio";
 import { planVideoSegments, splitFixedDurations } from "@/lib/video-segmentation";
-import { loadReferenceDataUris, type ValidationEntity } from "@/lib/shot-images";
+import { loadReferenceDataUris, validationResponseSchema, type ValidationEntity } from "@/lib/shot-images";
+import { parseContinuitySnapshot } from "@/lib/scene-continuity";
+import {
+  SHOT_SIZE_LABELS,
+  CAMERA_ANGLE_LABELS,
+  DEPTH_OF_FIELD_LABELS,
+  LIGHTING_STYLE_LABELS,
+  hasCameraDirection,
+  type ShotCinematography,
+} from "@/lib/cinematography";
 import { parseVideoModelConfig, type VideoModelConfig } from "@/lib/video-model-config";
 import { listModelsForJob } from "@/lib/ai/models";
 import { STALE_MS } from "@/lib/generation-claims";
+import { recordGenerationEvent, resolveSceneProjectId } from "@/lib/generation-events";
 import type { PromptBuilderFields } from "@/components/video-prompt-builder";
 
 // Same claim/release contract as claimShotForImageGeneration in
@@ -51,6 +61,12 @@ export interface SerializedSceneVideoClip {
   // null means not checked (e.g. a STATIC-camera shot), never a failure.
   qcPassed: boolean | null;
   qcNotes: string | null;
+  // Advisory-only tier-2 critic signal (see runVideoValidation) — identity/
+  // reference/continuity/prompt-adherence, distinct from qcPassed's freeze
+  // detection. null means not checked (no VIDEO_VALIDATION model
+  // configured), never a failure.
+  validationPassed: boolean | null;
+  validationNotes: string | null;
   // Which model actually generated this segment (a pair's own resolved
   // model, not necessarily the scene's default — see resolvePairModel in
   // buildImageToVideoPlan) and the exact prompt sent to it. Surfaced in the
@@ -74,6 +90,8 @@ export function serializeSceneVideoClip(asset: Asset): SerializedSceneVideoClip 
     pairIndex: asset.videoPairIndex,
     qcPassed: asset.qcPassed,
     qcNotes: asset.qcNotes,
+    validationPassed: asset.validationPassed,
+    validationNotes: asset.validationNotes,
     modelId: asset.modelId,
     prompt: asset.prompt,
     usedEndFrame: asset.usedEndFrame,
@@ -89,23 +107,70 @@ function extFromMime(mimeType: string): string {
 // otherwise never read again — this is what actually surfaces it to the
 // video model, since free-text prompts alone get inconsistent camera-motion
 // adherence across providers.
+// Unlike the ILLUSTRATION path (buildCameraFilter, video-assembly.ts) — where
+// a still image forces dolly and zoom to collapse into the same affine
+// transform — a video model can actually render the difference between an
+// optical zoom and a camera that physically travels. So each value gets prose
+// that names the distinction explicitly rather than a generic "moves closer":
+// a model told to "zoom" will hold perspective flat, and one told to "dolly"
+// will move the background against the subject.
 function cameraMovementInstruction(movement: CameraMovement): string {
   switch (movement) {
     case "ZOOM_IN":
-      return "Camera: slow zoom in.";
+      return "Camera: slow optical zoom in — the camera itself stays put and the lens tightens; perspective and parallax stay unchanged.";
     case "ZOOM_OUT":
-      return "Camera: slow zoom out.";
+      return "Camera: slow optical zoom out — the camera itself stays put and the lens widens; perspective and parallax stay unchanged.";
+    case "DOLLY_IN":
+      return "Camera: slow dolly in — the camera physically pushes toward the subject, background sliding past with real parallax. This is a move through space, not a zoom.";
+    case "DOLLY_OUT":
+      return "Camera: slow dolly out — the camera physically pulls back from the subject, revealing more of the space with real parallax. This is a move through space, not a zoom.";
     case "PAN_LEFT":
-      return "Camera: pans left.";
+      return "Camera: pans left — the camera pivots in place, its position fixed.";
     case "PAN_RIGHT":
-      return "Camera: pans right.";
-    case "PAN_UP":
-      return "Camera: tilts up.";
-    case "PAN_DOWN":
-      return "Camera: tilts down.";
+      return "Camera: pans right — the camera pivots in place, its position fixed.";
+    case "CRASH_ZOOM":
+      return "Camera: crash zoom — a fast, aggressive optical zoom snapped in over a beat rather than eased. The camera does not move; only the lens.";
+    case "DOLLY_ZOOM":
+      return "Camera: dolly zoom (the Vertigo effect) — track the camera toward the subject while zooming the lens the opposite way, so the subject stays exactly the same size in frame while the background stretches and warps behind them. The disorienting background shift is the whole point.";
+    case "TILT_UP":
+      return "Camera: tilts up — the camera pivots upward in place, its position fixed; it does not rise.";
+    case "TILT_DOWN":
+      return "Camera: tilts down — the camera pivots downward in place, its position fixed; it does not descend.";
+    case "WHIP_PAN":
+      return "Camera: whip pan — a very fast horizontal pan that smears the frame into motion blur before settling.";
+    case "ROLL":
+      return "Camera: rolls — the camera rotates around its own lens axis so the horizon tilts. The camera does not move through space and does not pivot up or down.";
+    case "PEDESTAL_UP":
+      return "Camera: pedestals up — the camera body rises straight up while holding its angle, so the framing translates upward. It is not tilting; the lens keeps pointing the same way.";
+    case "PEDESTAL_DOWN":
+      return "Camera: pedestals down — the camera body drops straight down while holding its angle, so the framing translates downward. It is not tilting; the lens keeps pointing the same way.";
+    case "ARC_LEFT":
+      return "Camera: arcs left — the camera orbits around the subject to the left, keeping them centred while the background rotates behind them.";
+    case "ARC_RIGHT":
+      return "Camera: arcs right — the camera orbits around the subject to the right, keeping them centred while the background rotates behind them.";
+    case "STEADICAM_FOLLOW":
+      return "Camera: steadicam follow — a smooth, stabilized, gliding move that stays with the subject through the space. Fluid and floating, with none of handheld's shake.";
+    case "AERIAL":
+      return "Camera: aerial — an airborne drone vantage high above the scene, drifting slowly to show the geography and scale below.";
+    case "TRACK_LEFT":
+      return "Camera: tracks left — the whole camera travels laterally leftward alongside the scene, holding its angle rather than pivoting.";
+    case "TRACK_RIGHT":
+      return "Camera: tracks right — the whole camera travels laterally rightward alongside the scene, holding its angle rather than pivoting.";
+    case "CRANE_UP":
+      return "Camera: cranes up — the camera rises vertically through the space, the viewpoint genuinely lifting rather than merely tilting.";
+    case "CRANE_DOWN":
+      return "Camera: cranes down — the camera descends vertically through the space, the viewpoint genuinely dropping rather than merely tilting.";
+    case "HANDHELD":
+      return "Camera: handheld — subtle, continuous, naturalistic unsteadiness as if hand-carried, with no overall direction of travel. Keep the amplitude small; this is texture, not a move.";
     case "STATIC":
-    default:
       return "Camera: static, no camera movement.";
+    default: {
+      // Compile-time exhaustiveness — see buildCameraFilter for the same
+      // pattern and reasoning.
+      const unhandled: never = movement;
+      void unhandled;
+      return "Camera: static, no camera movement.";
+    }
   }
 }
 
@@ -164,6 +229,72 @@ async function resolveCastReferenceDataUris(scene: SceneForVideo, includeCastRef
   return includeCastReferences && castTargets.length > 0 ? loadReferenceDataUris(castTargets) : [];
 }
 
+// Locked characters + all tagged locations with an uploaded reference image —
+// same roster generateShotImage() uses for image-generation consistency (see
+// shot-images.ts's validationTargets). Unlike resolveCastReferenceDataUris
+// above (opt-in generation conditioning via includeCastReferences), this
+// always runs whenever a VIDEO_VALIDATION model is configured.
+function resolveValidationTargets(scene: SceneForVideo): ValidationEntity[] {
+  return [
+    ...scene.characters.filter((c) => c.isLocked).map((c) => ({ name: c.name, referenceImages: c.referenceImages })),
+    ...scene.locations.map((l) => ({ name: l.name, referenceImages: l.referenceImages })),
+  ].filter((t) => t.referenceImages.length > 0);
+}
+
+// Tier-2 quality/continuity critic for a generated VIDEO_CLIP segment —
+// mirrors shot-images.ts's runValidation one step over (video_url input
+// instead of a still), reusing its exact {passed, notes} response contract.
+// Face/identity drift is called out as the single most important failure
+// mode: a still-image reference check can miss a face that warps or drifts
+// mid-clip, which a per-frame-aware video model can actually catch.
+const VIDEO_VALIDATION_SYSTEM_PROMPT = `You are the Video Validation step of Narrata's video pipeline. The attached video is a newly generated shot clip. Any attached images are locked reference images for named characters/locations, given in the order listed in the user prompt.
+
+Judge whether the people and places in the clip stay visually consistent with those references for the clip's full duration — pay closest attention to faces: eyes, nose, mouth, jaw and overall face shape must read as the same identity as the reference from the first frame to the last. A face that drifts, warps, loses or gains features, or reads as a different person at any point in the clip is a failure even if the opening frame matched — this is the single most important thing to check, ahead of general style or lighting drift.
+
+When continuity facts are listed in the user prompt, also judge whether the clip honors them — a clip that silently drops or contradicts carried state (a prop that should still be held, a wardrobe or physical change that should show) counts as a failure the same way a mismatched reference does.
+
+When a requested camera/motion direction is listed, judge whether the clip's actual camera movement and action match it — minor timing differences are fine, but the wrong camera move or action counts as a failure.
+
+Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
+{ "passed": true or false, "notes": "one or two sentences explaining the judgment, covering identity/reference consistency, continuity, and prompt adherence whenever each applied" }`;
+
+async function runVideoValidation(
+  generatedVideoDataUri: string,
+  entities: ValidationEntity[],
+  referenceDataUris: string[],
+  modelId: string,
+  continuitySnapshot: { subject: string; state: string }[],
+  continuityNotes: string | null,
+  requestedDirection: string | null
+): Promise<{ passed: boolean; notes: string }> {
+  const continuityFacts = [...continuitySnapshot.map((e) => `${e.subject} — ${e.state}`), continuityNotes].filter(
+    (v): v is string => Boolean(v)
+  );
+  const continuityLine = continuityFacts.length > 0 ? `\n\nContinuity to preserve: ${continuityFacts.join("; ")}` : "";
+  const directionLine = requestedDirection ? `\n\nRequested camera/motion direction: ${requestedDirection}` : "";
+  const referenceLine =
+    entities.length > 0
+      ? `Reference images, in order: ${entities.map((e) => e.name).join(", ")}.`
+      : "No locked reference images for this clip.";
+
+  const userPrompt = `${referenceLine}${directionLine}${continuityLine}\n\nDoes the generated video clip stay consistent with the references (if any), honor the continuity requirements (if any), and match the requested direction (if any)? Respond with the required JSON.`;
+
+  const raw = await callChatModel({
+    modelId,
+    systemPrompt: VIDEO_VALIDATION_SYSTEM_PROMPT,
+    userPrompt,
+    jsonMode: true,
+    images: referenceDataUris,
+    videos: [generatedVideoDataUri],
+  });
+
+  const parsed = validationResponseSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) {
+    throw new OpenRouterError("Video validation model returned an unexpected shape.");
+  }
+  return parsed.data;
+}
+
 async function chainNextFrame(workDir: string, buffer: Buffer, mimeType: string, label: string): Promise<string> {
   const ext = extFromMime(mimeType);
   const rawPath = path.join(workDir, `${label}.${ext}`);
@@ -174,19 +305,75 @@ async function chainNextFrame(workDir: string, buffer: Buffer, mimeType: string,
   return `data:image/png;base64,${frameBytes.toString("base64")}`;
 }
 
+// Director AI cinematography (Shot.shotSize/lensMm/…) → clip direction.
+//
+// Optics and light come from the START shot only, deliberately: a pair is
+// one continuous take, and a lens/angle/lighting value that changed halfway
+// through would read as a cut rather than a move. The one thing that legitimately
+// changes across a pair is shot size — that's precisely what the camera move
+// is for, so a start≠end size becomes an explicit "begins as X, ends on Y".
+//
+// composition/framing/focusPoint are deliberately NOT restated here: unlike
+// the image pipeline, this call already receives the start shot's rendered
+// image as its first frame, so the composition is literally visible to the
+// model and repeating it in words only risks contradicting the picture.
+//
+// Returns null when the shot has no resolved direction at all (legacy or
+// hand-added shots) — same "null means silent" rule as the image prompt.
+function shotDirectionInstruction(startShot: SceneShot, endShot: SceneShot | undefined): string | null {
+  const optics = [
+    startShot.lensMm !== null && `${startShot.lensMm}mm lens`,
+    startShot.cameraAngle && CAMERA_ANGLE_LABELS[startShot.cameraAngle],
+    startShot.depthOfField && DEPTH_OF_FIELD_LABELS[startShot.depthOfField],
+    startShot.lightingStyle && LIGHTING_STYLE_LABELS[startShot.lightingStyle],
+  ].filter(Boolean);
+
+  const framingLine =
+    endShot && startShot.shotSize && endShot.shotSize && startShot.shotSize !== endShot.shotSize
+      ? `Framing: begins as a ${SHOT_SIZE_LABELS[startShot.shotSize]} and ends on a ${SHOT_SIZE_LABELS[endShot.shotSize]} — the camera move is what carries it there.`
+      : startShot.shotSize
+        ? `Framing: holds a ${SHOT_SIZE_LABELS[startShot.shotSize]} throughout.`
+        : null;
+
+  const lines = [
+    optics.length > 0 &&
+      `Optics and light: ${optics.join(", ")}. These are one continuous take — hold them steady for the whole clip, never change lens, angle or lighting mid-clip.`,
+    framingLine,
+    startShot.subjectMovement && `Subject movement: ${startShot.subjectMovement}`,
+  ].filter(Boolean);
+
+  return lines.length > 0 ? `Shot direction (resolved by the Director for this shot):\n${lines.join("\n")}` : null;
+}
+
 // motionPrompt is pure camera/motion direction "layered on top of" the scene
 // (see its schema comment and MOTION_PROMPT_SYSTEM_PROMPT below), so the
 // description/transition text is always included and motionPrompt — when
 // set — is appended rather than replacing it. cameraMovementInstruction adds
 // the pair's starting shot's own camera direction on top of that.
+//
+// Precedence between the two direction sources is stated in the prompt
+// rather than left to ordering: motionPrompt is human-typed (or a human-
+// approved draft) scene-level text, so it outranks the per-shot Director
+// fields wherever the two disagree. Director AI never writes into
+// motionPrompt itself — the only writer is the user, via the Prompt Builder.
 function buildPairPrompt(scene: SceneForVideo, pair: PairPlan): string {
   const descriptionOrTransition = pair.endShot
     ? `${scene.description}\n\nTransition: from "${pair.startShot.description}" to "${pair.endShot.description}"`
     : scene.description;
-  const basePairPrompt = scene.motionPrompt?.trim()
-    ? `${descriptionOrTransition}\n\nMotion: ${scene.motionPrompt.trim()}`
-    : descriptionOrTransition;
-  return `${basePairPrompt}\n\n${cameraMovementInstruction(pair.startShot.cameraMovement)}`;
+  const shotDirection = shotDirectionInstruction(pair.startShot, pair.endShot);
+  const motion = scene.motionPrompt?.trim();
+
+  return [
+    descriptionOrTransition,
+    shotDirection,
+    motion && `Motion (director override): ${motion}`,
+    cameraMovementInstruction(pair.startShot.cameraMovement),
+    shotDirection &&
+      motion &&
+      "Where the director override conflicts with the shot direction above, follow the override — it is the human director's instruction for this scene.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 interface PairPlan {
@@ -287,6 +474,13 @@ interface GeneratedSegment {
   qcPassed: boolean | null;
   qcNotes: string | null;
   usedEndFrame: boolean;
+  // null = not checked — either no VIDEO_VALIDATION model configured, or the
+  // check itself failed (advisory only, see runVideoValidation's caller).
+  // Distinct from qcPassed above: this checks identity/reference/continuity/
+  // prompt adherence via a vision-LLM critic, qcPassed checks freeze/
+  // near-static via deterministic local ffmpeg analysis.
+  validationPassed: boolean | null;
+  validationNotes: string | null;
 }
 
 // A STATIC-camera shot is allowed to look still — that's the point — so only
@@ -302,6 +496,12 @@ async function checkSegmentFrozen(
   filePath: string,
   cameraMovement: CameraMovement
 ): Promise<{ checked: boolean; flagged: boolean; note: string | null }> {
+  // HANDHELD is deliberately NOT exempted alongside STATIC. The concern would
+  // be that handheld's small amplitude reads as frozen, but detectFrozenSeconds
+  // runs freezedetect at n=-60dB (see lib/ffmpeg.ts) — roughly 0.1% of full
+  // scale, far below any real handheld drift. A HANDHELD clip that does trip
+  // this threshold genuinely has no motion in it, which is exactly the failure
+  // this check exists to catch, so exempting it would only hide a true positive.
   if (cameraMovement === "STATIC") return { checked: false, flagged: false, note: null };
   try {
     const [durationSeconds, frozenSeconds] = await Promise.all([probeDuration(filePath), detectFrozenSeconds(filePath)]);
@@ -328,6 +528,7 @@ async function checkSegmentFrozen(
 // existing take's clips for this pair are only replaced once every
 // sub-segment of the retake has actually succeeded.
 async function generatePairSegments(params: {
+  projectId: string;
   pair: PairPlan;
   pairIndex: number;
   pairModel: ResolvedPairModel;
@@ -337,9 +538,16 @@ async function generatePairSegments(params: {
   resolvedGenerateAudio: boolean | undefined;
   castReferenceDataUris: string[];
   workDir: string;
+  // Tier-2 critic inputs — null validationModelId means "no model
+  // configured," which short-circuits the check entirely (zero cost by
+  // default, same posture as IMAGE_VALIDATION and checkSegmentFrozen).
+  validationModelId: string | null;
+  validationEntities: ValidationEntity[];
+  validationReferenceDataUris: string[];
   onSegment: (segment: GeneratedSegment) => Promise<void>;
 }): Promise<void> {
   const {
+    projectId,
     pair,
     pairIndex,
     pairModel,
@@ -349,6 +557,9 @@ async function generatePairSegments(params: {
     resolvedGenerateAudio,
     castReferenceDataUris,
     workDir,
+    validationModelId,
+    validationEntities,
+    validationReferenceDataUris,
     onSegment,
   } = params;
 
@@ -359,15 +570,43 @@ async function generatePairSegments(params: {
   const subSegmentDurations = pairTarget ? planVideoSegments(pairTarget, pairModel.modelConfig).durations : [undefined];
 
   async function generateOnce(subDuration: number | undefined, isLastSub: boolean, segmentPrompt: string, imageDataUri: string) {
-    const generated = await generateVideo({
+    const startedAt = Date.now();
+    let generated: { base64: string; mimeType: string; costUsd?: number };
+    try {
+      generated = await generateVideo({
+        modelId: pairModel.modelId,
+        prompt: segmentPrompt,
+        imageDataUri,
+        lastFrameDataUri: isLastSub ? endDataUri : undefined,
+        durationSeconds: subDuration,
+        generateAudio: resolvedGenerateAudio,
+        resolution: resolvedResolution,
+        inputReferenceDataUris: castReferenceDataUris,
+      });
+    } catch (error) {
+      await recordGenerationEvent({
+        jobType: "VIDEO_GENERATION",
+        provider: "openrouter",
+        modelId: pairModel.modelId,
+        projectId,
+        entityType: "SHOT",
+        entityId: pair.startShot.id,
+        durationMs: Date.now() - startedAt,
+        success: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    await recordGenerationEvent({
+      jobType: "VIDEO_GENERATION",
+      provider: "openrouter",
       modelId: pairModel.modelId,
-      prompt: segmentPrompt,
-      imageDataUri,
-      lastFrameDataUri: isLastSub ? endDataUri : undefined,
-      durationSeconds: subDuration,
-      generateAudio: resolvedGenerateAudio,
-      resolution: resolvedResolution,
-      inputReferenceDataUris: castReferenceDataUris,
+      projectId,
+      entityType: "SHOT",
+      entityId: pair.startShot.id,
+      costUsd: generated.costUsd,
+      durationMs: Date.now() - startedAt,
+      success: true,
     });
     return { buffer: Buffer.from(generated.base64, "base64"), mimeType: generated.mimeType };
   }
@@ -397,6 +636,26 @@ async function generatePairSegments(params: {
       qc = await checkSegmentFrozen(retryQcPath, pair.startShot.cameraMovement);
     }
 
+    let validation: { passed: boolean; notes: string } | null = null;
+    if (validationModelId) {
+      try {
+        const generatedDataUri = `data:${mimeType};base64,${buffer.toString("base64")}`;
+        validation = await runVideoValidation(
+          generatedDataUri,
+          validationEntities,
+          validationReferenceDataUris,
+          validationModelId,
+          parseContinuitySnapshot(pair.startShot.continuity),
+          pair.startShot.continuityNotes,
+          pairPrompt
+        );
+      } catch {
+        // Advisory only — an unreachable/misconfigured validation model must
+        // never block a successful generation from being stored.
+        validation = null;
+      }
+    }
+
     await onSegment({
       buffer,
       mimeType,
@@ -405,6 +664,8 @@ async function generatePairSegments(params: {
       qcPassed: qc.checked ? !qc.flagged : null,
       qcNotes: qc.note,
       usedEndFrame: isLastSub && endDataUri !== undefined,
+      validationPassed: validation?.passed ?? null,
+      validationNotes: validation?.notes ?? null,
     });
 
     if (!isLastSub) {
@@ -432,6 +693,9 @@ interface GenerateSceneVideoParams {
   // for the Seedance 2.5 Studio page, whose prompting model treats "give
   // every reference a single job" as a first-class practice.
   includeCastReferences?: boolean;
+  // null/undefined = no VIDEO_VALIDATION model configured — skips the check
+  // entirely, same zero-cost-by-default posture as IMAGE_VALIDATION.
+  validationModelId?: string | null;
 }
 
 // IMAGE_TO_VIDEO scenes generate one clip per consecutive shot pair
@@ -455,6 +719,7 @@ export async function generateSceneVideo({
   resolution,
   generateAudio,
   includeCastReferences,
+  validationModelId,
 }: GenerateSceneVideoParams): Promise<SerializedSceneVideoClip[]> {
   const scene = await loadSceneForVideoGeneration(sceneId);
 
@@ -465,6 +730,11 @@ export async function generateSceneVideo({
   const resolvedResolution = resolution ?? scene.videoResolution ?? modelConfig?.resolutions?.[0] ?? undefined;
   const resolvedGenerateAudio = generateAudio ?? scene.videoGenerateAudio;
   const castReferenceDataUris = await resolveCastReferenceDataUris(scene, includeCastReferences);
+  const projectId = await resolveSceneProjectId(sceneId);
+  const resolvedValidationModelId = validationModelId ?? null;
+  const validationEntities = resolveValidationTargets(scene);
+  const validationReferenceDataUris =
+    validationEntities.length > 0 ? await loadReferenceDataUris(validationEntities) : [];
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-video-segment-"));
   try {
@@ -494,6 +764,8 @@ export async function generateSceneVideo({
         qcPassed?: boolean | null;
         qcNotes?: string | null;
         usedEndFrame?: boolean | null;
+        validationPassed?: boolean | null;
+        validationNotes?: string | null;
       }
     ): Promise<void> {
       const ext = extFromMime(mimeType);
@@ -514,6 +786,10 @@ export async function generateSceneVideo({
           videoBatchId: batchId,
           videoSegmentOrder: order,
           ...fields,
+          // Only recorded when a check actually ran (fields.validationPassed
+          // set to a boolean) — mirrors shot-images.ts's identical ternary,
+          // so a null/never-checked segment never carries a stale model id.
+          validationModelId: fields.validationPassed != null ? resolvedValidationModelId : null,
         },
       });
       created.push(asset);
@@ -537,6 +813,7 @@ export async function generateSceneVideo({
         const pairPrompt = buildPairPrompt(scene, pair);
 
         await generatePairSegments({
+          projectId,
           pair,
           pairIndex,
           pairModel,
@@ -546,6 +823,9 @@ export async function generateSceneVideo({
           resolvedGenerateAudio,
           castReferenceDataUris,
           workDir,
+          validationModelId: resolvedValidationModelId,
+          validationEntities,
+          validationReferenceDataUris,
           onSegment: (seg) =>
             storeClip(seg.buffer, seg.mimeType, {
               prompt: seg.prompt,
@@ -555,6 +835,8 @@ export async function generateSceneVideo({
               qcPassed: seg.qcPassed,
               qcNotes: seg.qcNotes,
               usedEndFrame: seg.usedEndFrame,
+              validationPassed: seg.validationPassed,
+              validationNotes: seg.validationNotes,
             }),
         });
       }
@@ -566,18 +848,73 @@ export async function generateSceneVideo({
       let chainedFrame: string | undefined;
       for (const [index, segmentDuration] of segmentDurations.entries()) {
         const segmentPrompt = subSegmentPrompt(prompt, index, segmentDurations.length);
-        const generated = await generateVideo({
+        const videoStartedAt = Date.now();
+        let generated: { base64: string; mimeType: string; costUsd?: number };
+        try {
+          generated = await generateVideo({
+            modelId,
+            prompt: segmentPrompt,
+            imageDataUri: chainedFrame,
+            durationSeconds: segmentDuration,
+            generateAudio: resolvedGenerateAudio,
+            resolution: resolvedResolution,
+            inputReferenceDataUris: castReferenceDataUris,
+          });
+        } catch (error) {
+          await recordGenerationEvent({
+            jobType: "VIDEO_GENERATION",
+            provider: "openrouter",
+            modelId,
+            projectId,
+            entityType: "SCENE",
+            entityId: sceneId,
+            durationMs: Date.now() - videoStartedAt,
+            success: false,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+        await recordGenerationEvent({
+          jobType: "VIDEO_GENERATION",
+          provider: "openrouter",
           modelId,
-          prompt: segmentPrompt,
-          imageDataUri: chainedFrame,
-          durationSeconds: segmentDuration,
-          generateAudio: resolvedGenerateAudio,
-          resolution: resolvedResolution,
-          inputReferenceDataUris: castReferenceDataUris,
+          projectId,
+          entityType: "SCENE",
+          entityId: sceneId,
+          costUsd: generated.costUsd,
+          durationMs: Date.now() - videoStartedAt,
+          success: true,
         });
 
         const buffer = Buffer.from(generated.base64, "base64");
-        await storeClip(buffer, generated.mimeType, { prompt: segmentPrompt, modelId });
+
+        // TEXT_TO_VIDEO has no Shot/continuity to check — reference
+        // consistency and prompt/motion adherence are still meaningful, so
+        // the check still runs, just with empty continuity facts.
+        let validation: { passed: boolean; notes: string } | null = null;
+        if (resolvedValidationModelId) {
+          try {
+            const generatedDataUri = `data:${generated.mimeType};base64,${buffer.toString("base64")}`;
+            validation = await runVideoValidation(
+              generatedDataUri,
+              validationEntities,
+              validationReferenceDataUris,
+              resolvedValidationModelId,
+              [],
+              null,
+              prompt
+            );
+          } catch {
+            validation = null;
+          }
+        }
+
+        await storeClip(buffer, generated.mimeType, {
+          prompt: segmentPrompt,
+          modelId,
+          validationPassed: validation?.passed ?? null,
+          validationNotes: validation?.notes ?? null,
+        });
 
         if (index < segmentDurations.length - 1) {
           chainedFrame = await chainNextFrame(workDir, buffer, generated.mimeType, `segment${index}`);
@@ -599,6 +936,7 @@ interface RegenerateScenePairVideoParams {
   resolution?: string;
   generateAudio?: boolean;
   includeCastReferences?: boolean;
+  validationModelId?: string | null;
 }
 
 // Retakes a single shot pair within the scene's currently *selected* take,
@@ -618,6 +956,7 @@ export async function regenerateScenePairVideo({
   resolution,
   generateAudio,
   includeCastReferences,
+  validationModelId,
 }: RegenerateScenePairVideoParams): Promise<SerializedSceneVideoClip[]> {
   const scene = await loadSceneForVideoGeneration(sceneId);
 
@@ -644,6 +983,11 @@ export async function regenerateScenePairVideo({
   const resolvedResolution = resolution ?? scene.videoResolution ?? modelConfig?.resolutions?.[0] ?? undefined;
   const resolvedGenerateAudio = generateAudio ?? scene.videoGenerateAudio;
   const castReferenceDataUris = await resolveCastReferenceDataUris(scene, includeCastReferences);
+  const projectId = await resolveSceneProjectId(sceneId);
+  const resolvedValidationModelId = validationModelId ?? null;
+  const validationEntities = resolveValidationTargets(scene);
+  const validationReferenceDataUris =
+    validationEntities.length > 0 ? await loadReferenceDataUris(validationEntities) : [];
 
   const { pairs, pairModels, autoPairTargets } = await buildImageToVideoPlan(scene, sceneId, { modelId, modelConfig });
   const pair = pairs[pairIndex];
@@ -662,6 +1006,7 @@ export async function regenerateScenePairVideo({
     // take exactly as it was.
     const newSegments: GeneratedSegment[] = [];
     await generatePairSegments({
+      projectId,
       pair,
       pairIndex,
       pairModel,
@@ -671,6 +1016,9 @@ export async function regenerateScenePairVideo({
       resolvedGenerateAudio,
       castReferenceDataUris,
       workDir,
+      validationModelId: resolvedValidationModelId,
+      validationEntities,
+      validationReferenceDataUris,
       onSegment: async (seg) => {
         newSegments.push(seg);
       },
@@ -707,6 +1055,9 @@ export async function regenerateScenePairVideo({
           qcPassed: seg.qcPassed,
           qcNotes: seg.qcNotes,
           usedEndFrame: seg.usedEndFrame,
+          validationPassed: seg.validationPassed,
+          validationNotes: seg.validationNotes,
+          validationModelId: seg.validationPassed != null ? resolvedValidationModelId : null,
         },
       });
     }
@@ -739,12 +1090,43 @@ Direct the scene, don't describe an image — write in Subject → Action → Ca
 - action: what happens/moves during the clip, in playback order.
 - camera: one explicit camera move (e.g. "slow dolly-in from a low angle"). Never leave this blank — an unstated camera reads as aimless drift.
 - style: lighting/mood/lens notes, or "" if the image's existing style needs no extra direction.
+
+When a "# Shot direction already resolved for this scene" section is present in the user prompt, the camera and lighting for these shots have ALREADY been decided by the Director. Your camera and style fields must express that existing direction — phrase its angle, lens and framing progression as a single concrete camera move, and its lighting as the style note. Never substitute a different move, angle or lighting look, and never contradict it. Only when that section is absent (or says nothing about an axis) do you invent that part yourself, exactly as described above.
 - beatHook, beatDevelopment, beatEscalation, beatResolution: timed beats for longer clips (roughly 0-5s / 5-16s / 16-25s / 25-30s). Leave all four as "" for a short, single-beat clip — only fill them in when the action genuinely needs staged timing.
 - ending: how the clip resolves (a held frame, a pull-back, a specific gesture). Never leave this blank — always direct how it ends.`;
 
 interface DraftMotionPromptParams {
   sceneId: string;
   modelId: string;
+}
+
+// Without this, two AI steps independently invent camera intent for the same
+// scene: SHOT_PLANNING resolves per-shot cinematography, and this drafting
+// call — which never saw it — writes its own competing camera/style from the
+// image alone. Summarizing the resolved direction here turns the second call
+// into an expression of the first rather than a rival to it.
+//
+// Returns null when no shot in the scene has any resolved direction (legacy
+// scenes, hand-added shots), which restores today's invent-one-from-scratch
+// behavior via the system prompt's "only when that section is absent" clause.
+function buildResolvedDirectionBlock(shots: ShotCinematography[]): string | null {
+  const directed = shots.filter(hasCameraDirection);
+  if (directed.length === 0) return null;
+
+  const lines = shots.map((shot, index) => {
+    const parts = [
+      shot.shotSize && SHOT_SIZE_LABELS[shot.shotSize],
+      shot.cameraAngle && CAMERA_ANGLE_LABELS[shot.cameraAngle],
+      shot.lensMm !== null && `${shot.lensMm}mm lens`,
+      shot.depthOfField && DEPTH_OF_FIELD_LABELS[shot.depthOfField],
+      shot.lightingStyle && LIGHTING_STYLE_LABELS[shot.lightingStyle],
+      shot.focusPoint && `focus on ${shot.focusPoint}`,
+      shot.subjectMovement && `subject movement: ${shot.subjectMovement}`,
+    ].filter(Boolean);
+    return `Shot ${index + 1}: ${parts.length > 0 ? parts.join("; ") : "(no direction resolved)"}`;
+  });
+
+  return `# Shot direction already resolved for this scene\nThese were decided by the Director for this scene's shots. Express them in your camera and style fields — do not invent a different camera move or lighting look.\n${lines.join("\n")}`;
 }
 
 const motionPromptDraftSchema = z.object({
@@ -785,10 +1167,13 @@ const MOTION_PROMPT_JSON_SCHEMA = {
 // caller/UI decides whether to accept it into the editable motionPrompt
 // field, same "AI drafts, user approves" pattern as every other drafting job.
 export async function draftMotionPrompt({ sceneId, modelId }: DraftMotionPromptParams): Promise<PromptBuilderFields> {
+  // Every shot, not just the first: shots[0] still supplies the starting
+  // frame, but the whole ordered list is needed to summarize the Director's
+  // resolved cinematography for this scene (see buildResolvedDirectionBlock).
   const scene = await prisma.scene.findUniqueOrThrow({
     where: { id: sceneId },
     include: {
-      shots: { orderBy: { order: "asc" }, take: 1, include: { images: { where: { isSelected: true }, take: 1 } } },
+      shots: { orderBy: { order: "asc" }, include: { images: { where: { isSelected: true }, take: 1 } } },
     },
   });
 
@@ -830,7 +1215,16 @@ export async function draftMotionPrompt({ sceneId, modelId }: DraftMotionPromptP
       ? "The attached video is the immediately preceding scene's generated clip — watch and listen to it (dialogue, sound, motion, camera, ending framing) before writing the motion prompt below, so this scene continues naturally from it."
       : `The immediately preceding scene has no generated clip yet. Its description: "${previousScene.description}"`;
 
-  const userPrompt = `# Previous scene\n${previousContext}\n\n# Current scene\nDescription: ${scene.description}\nThe attached image is this scene's starting frame — motion should build on what's actually in it, not a generic description.\n\nWrite the motion prompt now.`;
+  const resolvedDirection = buildResolvedDirectionBlock(scene.shots);
+
+  const userPrompt = [
+    `# Previous scene\n${previousContext}`,
+    `# Current scene\nDescription: ${scene.description}\nThe attached image is this scene's starting frame — motion should build on what's actually in it, not a generic description.`,
+    resolvedDirection,
+    "Write the motion prompt now.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   const raw = await callChatModel({
     modelId,

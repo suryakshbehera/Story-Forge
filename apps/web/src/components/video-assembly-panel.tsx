@@ -12,6 +12,7 @@ import { formatFileSize } from "@/lib/format";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { isGenerationActive } from "@/lib/generation-claims";
 import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
+import { useGenerationEstimate } from "@/lib/use-generation-estimate";
 
 export interface FinalVideoItem {
   id: string;
@@ -34,28 +35,41 @@ export interface FinalVideoItem {
 export function VideoAssemblyPanel({
   parentType,
   parentId,
+  projectId,
   initialFinalVideos,
   initialFinalVideoGenerationStartedAt,
   hasSelectedSilentVideo,
+  initialError,
 }: {
   parentType: "story" | "episode";
   parentId: string;
+  projectId: string;
   initialFinalVideos: FinalVideoItem[];
   initialFinalVideoGenerationStartedAt: string | null;
   hasSelectedSilentVideo: boolean;
+  // Durable failure from GenerationEvent (getActiveFailures), seeding
+  // lastError below — see ShotItem's lastImageError for the idea.
+  initialError?: GenerationErrorInfo | null;
 }) {
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(() =>
     isGenerationActive(initialFinalVideoGenerationStartedAt, "finalAssembly")
   );
   const [finalVideos, setFinalVideos] = useState(initialFinalVideos);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(initialError ?? null);
   // Off by default — matches the pre-existing behavior of always discarding
   // a video clip's own baked-in audio (e.g. Veo3 Lite's generated sound) in
   // favor of just narration/dialogue/music/sfx.
   const [includeClipAudio, setIncludeClipAudio] = useState(false);
-  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
   const { confirm, ConfirmDialog } = useConfirm();
   const unmountedRef = useRef(false);
+  // No cost — local ffmpeg, not a paid API call — so this is duration/ETA
+  // only, same reasoning as SilentAssemblyPanel's estimate.
+  const estimate = useGenerationEstimate(projectId, "VIDEO", null);
+  const estimateText =
+    estimate && estimate.sampleSize > 0 && estimate.medianDurationMs != null
+      ? `~${Math.round(estimate.medianDurationMs / 1000)}s, based on ${estimate.sampleSize} past run${estimate.sampleSize > 1 ? "s" : ""} — no added cost, this step renders locally.`
+      : null;
 
   const base = parentType === "story" ? `/api/stories/${parentId}/video` : `/api/episodes/${parentId}/video`;
   const statusUrl = parentType === "story" ? `/api/stories/${parentId}/status` : `/api/episodes/${parentId}/status`;
@@ -187,6 +201,7 @@ export function VideoAssemblyPanel({
               </Label>
             </div>
           </div>
+          {estimateText && <p className="text-xs text-muted-foreground">{estimateText}</p>}
 
           {lastError && (
             <GenerationErrorBanner error={lastError} onRetry={generate} onDismiss={() => setLastError(null)} />

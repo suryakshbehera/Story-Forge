@@ -1,7 +1,52 @@
 // CameraMovement's own values, duplicated here rather than imported from
 // @/lib/db — this module is also read by client components (ai-models-manager
-// UI) that shouldn't pull in the Prisma client.
-export const CAMERA_MOVEMENTS = ["STATIC", "ZOOM_IN", "ZOOM_OUT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN"] as const;
+// UI) that shouldn't pull in the Prisma client. This module has no imports of
+// its own precisely so it can be imported from either side of the boundary.
+//
+// THE single TypeScript source of truth for the movement list: the zod
+// schemas on the shot/scene API routes, SHOT_PLANNING's enum + prompt
+// (lib/shots.ts), the shot editor dropdown (shot-manager.tsx) and the
+// routing checkboxes (ai-models-manager.tsx) all derive from this array, so
+// adding a value here reaches every one of them. Only the Prisma enum in
+// schema.prisma has to be kept in step by hand — and a mismatch there is a
+// compile error at the call sites that cast to Prisma's CameraMovement, not
+// a silent failure.
+//
+// Order matters for the UI: it's the order the dropdown and the routing
+// checkboxes render in, grouped by family (optical, rotation, translation,
+// texture) rather than alphabetically.
+export const CAMERA_MOVEMENTS = [
+  "STATIC",
+  // Optical — lens changes, camera body still.
+  "ZOOM_IN",
+  "ZOOM_OUT",
+  "CRASH_ZOOM",
+  // Translation toward/away — perspective and parallax change.
+  "DOLLY_IN",
+  "DOLLY_OUT",
+  "DOLLY_ZOOM",
+  // Rotation in place.
+  "PAN_LEFT",
+  "PAN_RIGHT",
+  "WHIP_PAN",
+  "TILT_UP",
+  "TILT_DOWN",
+  "ROLL",
+  // Body translation.
+  "TRACK_LEFT",
+  "TRACK_RIGHT",
+  "PEDESTAL_UP",
+  "PEDESTAL_DOWN",
+  "CRANE_UP",
+  "CRANE_DOWN",
+  // Orbit.
+  "ARC_LEFT",
+  "ARC_RIGHT",
+  // Texture / platform.
+  "STEADICAM_FOLLOW",
+  "HANDHELD",
+  "AERIAL",
+] as const;
 export type CameraMovementValue = (typeof CAMERA_MOVEMENTS)[number];
 
 // Shape of AiModelOption.config for VIDEO_GENERATION models — admin-entered

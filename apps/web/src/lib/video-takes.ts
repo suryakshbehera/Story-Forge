@@ -9,6 +9,12 @@ export interface SceneVideoClipItem {
   // lib/scene-video.ts) — null means not checked, never a failure.
   qcPassed?: boolean | null;
   qcNotes?: string | null;
+  // Advisory-only tier-2 critic signal (see runVideoValidation in
+  // lib/scene-video.ts) — identity/reference/continuity/prompt adherence,
+  // distinct from qcPassed's freeze detection. null means not checked (no
+  // VIDEO_VALIDATION model configured), never a failure.
+  validationPassed?: boolean | null;
+  validationNotes?: string | null;
   // Per-clip generation details, surfaced in an expandable panel so an
   // off-looking scene can be diagnosed pair-by-pair — see
   // SerializedSceneVideoClip in lib/scene-video.ts.

@@ -119,6 +119,11 @@ export type SceneWithShots = ReturnType<typeof mapSceneShots>;
 interface GenerateScenesResult {
   scenes: SceneWithShots[];
   unmatchedNames: string[];
+  // Same names as unmatchedNames, broken down by which scene(s) actually
+  // mentioned each one — lets the caller gate shot generation per affected
+  // scene (competitor-ux-research 4.5) rather than only showing one
+  // project-wide warning with no per-scene actionability.
+  sceneUnmatchedNames: Record<string, string[]>;
 }
 
 export async function generateScenes({
@@ -176,12 +181,20 @@ export async function generateScenes({
   const charByName = new Map(characters.map((c) => [c.name.toLowerCase(), c.id]));
   const locByName = new Map(locations.map((l) => [l.name.toLowerCase(), l.id]));
   const unmatchedNames = new Set<string>();
+  // Index-aligned with scenesToCreate below (both come from the same .map
+  // over parsed.data.scenes) — zipped against the real scene ids once
+  // they're created, since AI output has no id of its own yet.
+  const unmatchedNamesPerScene: string[][] = [];
 
   const scenesToCreate = parsed.data.scenes.map((s, index) => {
+    const sceneUnmatched = new Set<string>();
     const characterIds = s.characterNames
       .map((name) => {
         const id = charByName.get(name.toLowerCase());
-        if (!id) unmatchedNames.add(name);
+        if (!id) {
+          unmatchedNames.add(name);
+          sceneUnmatched.add(name);
+        }
         return id;
       })
       .filter((id): id is string => Boolean(id));
@@ -189,10 +202,15 @@ export async function generateScenes({
     const locationIds = s.locationNames
       .map((name) => {
         const id = locByName.get(name.toLowerCase());
-        if (!id) unmatchedNames.add(name);
+        if (!id) {
+          unmatchedNames.add(name);
+          sceneUnmatched.add(name);
+        }
         return id;
       })
       .filter((id): id is string => Boolean(id));
+
+    unmatchedNamesPerScene[index] = Array.from(sceneUnmatched);
 
     return {
       order: index + 1,
@@ -231,7 +249,17 @@ export async function generateScenes({
     include: SCENE_INCLUDE,
   });
 
-  return { scenes: mapScenesShots(scenes), unmatchedNames: Array.from(unmatchedNames) };
+  // scenes is ordered 1..N same as scenesToCreate/unmatchedNamesPerScene
+  // (regenerateAll clears the table first, so nothing older can be mixed
+  // in) — safe to zip by index.
+  const sceneUnmatchedNames: Record<string, string[]> = {};
+  for (const [index, scene] of scenes.entries()) {
+    if (unmatchedNamesPerScene[index]?.length > 0) {
+      sceneUnmatchedNames[scene.id] = unmatchedNamesPerScene[index];
+    }
+  }
+
+  return { scenes: mapScenesShots(scenes), unmatchedNames: Array.from(unmatchedNames), sceneUnmatchedNames };
 }
 
 export async function resequenceScenes(tx: Prisma.TransactionClient, where: { storyId: string } | { episodeId: string }) {

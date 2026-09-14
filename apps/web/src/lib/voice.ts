@@ -1,17 +1,25 @@
 import { z } from "zod";
-import { prisma, type Asset } from "@/lib/db";
+import { prisma, Prisma, type Asset } from "@/lib/db";
 import { callChatModel, generateSpeech as generateOpenRouterSpeech, OpenRouterError } from "@/lib/ai/openrouter";
-import { generateSpeech as generateElevenLabsSpeech, ElevenLabsError } from "@/lib/ai/elevenlabs";
+import { generateSpeechWithTimestamps as generateElevenLabsSpeech, ElevenLabsError, type WordTimestamp } from "@/lib/ai/elevenlabs";
 import { generateSpeech as generateSarvamSpeech, SarvamError } from "@/lib/ai/sarvam";
 import { sarvamLanguageCode } from "@/lib/languages";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { STALE_MS } from "@/lib/generation-claims";
+import { recordGenerationEvent, resolveSceneProjectId } from "@/lib/generation-events";
+import { EMOTION_LABELS, EMOTION_INTENSITY_LABELS } from "@/lib/emotion";
 
 export interface SerializedAudioTake {
   id: string;
   url: string;
   isSelected: boolean;
   createdAt: Date;
+  // Word-level speech timing, only present for ElevenLabs-generated takes
+  // (see Asset.wordTimestamps in schema.prisma) — null for Sarvam/OpenRouter
+  // takes, neither of which exposes timestamps. Not consumed by any renderer
+  // yet; exposed here so a future caption/per-shot-sync UI doesn't need a
+  // schema or API change to reach it.
+  wordTimestamps: WordTimestamp[] | null;
 }
 
 // Audio takes are usually mp3 (ElevenLabs/Sarvam always, OpenRouter for most
@@ -30,20 +38,8 @@ export function serializeAudioTake(asset: Asset): SerializedAudioTake {
     url: storage.url(asset.storageKey),
     isSelected: asset.isSelected,
     createdAt: asset.createdAt,
+    wordTimestamps: (asset.wordTimestamps as WordTimestamp[] | null) ?? null,
   };
-}
-
-// A Scene's project is reached via Story or Episode→Season — resolving it
-// here (rather than accepting a voice string from the client) is what makes
-// narratorVoiceName actually authoritative: the caller can't override it.
-async function resolveSceneProjectId(sceneId: string): Promise<string> {
-  const scene = await prisma.scene.findUniqueOrThrow({
-    where: { id: sceneId },
-    include: { story: true, episode: { include: { season: true } } },
-  });
-  const projectId = scene.story?.projectId ?? scene.episode?.season.projectId;
-  if (!projectId) throw new Error(`Scene ${sceneId} has neither a story nor an episode parent.`);
-  return projectId;
 }
 
 // Story.language / StoryBible.language — the same field STORY_WRITING/
@@ -92,7 +88,7 @@ async function generateSpeechForProvider({
   sceneId: string;
   instructions?: string;
   speed?: number;
-}): Promise<{ base64: string; mimeType: string }> {
+}): Promise<{ base64: string; mimeType: string; costUsd?: number; wordTimestamps?: WordTimestamp[] }> {
   if (provider === "sarvam") {
     const language = await resolveSceneLanguage(sceneId);
     const languageCode = sarvamLanguageCode(language);
@@ -142,14 +138,42 @@ export async function generateNarrationAudio({
     );
   }
 
-  const generated = await generateSpeechForProvider({
+  const startedAt = Date.now();
+  let generated: { base64: string; mimeType: string; costUsd?: number; wordTimestamps?: WordTimestamp[] };
+  try {
+    generated = await generateSpeechForProvider({
+      provider,
+      modelId,
+      text: scene.narration,
+      voiceId: project.narratorVoiceName,
+      sceneId,
+      instructions: scene.narrationDeliveryNotes ?? undefined,
+      speed: scene.narrationSpeed ?? undefined,
+    });
+  } catch (error) {
+    await recordGenerationEvent({
+      jobType: "VOICE",
+      provider,
+      modelId,
+      projectId,
+      entityType: "SCENE",
+      entityId: sceneId,
+      durationMs: Date.now() - startedAt,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  await recordGenerationEvent({
+    jobType: "VOICE",
     provider,
     modelId,
-    text: scene.narration,
-    voiceId: project.narratorVoiceName,
-    sceneId,
-    instructions: scene.narrationDeliveryNotes ?? undefined,
-    speed: scene.narrationSpeed ?? undefined,
+    projectId,
+    entityType: "SCENE",
+    entityId: sceneId,
+    costUsd: generated.costUsd,
+    durationMs: Date.now() - startedAt,
+    success: true,
   });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `narration.${audioExtension(generated.mimeType)}`;
@@ -173,6 +197,7 @@ export async function generateNarrationAudio({
         prompt: scene.narration,
         modelId,
         createdBy: "AI",
+        wordTimestamps: generated.wordTimestamps ? (generated.wordTimestamps as unknown as Prisma.InputJsonValue) : undefined,
       },
     });
   });
@@ -212,6 +237,28 @@ export async function deleteNarrationAudio(sceneId: string, assetId: string): Pr
   await prisma.asset.delete({ where: { id: assetId } });
 }
 
+// ── Director AI emotion → Voice direction ─────────────────────────────────
+// There is no Shot<->DialogueLine/narration link (shots subdivide a scene
+// visually, dialogue lines and narration are separate scene-level scripts),
+// so this can't bind a specific line to a specific shot's emotion. Instead
+// it hands Voice direction the scene's shots as an ordered emotional arc —
+// informative context so the read doesn't contradict what the Director
+// already resolved, the same "batch the whole scene in one call" idea the
+// direction prompts already use for internal coherence.
+type EmotionArcShot = { order: number; emotion: string | null; emotionIntensity: string | null };
+
+function buildEmotionalArcBlock(shots: EmotionArcShot[]): string | null {
+  const lines = shots
+    .filter((s) => s.emotion)
+    .map((s) => {
+      const emotion = EMOTION_LABELS[s.emotion as keyof typeof EMOTION_LABELS];
+      const intensity = s.emotionIntensity ? EMOTION_INTENSITY_LABELS[s.emotionIntensity as keyof typeof EMOTION_INTENSITY_LABELS] : null;
+      return `Shot ${s.order}: ${intensity ? `${intensity}, ` : ""}${emotion}`;
+    });
+  if (lines.length === 0) return null;
+  return `# Director's emotional arc for this scene (context, not a per-line binding — use it to keep the read consistent with the scene's visual direction)\n${lines.join("\n")}`;
+}
+
 const narrationDirectionResponseSchema = z.object({
   deliveryNotes: z.string(),
   speed: z.number().min(0.25).max(4).nullable().optional(),
@@ -222,6 +269,8 @@ const narrationDirectionResponseSchema = z.object({
 // DIALOGUE_DIRECTION exactly, one level up: a single narration script
 // instead of an ordered list of lines, otherwise the same shape/behavior.
 const NARRATION_DIRECTION_SYSTEM_PROMPT = `You are the Narration Direction step of Narrata's Voice pipeline. Given a scene's narration script, direct how it should be delivered — emotion, tone, emphasis, pacing.
+
+When a "# Director's emotional arc" section is present, it reflects decisions already made for this scene's shots — keep your delivery direction consistent with that arc rather than inventing a contradictory one, but use your own judgment for anything it doesn't cover.
 
 Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
 {
@@ -242,15 +291,21 @@ export async function generateNarrationDirection({
   sceneId: string;
   modelId: string;
 }): Promise<NarrationDirection> {
-  const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
+  const scene = await prisma.scene.findUniqueOrThrow({
+    where: { id: sceneId },
+    include: { shots: { orderBy: { order: "asc" }, select: { order: true, emotion: true, emotionIntensity: true } } },
+  });
   if (!scene.narration?.trim()) {
     throw new OpenRouterError("Write a narration script for this scene before directing it.");
   }
 
+  const arcBlock = buildEmotionalArcBlock(scene.shots);
+  const userPrompt = arcBlock ? `${arcBlock}\n\n# Narration script\n${scene.narration}` : scene.narration;
+
   const raw = await callChatModel({
     modelId,
     systemPrompt: NARRATION_DIRECTION_SYSTEM_PROMPT,
-    userPrompt: scene.narration,
+    userPrompt,
     jsonMode: true,
   });
 
@@ -404,6 +459,8 @@ const dialogueDirectionResponseSchema = z.object({
 // appears below to satisfy the provider's json_object requirement.
 const DIALOGUE_DIRECTION_SYSTEM_PROMPT = `You are the Dialogue Direction step of Narrata's Voice pipeline. Given a scene's ordered dialogue lines (with speaker names), direct how each line should be delivered — emotion, tone, emphasis, pacing — keeping the conversation's emotional arc coherent from line to line.
 
+When a "# Director's emotional arc" section is present, it reflects decisions already made for this scene's shots — keep your delivery direction consistent with that arc rather than inventing a contradictory one, but use your own judgment for anything it doesn't cover.
+
 Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
 {
   "lines": [
@@ -419,16 +476,24 @@ export async function generateDialogueDirection({
   sceneId: string;
   modelId: string;
 }): Promise<SerializedDialogueLine[]> {
-  const lines = await prisma.dialogueLine.findMany({
-    where: { sceneId },
-    orderBy: { order: "asc" },
-    include: { character: { select: { name: true } } },
-  });
+  const [lines, scene] = await Promise.all([
+    prisma.dialogueLine.findMany({
+      where: { sceneId },
+      orderBy: { order: "asc" },
+      include: { character: { select: { name: true } } },
+    }),
+    prisma.scene.findUniqueOrThrow({
+      where: { id: sceneId },
+      include: { shots: { orderBy: { order: "asc" }, select: { order: true, emotion: true, emotionIntensity: true } } },
+    }),
+  ]);
   if (lines.length === 0) {
     throw new OpenRouterError("This scene has no dialogue lines yet.");
   }
 
-  const userPrompt = lines.map((l) => `${l.order}. ${l.character.name}: ${l.text}`).join("\n");
+  const arcBlock = buildEmotionalArcBlock(scene.shots);
+  const dialogueBlock = lines.map((l) => `${l.order}. ${l.character.name}: ${l.text}`).join("\n");
+  const userPrompt = arcBlock ? `${arcBlock}\n\n# Dialogue lines\n${dialogueBlock}` : dialogueBlock;
 
   const raw = await callChatModel({
     modelId,
@@ -490,9 +555,10 @@ async function loadSceneScriptContext(sceneId: string) {
 
   const genre = scene.story?.genre ?? scene.episode?.season.project.storyBible?.genre ?? null;
   const tone = scene.story?.tone ?? scene.episode?.season.project.storyBible?.tone ?? null;
+  const language = scene.story?.language ?? scene.episode?.season.project.storyBible?.language ?? null;
   const style = [genre && `Genre: ${genre}`, tone && `Tone: ${tone}`].filter(Boolean).join("\n") || null;
 
-  return { scene, style };
+  return { scene, style, language };
 }
 
 const scriptDraftResponseSchema = z.object({
@@ -507,12 +573,16 @@ const scriptDraftResponseSchema = z.object({
 
 // Requires strict JSON output (see openrouter.ts jsonMode) — the word "JSON"
 // appears below to satisfy the provider's json_object requirement.
-function buildScriptDraftSystemPrompt(characterNames: string[]): string {
+function buildScriptDraftSystemPrompt(characterNames: string[], language: string | null): string {
   const roster = characterNames.length > 0 ? characterNames.join(", ") : "(no characters are attached to this scene)";
+  const languageLine = language
+    ? `\nWrite the narration and every dialogue line in ${language} — natural, spoken ${language}, not a transliteration. Character names in "characterName" still must match the roster exactly as given (do not translate names).\n`
+    : "";
   return `You are the Script Drafting step of Narrata's Voice pipeline. Given one scene's description and style context, draft the narrator's voiceover script and, if the scene calls for spoken dialogue, the dialogue lines for it.
 
 Characters available to speak in this scene: ${roster}
 Only write dialogue for characters in that exact list — never invent a new speaker or use a character not listed. If the scene needs a line from someone not on the list, leave that line out rather than misattributing it.
+${languageLine}
 
 Respond with strict JSON only — no prose, no markdown code fences. The JSON must match this shape exactly:
 {
@@ -537,13 +607,13 @@ export async function generateSceneScript({
   sceneId: string;
   modelId: string;
 }): Promise<SceneScriptDraft> {
-  const { scene, style } = await loadSceneScriptContext(sceneId);
+  const { scene, style, language } = await loadSceneScriptContext(sceneId);
 
   const userPrompt = [`# Scene\n${scene.description}`, style && `# Style\n${style}`].filter(Boolean).join("\n\n");
 
   const raw = await callChatModel({
     modelId,
-    systemPrompt: buildScriptDraftSystemPrompt(scene.characters.map((c) => c.name)),
+    systemPrompt: buildScriptDraftSystemPrompt(scene.characters.map((c) => c.name), language),
     userPrompt,
     jsonMode: true,
   });
@@ -658,14 +728,43 @@ export async function generateDialogueAudio({
     );
   }
 
-  const generated = await generateSpeechForProvider({
+  const projectId = await resolveSceneProjectId(line.sceneId);
+  const startedAt = Date.now();
+  let generated: { base64: string; mimeType: string; costUsd?: number; wordTimestamps?: WordTimestamp[] };
+  try {
+    generated = await generateSpeechForProvider({
+      provider,
+      modelId,
+      text: line.text,
+      voiceId: line.character.voiceName,
+      sceneId: line.sceneId,
+      instructions: line.deliveryNotes ?? undefined,
+      speed: line.speed ?? undefined,
+    });
+  } catch (error) {
+    await recordGenerationEvent({
+      jobType: "VOICE",
+      provider,
+      modelId,
+      projectId,
+      entityType: "DIALOGUE_LINE",
+      entityId: dialogueLineId,
+      durationMs: Date.now() - startedAt,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  await recordGenerationEvent({
+    jobType: "VOICE",
     provider,
     modelId,
-    text: line.text,
-    voiceId: line.character.voiceName,
-    sceneId: line.sceneId,
-    instructions: line.deliveryNotes ?? undefined,
-    speed: line.speed ?? undefined,
+    projectId,
+    entityType: "DIALOGUE_LINE",
+    entityId: dialogueLineId,
+    costUsd: generated.costUsd,
+    durationMs: Date.now() - startedAt,
+    success: true,
   });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `line.${audioExtension(generated.mimeType)}`;
@@ -689,6 +788,7 @@ export async function generateDialogueAudio({
         prompt: line.text,
         modelId,
         createdBy: "AI",
+        wordTimestamps: generated.wordTimestamps ? (generated.wordTimestamps as unknown as Prisma.InputJsonValue) : undefined,
       },
     });
   });

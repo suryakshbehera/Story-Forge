@@ -39,6 +39,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import type { GenerationErrorInfo } from "@/components/generation-error";
 
 export type SceneVisualMode = "ILLUSTRATION" | "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
 
@@ -82,6 +83,13 @@ export interface SceneItem {
   sfxGenerationStartedAt: string | null;
   music: AudioTake[];
   sfx: AudioTake[];
+  // Seed the matching panel's lastError state below — see ShotItem's
+  // lastImageError for why these are only ever populated on initial page
+  // load, from lib/generation-events.ts's getActiveFailures.
+  lastNarrationError?: GenerationErrorInfo | null;
+  lastVideoError?: GenerationErrorInfo | null;
+  lastMusicError?: GenerationErrorInfo | null;
+  lastSfxError?: GenerationErrorInfo | null;
 }
 
 // Cycled per scene purely so adjacent scenes are visually distinguishable
@@ -145,6 +153,12 @@ export function SceneManager({
   const [instructions, setInstructions] = useState("");
   const [generating, setGenerating] = useState(false);
   const [unmatchedNames, setUnmatchedNames] = useState<string[] | null>(null);
+  // Per-scene breakdown of the same names, from the same Generate Scenes
+  // response — lets ShotManager below block/confirm shot generation for
+  // just the scenes AI actually flagged, not the whole project. Session-
+  // only, same lifetime as unmatchedNames above (not persisted — a reload
+  // loses it, matching this card's own pre-existing behavior).
+  const [sceneUnmatchedNames, setSceneUnmatchedNames] = useState<Record<string, string[]>>({});
   const { confirm, ConfirmDialog } = useConfirm();
 
   const [promptModelId, setPromptModelId] = useState("");
@@ -252,6 +266,7 @@ export function SceneManager({
     }
     setGenerating(true);
     setUnmatchedNames(null);
+    setSceneUnmatchedNames({});
     try {
       const res = await fetch(`${baseUrl}/generate`, {
         method: "POST",
@@ -266,6 +281,7 @@ export function SceneManager({
       setScenes(data.scenes.map(withVoiceDefaults));
       if (data.unmatchedNames?.length > 0) {
         setUnmatchedNames(data.unmatchedNames);
+        setSceneUnmatchedNames(data.sceneUnmatchedNames ?? {});
         toast.warning(`AI mentioned ${data.unmatchedNames.length} name(s) that don't exist yet.`);
       }
       toast.success(`Generated ${data.scenes.length} scene(s).`);
@@ -434,6 +450,8 @@ export function SceneManager({
               imageInstructions={imageInstructions}
               shotPlanningModelId={shotPlanningModelId}
               narratorVoiceName={savedNarratorVoiceName || null}
+              projectId={projectId}
+              unmatchedNames={sceneUnmatchedNames[scene.id] ?? []}
             />
           ))}
         </div>
@@ -518,6 +536,8 @@ function SceneRow({
   imageInstructions,
   shotPlanningModelId,
   narratorVoiceName,
+  projectId,
+  unmatchedNames,
 }: {
   scene: SceneItem;
   isFirst: boolean;
@@ -534,6 +554,10 @@ function SceneRow({
   imageInstructions: string;
   shotPlanningModelId: string;
   narratorVoiceName: string | null;
+  projectId: string;
+  // From the Generate Scenes response's per-scene breakdown — see
+  // SceneManager's sceneUnmatchedNames. Empty when this scene has none.
+  unmatchedNames: string[];
 }) {
   const [title, setTitle] = useState(scene.title ?? "");
   const [description, setDescription] = useState(scene.description);
@@ -735,6 +759,7 @@ function SceneRow({
                 validationModelId={validationModelId}
                 imageInstructions={imageInstructions}
                 shotPlanningModelId={shotPlanningModelId}
+                unmatchedNames={unmatchedNames}
                 onShotsChange={(shots) => onUpdate({ ...scene, shots })}
               />
             </CollapsiblePanel>
@@ -758,6 +783,8 @@ function SceneRow({
                 initialVideoGenerateAudio={scene.videoGenerateAudio}
                 initialVideoClips={scene.videoClips}
                 initialVideoGenerationStartedAt={scene.videoGenerationStartedAt}
+                projectId={projectId}
+                initialError={scene.lastVideoError ?? null}
               />
             </CollapsiblePanel>
           </Collapsible>
@@ -778,6 +805,7 @@ function SceneRow({
               initialNarrationAudio={scene.narrationAudio}
               initialNarrationGenerationStartedAt={scene.narrationGenerationStartedAt}
               initialDialogueLines={scene.dialogueLines}
+              initialNarrationError={scene.lastNarrationError ?? null}
             />
           </CollapsiblePanel>
         </Collapsible>
@@ -795,6 +823,8 @@ function SceneRow({
               initialSfx={scene.sfx}
               initialMusicGenerationStartedAt={scene.musicGenerationStartedAt}
               initialSfxGenerationStartedAt={scene.sfxGenerationStartedAt}
+              initialMusicError={scene.lastMusicError ?? null}
+              initialSfxError={scene.lastSfxError ?? null}
             />
           </CollapsiblePanel>
         </Collapsible>

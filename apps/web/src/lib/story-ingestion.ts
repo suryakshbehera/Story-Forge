@@ -20,6 +20,7 @@ const nullableText = () => z.string().nullable().optional();
 const characterSchema = z.object({
   name: z.string().min(1),
   identity: nullableText(),
+  age: nullableText(),
   appearance: nullableText(),
   personality: nullableText(),
   clothing: nullableText(),
@@ -100,6 +101,7 @@ function requireAll(properties: Record<string, unknown>) {
 const characterJsonSchema = requireAll({
   name: { type: "string" },
   identity: nullableStringSchema,
+  age: nullableStringSchema,
   appearance: nullableStringSchema,
   personality: nullableStringSchema,
   clothing: nullableStringSchema,
@@ -170,6 +172,7 @@ const CHARACTERS_LOCATIONS_SHAPE = `  "characters": [
     {
       "name": "character name",
       "identity": "role/identity or null",
+      "age": "age or age-presentation, e.g. '17' or 'mid-30s', or null",
       "appearance": "physical appearance or null",
       "personality": "personality traits or null",
       "clothing": "typical clothing/costume or null",
@@ -441,6 +444,7 @@ export async function applyIngestionPreview({
         where: { id: existing.id },
         data: {
           identity: fillIfBlank(existing.identity, c.identity),
+          age: fillIfBlank(existing.age, c.age),
           appearance: fillIfBlank(existing.appearance, c.appearance),
           personality: fillIfBlank(existing.personality, c.personality),
           clothing: fillIfBlank(existing.clothing, c.clothing),
@@ -455,6 +459,7 @@ export async function applyIngestionPreview({
           projectId,
           name: c.name,
           identity: c.identity ?? null,
+          age: c.age ?? null,
           appearance: c.appearance ?? null,
           personality: c.personality ?? null,
           clothing: c.clothing ?? null,

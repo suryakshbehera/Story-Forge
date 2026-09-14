@@ -7,6 +7,7 @@ import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
 import { mapFinalVideos, mapSilentVideos } from "@/lib/video-assembly";
+import { getActiveFailures, failuresByEntity, sceneVideoFailure, assemblyFailure, toErrorInfo } from "@/lib/generation-events";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
 import { SilentAssemblyPanel } from "@/components/silent-assembly-panel";
@@ -46,7 +47,7 @@ export default async function EpisodePage({
   const episode = await prisma.episode.findUnique({ where: { id: episodeId } });
   if (!episode || episode.seasonId !== seasonId) notFound();
 
-  const [project, context, scenes, characters, locations, episodeVideo] = await Promise.all([
+  const [project, context, scenes, characters, locations, episodeVideo, failures] = await Promise.all([
     prisma.project.findUniqueOrThrow({ where: { id: projectId } }),
     assembleContext({ projectId, episodeId }),
     prisma.scene.findMany({
@@ -63,10 +64,31 @@ export default async function EpisodePage({
         silentVideos: { orderBy: { createdAt: "desc" } },
       },
     }),
+    getActiveFailures(projectId),
   ]);
 
   const { silentVideos } = mapSilentVideos(episodeVideo);
   const hasSelectedSilentVideo = silentVideos.some((v) => v.isSelected);
+
+  // Merge durable failure state onto the initial scene tree — see
+  // story/scenes/page.tsx's identical block and generation-events.ts's
+  // getActiveFailures for why this is a one-shot seed, not polling.
+  const shotFailures = failuresByEntity(failures, "IMAGE_GENERATION", "SHOT");
+  const narrationFailures = failuresByEntity(failures, "VOICE", "SCENE");
+  const dialogueFailures = failuresByEntity(failures, "VOICE", "DIALOGUE_LINE");
+  const musicFailures = failuresByEntity(failures, "MUSIC_GENERATION", "SCENE");
+  const sfxFailures = failuresByEntity(failures, "SFX_GENERATION", "SCENE");
+  function withFailures<T extends { id: string; shots: { id: string }[]; dialogueLines: { id: string }[] }>(scene: T) {
+    return {
+      ...scene,
+      shots: scene.shots.map((shot) => ({ ...shot, lastImageError: toErrorInfo(shotFailures.get(shot.id)) })),
+      dialogueLines: scene.dialogueLines.map((line) => ({ ...line, lastAudioError: toErrorInfo(dialogueFailures.get(line.id)) })),
+      lastNarrationError: toErrorInfo(narrationFailures.get(scene.id)),
+      lastVideoError: toErrorInfo(sceneVideoFailure(failures, scene.id, scene.shots.map((s) => s.id))),
+      lastMusicError: toErrorInfo(musicFailures.get(scene.id)),
+      lastSfxError: toErrorInfo(sfxFailures.get(scene.id)),
+    };
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -133,7 +155,7 @@ export default async function EpisodePage({
             parentType="episode"
             parentId={episode.id}
             projectId={projectId}
-            initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData)}
+            initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData).map(withFailures)}
             characters={characters}
             locations={locations}
             initialNarratorVoiceName={project.narratorVoiceName}
@@ -152,8 +174,10 @@ export default async function EpisodePage({
           <SilentAssemblyPanel
             parentType="episode"
             parentId={episodeId}
+            projectId={projectId}
             initialSilentVideos={silentVideos}
             initialSilentVideoGenerationStartedAt={episodeVideo.silentVideoGenerationStartedAt?.toISOString() ?? null}
+            initialError={toErrorInfo(assemblyFailure(failures, "ffmpeg-silent-assembly", episodeId))}
           />
         </CardContent>
       </Card>
@@ -173,9 +197,11 @@ export default async function EpisodePage({
       <VideoAssemblyPanel
         parentType="episode"
         parentId={episodeId}
+        projectId={projectId}
         initialFinalVideos={mapFinalVideos(episodeVideo).finalVideos}
         initialFinalVideoGenerationStartedAt={episodeVideo.finalVideoGenerationStartedAt?.toISOString() ?? null}
         hasSelectedSilentVideo={hasSelectedSilentVideo}
+        initialError={toErrorInfo(assemblyFailure(failures, "ffmpeg-final-assembly", episodeId))}
       />
     </div>
   );

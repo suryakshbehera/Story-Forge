@@ -35,12 +35,18 @@ Evidence labels: `FACT` (verified in repo today) / `ASSUMPTION` / `UNKNOWN`.
   plan draft/apply.
 - Sarvam is wired as a second VOICE provider (`lib/ai/sarvam.ts`, seeded
   `bulbul:v3`, `isDefault: false`).
+- **Cost capture shipped 2026-09-14** (roadmap item #4 below is done): a
+  `GenerationEvent` table + shared `recordGenerationEvent` helper
+  (`lib/generation-events.ts`), wired into the 5 metered job types
+  (`IMAGE_GENERATION`, `VIDEO_GENERATION`, `VOICE`, `MUSIC_GENERATION`,
+  `SFX_GENERATION`). `costUsd` populates for OpenRouter calls; ElevenLabs/Sarvam
+  rows carry provider/duration/success but `costUsd: null` (those providers
+  never expose per-call cost). Still open: a cost dashboard UI (Phase 14), a
+  `withGenerationClaim` wrapper cleanup, and backfilling ElevenLabs/Sarvam cost
+  via account-usage APIs.
 
 **Not built** (`FACT`, absence verified):
 
-- No cost capture. `apps/web/src/lib/ai/openrouter.ts` contains **zero**
-  occurrences of `usage` or `cost` — OpenRouter's per-call USD figure is parsed
-  past and discarded.
 - No billing/credits/plan/usage schema, no analytics SDK, no rate limiting, no
   quota (per `../strategy/monetization.md` §1, re-confirmed).
 - **No `workers/` directory exists at all**, despite `PHASES.md` and
@@ -108,16 +114,13 @@ whole bug class.
 
 ### NEXT — Sprint 2 (weeks 3–5): make cost visible, then make it cheap
 
-**4. Capture `usage.cost` + a `GenerationEvent` record.**
-`MUST BUILD NOW` — **the single highest-leverage item in this document.** Narrata
-is already handed the exact USD charge per video call and throws it away
-(`openrouter.ts`). One field plus one table converts every estimate in
-`../strategy/economics.md` into a measurement, and simultaneously delivers:
-pricing input, abuse detection, the Phase-14 budget dashboard's data spine, and
-the first real product analytics Narrata has ever had. Log `jobType`, `modelId`,
-USD cost, duration, success/failure, project/scene/shot id.
-*Complexity: LOW. Strategic value: very high.* Owners: `ai-architect` +
-`technical-architect`.
+**4. Capture `usage.cost` + a `GenerationEvent` record.** ✅ **DONE 2026-09-14.**
+Was the single highest-leverage item in this document. Shipped: `GenerationEvent`
+table + `recordGenerationEvent`/`resolveSceneProjectId` helpers, wired into the 5
+metered job types. Deliberately deferred: instrumenting the other 14 text-planning
+`AiJobType`s (cheap, numerous call sites — fast-follow with the same helper), a
+cost dashboard UI, and ElevenLabs/Sarvam cost backfill (those providers never
+return per-call cost). See [[narrata-cost-capture-built]].
 
 **5. Change the default video model to Veo 3.1 Lite (pending a 1-week blind test).**
 `MUST BUILD NOW`. One `AiModelOption` row swings Narrata's dominant cost line ~8×.
@@ -134,6 +137,227 @@ the final assembly card, a copyable share link, and a watermark path (used later
 as the free-tier gate, per `../strategy/monetization.md` §7's secondary gate).
 This is simultaneously the activation finish line, the retention proof point, and
 Narrata's cheapest distribution channel. **Ask `ui-ux-engineer`** where it lives.
+
+### PARALLEL TRACK — pipeline quality, from the video-platform-intelligence research programme
+
+Not part of the Sprint 1–4 sequence above — this track is owned by
+`ai-architect`/`video-architect`, runs alongside the product-loop work, and is
+informed by 11 external platform architecture briefs
+(`../video-platform-intelligence/RESEARCH_CHECKLIST.md`, `CHANGELOG.md`).
+**Three findings held across all 9 platforms researched for them** (Runway,
+Kling, Veo, Hailuo/MiniMax, Higgsfield, Seedance, Wan, Sora, HunyuanVideo): none
+run a runtime quality/continuity critic, none generate multi-scene narrative in
+one model call, and none persist narrative structure — Narrata's `StoryBible` +
+`Character`/`Location` + `SHOT_PLANNING` stack is already ahead of every
+platform researched on that last point. This track is about compounding that
+lead, not catching up.
+
+**a. Fix the live prompt/reference-image mismatch bug.** ✅ **DONE 2026-09-14.**
+`lib/shot-images.ts`: `buildImagePrompt` described every scene character in
+prose while `generateShotImage` only attached images for locked ones, as an
+unlabeled positional array — the model had no way to know which image was
+which name. Fixed by building a `referenceManifest` (one label per entry in
+`generationReferences`, same order — "Kael — locked character reference,
+match this face and appearance exactly") rendered as a numbered "# Attached
+reference images" block, and flagging every character/location with no
+matching image as `[no reference image attached]` in its text block. System
+prompt updated to bind numbered list position to attached image position.
+Typechecked clean.
+
+**b. Shot N-1 → Shot N continuity handoff.** ✅ **Already built** — found
+already live while implementing (a): `loadPreviousShot`, `buildContinuityBlock`,
+`Shot.continuityNotes`, and `previousShotContext` in `lib/shot-images.ts` pass
+shot N-1's selected image + a persisted `continuityNotes` text field into shot
+N's prompt and `generationReferences`. Matches the corrected, narrower finding
+from `continuity-engine-gap-2026-09` — the 9-category state model was rejected
+in favor of this. Remaining from that agreed order: structured `Shot.continuity`
+JSON snapshot via `SHOT_PLANNING`'s existing response schema (zero extra model
+calls) → fold continuity checks into the existing `IMAGE_VALIDATION` vision
+call → a `Prop` entity (phase 2) → a video continuity critic (later).
+
+**c. Pair every `Character.referenceImages` dispatch with its canonical name +
+a stable short description in the prompt text, never paraphrased downstream.**
+✅ **Done as part of (a)** — the `referenceManifest` labels are exactly this:
+name + role + what to match, positioned against each attached image.
+
+**e (renumbered from "structured Shot.continuity snapshot" in the agreed
+build order). ✅ DONE 2026-09-14.** Added `Shot.continuity Json?`
+(`packages/db/prisma/schema.prisma`, migration
+`20260914074618_add_shot_continuity_snapshot`) — an array of
+`{ subject, state }` entries stating what IS true as of a shot, not a diff of
+what changed, extending `SHOT_PLANNING`'s existing response schema in
+`lib/shots.ts` (zero extra model calls; the same batch call that already
+produces `continuityNotes`). Deliberately a snapshot, not a diff chain — a
+diff-only note requires replaying every prior shot correctly to reconstruct
+current state, which is where drift compounds. Read by the next shot's image
+prompt in `lib/shot-images.ts` (`buildContinuityBlock`) alongside the
+existing free-text `continuityNotes`. Same-scene scope only, matching
+`continuityNotes`' existing boundary — cross-scene continuity handoff
+(`loadPreviousShot` is same-scene only today) remains open, flagged
+separately in [[world-class-platform-roadmap-2026-09]] item 7.
+
+**d. `wan-2.7` `first_clip` continuation — downgraded from "integrate" to
+"spike," 2026-09-14.** The research brief's "already reachable via the
+existing OpenRouter integration" claim was verified against Alibaba's own API
+docs, not OpenRouter's. Checked OpenRouter's actual documented
+`POST /api/v1/videos` schema: `frame_images`/`input_references` are
+image-only, no field accepts a video clip as input. A `provider: {}`
+passthrough object exists ("keyed by provider slug, only options for the
+matched provider are forwarded") which is the only plausible path for
+`first_clip` — but it's unconfirmed whether OpenRouter forwards it correctly
+to Wan, and unresolved how a stored clip's bytes would reach it (a publicly
+fetchable URL, presumably — Narrata's storage is local-disk per
+[[narrata-deployment-plan]], reachability from OpenRouter's servers is
+unverified). Matches the research programme's own repeatedly-flagged
+aggregator-invents-a-capability trap. **Next step is a cheap one-off API spike
+sending `provider: { alibaba: { first_clip: <url> } }` against a real
+OpenRouter call, not a scene-video.ts wiring change** — do not build
+production continuity logic on this until that spike confirms the field is
+honored.
+
+**e. Audit every provider adapter for default-on prompt rewriting.** ✅ **DONE
+2026-09-14** — and the findings materially corrected the item. Checked
+OpenRouter's own public `GET /api/v1/videos/models` (`allowed_passthrough_parameters`
+per model) and `GET /api/v1/providers` (slugs) directly, live, for all 6
+`VIDEO_GENERATION` models actually in the registry, rather than trusting the
+research brief's vendor-level parameter names:
+- `alibaba/wan-2.6` (configured, enabled): rewrite-disable **is** exposed, but
+  as `enable_prompt_expansion` — not Wan's own `prompt_extend` name.
+- **`google/veo-3.1` / `veo-3.1-lite` (the seeded default!): also exposes a
+  rewrite-disable, `enhancePrompt`.** Prior research assumed Veo's rewriter
+  was mandatory/non-disableable based on Google's own API docs — that
+  assumption doesn't hold at the OpenRouter broker level. This was the
+  highest-impact fix in this item, since Veo Lite is the actual default model
+  running today, not a hypothetical Wan integration.
+- `bytedance/seedance-2.5`/`2.0`, `x-ai/grok-imagine-video`: no rewrite-related
+  passthrough parameter exists — audited, not applicable, not a gap.
+- `minimax/hailuo-2.3` (not currently in the registry): `prompt_optimizer`
+  confirmed exposed, added to the lookup table pre-emptively for when/if it's
+  added — `hailuo-3`/`hailuo-3-max` expose no such control.
+
+Implemented as `VIDEO_PROMPT_REWRITE_DISABLE` in `lib/ai/openrouter.ts`, sent
+via OpenRouter's `provider.options.<slug>.parameters` passthrough object on
+every `generateVideo` call for a listed model id.
+
+**Side finding, routed back to item d:** `alibaba/wan-2.7`'s
+`allowed_passthrough_parameters` includes `video`, `videos`, and `last_image`
+— fields that weren't visible from OpenRouter's generic documented schema and
+weren't found by reading the docs pages for item (d)'s spike. This may mean
+`wan-2.7` video-continuation input **is** reachable through OpenRouter after
+all, via the same passthrough channel used here, contrary to item (d)'s
+"downgraded to spike" conclusion. Not yet confirmed live — worth re-opening
+(d) with this specific passthrough shape rather than the originally-assumed
+top-level field.
+
+**f. Evaluate video-conditioned SFX (TV2A) providers for `SFX_GENERATION`.**
+✅ **Evaluated 2026-09-14 — verdict: not currently viable, no code change.**
+Scanned OpenRouter's full model catalog (`GET /api/v1/models`) for any model
+with `video` in `input_modalities` and `audio` in `output_modalities` — zero
+matches, out of 80 models that accept video input (all output text only,
+e.g. Gemini/Qwen-VL — vision/understanding models, not audio generation).
+Neither current `SFX_GENERATION`/`MUSIC_GENERATION` OpenRouter model is close:
+`openai/gpt-audio` takes text+audio in, no video/image; `google/lyria-3-pro-preview`
+takes text+**image** in (a still frame), not video. ElevenLabs (the default
+SFX provider) is text-only by product design. HunyuanVideo-Foley — the
+specific TV2A model the research flagged — isn't listed on OpenRouter at all,
+matching the research's own prior finding that Hunyuan has no confirmed
+OpenRouter listing. Narrata's assemble-without-audio + Audio Cue Plan already
+emit the right input shape; the gap is entirely on the provider-availability
+side. Re-check OpenRouter's catalog periodically (this is exactly the kind of
+capability that could appear with no announcement) rather than building
+toward it now.
+
+**g. Capability matrix / duration-quantization.** 🟡 **Partially done
+2026-09-14 — the concrete live bug is fixed, the forward-looking infra is
+deferred.** Investigated before building anything new and found 3 of 6
+enabled `VIDEO_GENERATION` models (`wan-2.6`, `seedance-2.0`,
+`grok-imagine-video`) had `config: null` — meaning `planVideoSegments` sent
+whatever duration a scene requested with zero validation, and (concrete bug)
+`scene-video.ts`'s `supportsLastFrame` check defaulted to `true` on unset
+config, so Narrata was sending a `last_frame` image to `wan-2.6` and
+`grok-imagine-video`, neither of which support it. Fixed by backfilling real
+`VideoModelConfig` for all 3 from OpenRouter's live `GET /api/v1/videos/models`
+catalog (`supported_durations`, `supported_resolutions`,
+`supported_frame_images`) — confirms the existing `durationMode: "fixed" |
+"range"` mechanism already *is* the duration-quantization matrix, it just
+needed real data (`wan-2.6` is genuinely sparse, `{5,10}` only; the others are
+effectively continuous integer ranges). See
+[[video-model-configs-backfilled-2026-09-14]]. **Deferred, not built:** a
+declarative exclusion/arity matrix for optional passthrough *parameters*
+(MiniMax mode⊥mode, Kling parameter⊥parameter, Wan arity) — no live bug
+exists yet since Narrata doesn't send combinations of optional passthrough
+parameters today; and an auto-fetch/cache layer keeping `VideoModelConfig`
+synced to OpenRouter's live catalog automatically, instead of today's
+one-time hand backfill (will drift again without one). Both are real
+architectural decisions worth scoping deliberately before building, not
+default-yes.
+
+**h. Process rule: check a vendor's own deprecation page before adding any
+model to `AiModelOption`, never the broker's catalogue.** OpenRouter listed
+`sora-2-pro` as a headline model three weeks after OpenAI announced Sora's
+shutdown — cheap to add, prevents a real incident class.
+
+**h2 (renumbered from the agreed build order's step 4). ✅ DONE 2026-09-14.**
+Folded continuity assertions into the existing `IMAGE_VALIDATION` vision call
+(`runValidation` in `lib/shot-images.ts`) instead of a new critic — ~$0.04/image
+vs ~$0.50/video clip, and the call already runs for every validated shot.
+Changes: the previous shot's image now rides along as a second vision input
+(already loaded for generation, zero extra fetch); `Shot.continuity` +
+`continuityNotes` are rendered as explicit "continuity to preserve" facts in
+the validation prompt; the system prompt now judges continuity adherence
+(a dropped/contradicted carried prop or wardrobe change fails the same way a
+mismatched character reference does) alongside the existing reference check.
+Also broadened the trigger condition: validation now runs whenever there's
+either a locked reference *or* continuity to check, not only when locked
+references exist — a scene with only unlocked characters but real carried
+state (a prop picked up last shot) is checked too. Still advisory-only, never
+blocks generation.
+
+**i. Tier-2 model-based quality/continuity critic.** 🟡 **Scoped 2026-09-14,
+deliberately not built yet** — user chose scope-only over building, given
+this repo's documented history of a new `AiJobType` causing a *silent* bug
+(wrong model silently used, caught only by manual browser testing, not
+typecheck/build) and no browser access being available to smoke-test in the
+implementing session. Concrete design, ready to build when picked back up:
+
+- **New `AiJobType.VIDEO_VALIDATION`**, default model
+  `google/gemini-3.7-flash` — already trusted elsewhere in the registry
+  (`MOTION_PROMPT_DRAFTING`, `AUDIO_CUE_PLANNING`) and confirmed video-capable
+  (`input_modalities` includes `video`). **Cannot reuse `IMAGE_VALIDATION`'s
+  model slot** — its current default (`gpt-5.6-luna`) doesn't accept video
+  input at all (text+image+file only), confirmed via OpenRouter's live
+  `GET /api/v1/models`.
+- **No schema migration needed for storage** — `Asset.validationPassed` /
+  `validationNotes` / `validationModelId` already exist and are asset-type
+  generic (currently always null for `VIDEO_CLIP` rows since nothing writes
+  them). Kept deliberately separate from `qcPassed`/`qcNotes`
+  (`checkSegmentFrozen`'s deterministic, free, local ffmpeg check) — different
+  failure modes, already-separated fields, no schema change either way.
+- **Trigger point**: after each video segment/pair is generated and stored in
+  `scene-video.ts` (mirrors `shot-images.ts`'s `runValidation` call after
+  `generateImage`). Advisory-only, skipped entirely when no
+  `VIDEO_VALIDATION` model is configured — same zero-cost-by-default posture
+  as `IMAGE_VALIDATION`.
+- **Rubric, deliberately minimal** (matches the "don't over-engineer" lesson
+  from [[continuity-engine-gap-2026-09]]): reuse `IMAGE_VALIDATION`'s
+  `{passed, notes}` shape, not `SeedVideoBench`'s full 4-dimension score or
+  `Wan-Bench`'s 14-metric breakdown — those are development-time benchmark
+  rubrics, not necessarily what one advisory per-clip check needs. One vision
+  call judging: (1) reference consistency against locked
+  character/location images, (2) continuity adherence against
+  `Shot.continuity`/`continuityNotes` (reusing the same facts built for item
+  h2 rather than reconstructing them), (3) prompt adherence (does the clip's
+  actual motion/content match the requested camera movement/action).
+  Explicitly deferred: motion-quality/physics/aesthetic scoring, best-of-N
+  selection.
+- **Implementation checklist when built** (from
+  [[adding-ai-job-type-checklist]]): `schema.prisma` enum + migration;
+  `ai-models-manager.tsx`'s `JOB_TYPES`/`JOB_LABELS`; `api/ai-models/route.ts`'s
+  own separate `JOB_TYPES` array; `seed.ts` default row; a new
+  `runVideoValidation()` mirroring `shot-images.ts`'s `runValidation()`; wire
+  into `generatePairSegments` (and the TEXT_TO_VIDEO branch); manual smoke
+  test of Settings → AI Models and a real generation — this last step is
+  mandatory per the checklist's own history, not optional polish.
 
 ### THEN — Sprint 3–4 (weeks 6–10): make the first hour survivable
 
@@ -196,10 +420,11 @@ from data item #4 already creates.
 
 ## 5. Roadmap risks that should reorder priorities
 
-1. **Cost blindness is the #1 risk.** `FACT`: no cost is recorded anywhere. It
-   blocks pricing, blocks EXP-004, blocks abuse detection, and blocks knowing
-   whether any of this is viable. It is a ~small change. This is why it outranks
-   every feature.
+1. **Cost blindness — resolved 2026-09-14.** `GenerationEvent` now records real
+   per-call cost for the 5 metered job types. Remaining exposure: text-planning
+   calls are uninstrumented (deliberate, cheap fast-follow) and there is still no
+   dashboard surfacing the data — EXP-004 and abuse detection are unblocked in
+   principle but not yet *visible* to anyone.
 2. **Stale voice IDs are a silent differentiator failure.** They break at first
    contact, in the exact feature Narrata claims as continuity. Fix before users.
 3. **The auth-before-deploy shift is mostly *done* — the real gate moved.** Auth
@@ -235,7 +460,8 @@ video-vs-illustration mode mix; failed-generation rate by provider.
 
 | Agent | Question |
 |---|---|
-| `ai-architect` + `technical-architect` | Capture `usage.cost` + `GenerationEvent` (#4). Should voice IDs become a registry like `AiModelOption` (#3)? |
+| `ai-architect` + `technical-architect` | Should voice IDs become a registry like `AiModelOption` (#3)? |
+| `ai-architect` + `video-architect` | Own the parallel pipeline-quality track (Section 3, items a–i) — continuity fix, reference textual-anchoring, `wan-2.7` continuation, prompt-rewrite audit, capability matrix, tier-2 critic. |
 | `video-architect` | Settle the default video model; run EXP-004 (#5). |
 | `ui-ux-engineer` | Export/share placement (#6); guided first-run without breaking manual-first (#7). |
 | `growth-strategist` | Define activation; own the funnel definition for #9. |

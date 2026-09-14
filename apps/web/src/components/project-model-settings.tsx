@@ -19,6 +19,7 @@ const JOB_LABELS: Record<string, string> = {
   MOTION_PROMPT_DRAFTING: "Motion Prompt Drafting",
   DURATION_RECOMMENDATION: "Duration Recommendation",
   VIDEO_GENERATION: "Video Generation",
+  VIDEO_VALIDATION: "Video Validation",
   MUSIC_GENERATION: "Music Generation",
   SFX_GENERATION: "SFX Generation",
   AUDIO_CUE_PLANNING: "Audio Cue Planning",

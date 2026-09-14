@@ -24,6 +24,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { TermHint } from "@/components/term-hint";
 import { isGenerationActive } from "@/lib/generation-claims";
 import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
+import { useGenerationEstimate, formatEstimate } from "@/lib/use-generation-estimate";
 import {
   assembleVideoPrompt,
   EMPTY_PROMPT_BUILDER_FIELDS,
@@ -58,6 +59,8 @@ export function SceneVideoPanel({
   initialVideoGenerateAudio,
   initialVideoClips,
   initialVideoGenerationStartedAt,
+  projectId,
+  initialError,
 }: {
   sceneId: string;
   mode: "IMAGE_TO_VIDEO" | "TEXT_TO_VIDEO";
@@ -73,6 +76,11 @@ export function SceneVideoPanel({
   initialVideoGenerateAudio: boolean;
   initialVideoClips: SceneVideoClipItem[];
   initialVideoGenerationStartedAt: string | null;
+  projectId: string;
+  // Durable failure from GenerationEvent (getActiveFailures), seeding
+  // lastError below so a failure survives a reload — see ShotItem's
+  // lastImageError for the same idea one level down.
+  initialError?: GenerationErrorInfo | null;
 }) {
   const [motionPrompt, setMotionPrompt] = useState(initialMotionPrompt);
   const [savedMotionPrompt, setSavedMotionPrompt] = useState(initialMotionPrompt);
@@ -87,9 +95,14 @@ export function SceneVideoPanel({
   const [saving, setSaving] = useState(false);
   const [modelId, setModelId] = useState("");
   const [models, setModels] = useState<ModelOption[]>([]);
+  // Advisory-only tier-2 critic model — "" means "no override," which the
+  // route resolves to whatever VIDEO_VALIDATION default is configured (or
+  // skips the check entirely if none is). Same optional-override shape as
+  // IMAGE_VALIDATION's picker in scene-manager.tsx.
+  const [validationModelId, setValidationModelId] = useState("");
   const [generating, setGenerating] = useState(() => isGenerationActive(initialVideoGenerationStartedAt, "video"));
   const [videoClips, setVideoClips] = useState(initialVideoClips);
-  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(initialError ?? null);
   const unmountedRef = useRef(false);
   const [draftModelId, setDraftModelId] = useState("");
   const [drafting, setDrafting] = useState(false);
@@ -185,6 +198,13 @@ export function SceneVideoPanel({
     return { perPair, totalSeconds: perPair.reduce((a, b) => a + b, 0) };
   }, [mode, pairCount, targetDuration, modelConfig]);
 
+  // How many separate clips Generate Video is actually about to produce —
+  // used both for the estimate's "per clip" phrasing and to decide whether
+  // this generation is big enough to warrant a confirm step below.
+  const clipCount = mode === "IMAGE_TO_VIDEO" ? Math.max(pairCount, 1) : segmentPlan?.durations.length ?? 1;
+  const estimate = useGenerationEstimate(projectId, "VIDEO_GENERATION", modelId || null);
+  const estimateText = formatEstimate(estimate, "clip");
+
   async function save({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
     setSaving(true);
     try {
@@ -220,6 +240,18 @@ export function SceneVideoPanel({
       toast.error("Pick a video generation model first.");
       return;
     }
+    // Only worth an extra click for a real multi-clip batch — a single clip
+    // stays one-click so the common case doesn't gain friction.
+    if (clipCount > 1) {
+      const ok = await confirm({
+        title: `Generate ${clipCount} clips?`,
+        description: estimateText
+          ? `This scene will generate ${clipCount} clips. Observed cost/time: ${estimateText}`
+          : `This scene will generate ${clipCount} clips. No cost/time history yet for this model.`,
+        confirmLabel: "Generate",
+      });
+      if (!ok) return;
+    }
     if (dirty) {
       const ok = await save({ silent: true });
       if (!ok) return;
@@ -230,7 +262,7 @@ export function SceneVideoPanel({
       const res = await fetch(`/api/scenes/${sceneId}/video/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelId }),
+        body: JSON.stringify({ modelId, validationModelId: validationModelId || undefined }),
       });
       if (res.status === 409) {
         toast.warning("Already generating for this scene — watching for it to finish.");
@@ -357,7 +389,7 @@ export function SceneVideoPanel({
       const res = await fetch(`/api/scenes/${sceneId}/video/pairs/${pairIndex}/regenerate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelId }),
+        body: JSON.stringify({ modelId, validationModelId: validationModelId || undefined }),
       });
       if (res.status === 409) {
         toast.warning("Already generating for this scene — try again once it finishes.");
@@ -544,12 +576,21 @@ export function SceneVideoPanel({
             : "Generate and select a scene image above first."}
         </p>
       ) : (
-        <div className="flex flex-wrap items-end gap-2">
-          <ModelSelect jobType="VIDEO_GENERATION" value={modelId} onChange={setModelId} onModelsChange={setModels} />
-          <Button size="sm" onClick={generate} disabled={generating}>
-            <Clapperboard className="size-3.5" />
-            {generating ? "Generating…" : "Generate Video"}
-          </Button>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex flex-wrap items-end gap-2">
+            <ModelSelect jobType="VIDEO_GENERATION" value={modelId} onChange={setModelId} onModelsChange={setModels} />
+            <ModelSelect
+              jobType="VIDEO_VALIDATION"
+              value={validationModelId}
+              onChange={setValidationModelId}
+              projectId={projectId}
+            />
+            <Button size="sm" onClick={generate} disabled={generating}>
+              <Clapperboard className="size-3.5" />
+              {generating ? "Generating…" : "Generate Video"}
+            </Button>
+          </div>
+          {estimateText && <p className="text-xs text-muted-foreground">{estimateText}</p>}
         </div>
       )}
 
@@ -589,6 +630,17 @@ export function SceneVideoPanel({
                             <TriangleAlert className="size-3" />
                           </span>
                         )}
+                        {clip.validationPassed === false && (
+                          <span
+                            className="absolute left-1 top-1 rounded-full bg-rose-600 p-0.5 text-white"
+                            title={
+                              clip.validationNotes ??
+                              "Video validation flagged this clip — likely a face/identity, reference, continuity, or motion mismatch. Consider retaking it."
+                            }
+                          >
+                            <TriangleAlert className="size-3" />
+                          </span>
+                        )}
                       </div>
                       {mode === "IMAGE_TO_VIDEO" && take.isSelected && clip.pairIndex != null && isFirstOfPair && (
                         <Button
@@ -624,6 +676,11 @@ export function SceneVideoPanel({
                             {clip.qcNotes && (
                               <div>
                                 <span className="font-medium text-foreground">QC:</span> {clip.qcNotes}
+                              </div>
+                            )}
+                            {clip.validationNotes && (
+                              <div>
+                                <span className="font-medium text-foreground">Validation:</span> {clip.validationNotes}
                               </div>
                             )}
                             {clip.prompt && (

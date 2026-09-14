@@ -9,6 +9,7 @@ import { Clapperboard, Trash2 } from "lucide-react";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { isGenerationActive } from "@/lib/generation-claims";
 import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
+import { useGenerationEstimate } from "@/lib/use-generation-estimate";
 
 export interface SilentVideoItem {
   id: string;
@@ -22,13 +23,19 @@ export interface SilentVideoItem {
 export function SilentAssemblyPanel({
   parentType,
   parentId,
+  projectId,
   initialSilentVideos,
   initialSilentVideoGenerationStartedAt,
+  initialError,
 }: {
   parentType: "story" | "episode";
   parentId: string;
+  projectId: string;
   initialSilentVideos: SilentVideoItem[];
   initialSilentVideoGenerationStartedAt: string | null;
+  // Durable failure from GenerationEvent (getActiveFailures), seeding
+  // lastError below — see ShotItem's lastImageError for the idea.
+  initialError?: GenerationErrorInfo | null;
 }) {
   const router = useRouter();
   const [modelId, setModelId] = useState("");
@@ -36,9 +43,17 @@ export function SilentAssemblyPanel({
     isGenerationActive(initialSilentVideoGenerationStartedAt, "silentAssembly")
   );
   const [silentVideos, setSilentVideos] = useState(initialSilentVideos);
-  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(initialError ?? null);
   const { confirm, ConfirmDialog } = useConfirm();
   const unmountedRef = useRef(false);
+  // No cost — local ffmpeg, not a paid API call — so this is duration/ETA
+  // only. jobType "VIDEO" events never carry a modelId (see
+  // lib/video-assembly.ts), so the estimate is jobType-wide, not per-model.
+  const estimate = useGenerationEstimate(projectId, "VIDEO", null);
+  const estimateText =
+    estimate && estimate.sampleSize > 0 && estimate.medianDurationMs != null
+      ? `~${Math.round(estimate.medianDurationMs / 1000)}s, based on ${estimate.sampleSize} past run${estimate.sampleSize > 1 ? "s" : ""} — no added cost, this step renders locally.`
+      : null;
 
   const base = parentType === "story" ? `/api/stories/${parentId}/silent-video` : `/api/episodes/${parentId}/silent-video`;
   const statusUrl = parentType === "story" ? `/api/stories/${parentId}/status` : `/api/episodes/${parentId}/status`;
@@ -145,6 +160,7 @@ export function SilentAssemblyPanel({
           {generating ? "Assembling…" : "Assemble Silent Picture"}
         </Button>
       </div>
+      {estimateText && <p className="text-xs text-muted-foreground">{estimateText}</p>}
 
       {lastError && (
         <GenerationErrorBanner error={lastError} onRetry={generate} onDismiss={() => setLastError(null)} />

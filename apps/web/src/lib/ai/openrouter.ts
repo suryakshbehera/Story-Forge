@@ -195,6 +195,10 @@ export interface GenerateImageParams {
 export interface GeneratedImage {
   base64: string;
   mimeType: string;
+  // USD cost OpenRouter charged for this call, when its response includes a
+  // usage.cost figure (confirmed present for chat completions; unconfirmed
+  // for this endpoint — extracted defensively, undefined when absent).
+  costUsd?: number;
 }
 
 // IMAGE_GENERATION goes through OpenRouter's dedicated Image API
@@ -239,7 +243,8 @@ export async function generateImage({
     throw new OpenRouterError("OpenRouter returned no image data.");
   }
 
-  return { base64: image.b64_json, mimeType: image.media_type ?? "image/png" };
+  const costUsd = typeof data?.usage?.cost === "number" ? data.usage.cost : undefined;
+  return { base64: image.b64_json, mimeType: image.media_type ?? "image/png", costUsd };
 }
 
 export interface GenerateVideoParams {
@@ -280,7 +285,37 @@ export interface GenerateVideoParams {
 export interface GeneratedVideo {
   base64: string;
   mimeType: string;
+  // See GeneratedImage.costUsd — same defensive extraction, sourced from the
+  // completed poll response here rather than the submit response.
+  costUsd?: number;
 }
+
+// Video providers whose OpenRouter-exposed model silently rewrites the
+// caller's prompt unless told not to. Narrata already spends LLM budget
+// producing a considered prompt in SHOT_PLANNING/MOTION_PROMPT_DRAFTING —
+// letting the video provider silently rewrite it again undoes that work.
+// Verified 2026-09-14 against OpenRouter's own public, unauthenticated
+// `GET /api/v1/videos/models` `allowed_passthrough_parameters` per model id
+// and `GET /api/v1/providers` for each slug — not vendor docs, because the
+// parameter OpenRouter forwards doesn't always match the vendor's own name
+// (Alibaba's Wan 2.6 is exposed here as "enable_prompt_expansion", not Wan's
+// own "prompt_extend" — while Wan 2.7 uses "prompt_extend" directly; the two
+// aren't interchangeable, and Wan 3.0 exposes no passthrough parameters at
+// all). Re-verify against that endpoint before adding an entry for a model
+// not checked here — silently sending an unsupported field is a no-op, not
+// an error, on OpenRouter's video API (see [[wan27-openrouter-gap-2026-09-14]]
+// for the same class of mistake made the other direction). google/veo-3.1[-lite]
+// is the seeded default model and was assumed to have a mandatory,
+// non-disableable rewriter based on prior research done against Google's own
+// API docs — that assumption doesn't hold at the OpenRouter broker level,
+// where `enhancePrompt` is a real, listed passthrough parameter.
+const VIDEO_PROMPT_REWRITE_DISABLE: Record<string, { providerSlug: string; parameter: string }> = {
+  "alibaba/wan-2.6": { providerSlug: "alibaba", parameter: "enable_prompt_expansion" },
+  "alibaba/wan-2.7": { providerSlug: "alibaba", parameter: "prompt_extend" },
+  "minimax/hailuo-2.3": { providerSlug: "minimax", parameter: "prompt_optimizer" },
+  "google/veo-3.1": { providerSlug: "google-vertex", parameter: "enhancePrompt" },
+  "google/veo-3.1-lite": { providerSlug: "google-vertex", parameter: "enhancePrompt" },
+};
 
 // VIDEO_GENERATION goes through OpenRouter's dedicated video API
 // (POST /api/v1/videos) — a separate endpoint alongside generateImage above.
@@ -288,7 +323,7 @@ export interface GeneratedVideo {
 // id/status immediately, and the actual clip is retrieved by polling
 // GET /api/v1/videos/{id} until the job reaches a terminal status, then
 // downloading from the returned URL.
-async function pollVideoJob(jobId: string, apiKey: string): Promise<string> {
+async function pollVideoJob(jobId: string, apiKey: string): Promise<{ url: string; costUsd?: number }> {
   const deadline = Date.now() + 5 * 60 * 1000;
   while (Date.now() < deadline) {
     const response = await fetchWithTimeout(
@@ -304,7 +339,8 @@ async function pollVideoJob(jobId: string, apiKey: string): Promise<string> {
     if (data.status === "completed") {
       const url = data.unsigned_urls?.[0];
       if (!url) throw new OpenRouterError("OpenRouter reported the video job complete but returned no download URL.");
-      return url;
+      const costUsd = typeof data?.usage?.cost === "number" ? data.usage.cost : undefined;
+      return { url, costUsd };
     }
     if (data.status === "failed") {
       // OpenRouter's job status payload carries the actual failure reason
@@ -360,9 +396,26 @@ export async function generateVideo({
         ...(inputReferenceDataUris?.length
           ? { input_references: inputReferenceDataUris.map((url) => ({ type: "image_url", image_url: { url } })) }
           : {}),
+        ...(VIDEO_PROMPT_REWRITE_DISABLE[modelId]
+          ? {
+              provider: {
+                options: {
+                  [VIDEO_PROMPT_REWRITE_DISABLE[modelId].providerSlug]: {
+                    parameters: { [VIDEO_PROMPT_REWRITE_DISABLE[modelId].parameter]: false },
+                  },
+                },
+              },
+            }
+          : {}),
       }),
     },
-    60_000
+    // Unlike the other fetchWithTimeout call sites, this request's body can
+    // embed 1-3 shot images as base64 data URIs (frame_images + up to 50
+    // input_references) — multi-MB JSON payloads confirmed live to exceed
+    // 60s to upload on ordinary broadband, aborting a submit that OpenRouter
+    // would otherwise have accepted. 180s gives real uploads room without
+    // matching pollVideoJob's much longer generation-wait budget.
+    180_000
   );
 
   if (!submitResponse.ok) {
@@ -371,7 +424,7 @@ export async function generateVideo({
   }
 
   const submitted = await submitResponse.json();
-  const downloadUrl = await pollVideoJob(submitted.id, apiKey);
+  const { url: downloadUrl, costUsd } = await pollVideoJob(submitted.id, apiKey);
 
   const contentResponse = await fetchWithTimeout(
     downloadUrl,
@@ -387,7 +440,7 @@ export async function generateVideo({
   }
   const mimeType = contentResponse.headers.get("content-type") ?? "video/mp4";
 
-  return { base64: buffer.toString("base64"), mimeType };
+  return { base64: buffer.toString("base64"), mimeType, costUsd };
 }
 
 // generateAudio (MUSIC_GENERATION/SFX_GENERATION) used to live here too — see
@@ -418,6 +471,10 @@ export interface GenerateAudioClipParams {
 export interface GeneratedAudioClip {
   base64: string;
   mimeType: string;
+  // See GeneratedImage.costUsd — for a streamed response, OpenRouter puts
+  // usage on the last SSE message rather than a single JSON body, so this is
+  // the last usage.cost value seen across all chunks.
+  costUsd?: number;
 }
 
 // Request shape here is NOT fresh guesswork — this same chat-completions
@@ -476,6 +533,7 @@ export async function generateAudioClip({ modelId, prompt }: GenerateAudioClipPa
   const decoder = new TextDecoder();
   const chunks: string[] = [];
   let buffer = "";
+  let costUsd: number | undefined;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -487,7 +545,7 @@ export async function generateAudioClip({ modelId, prompt }: GenerateAudioClipPa
       if (!line.startsWith("data: ")) continue;
       const data = line.slice("data: ".length).trim();
       if (!data || data === "[DONE]") continue;
-      let parsed: { choices?: Array<{ delta?: { audio?: { data?: string } } }> };
+      let parsed: { choices?: Array<{ delta?: { audio?: { data?: string } } }>; usage?: { cost?: number } };
       try {
         parsed = JSON.parse(data);
       } catch {
@@ -495,6 +553,7 @@ export async function generateAudioClip({ modelId, prompt }: GenerateAudioClipPa
       }
       const audioChunk = parsed.choices?.[0]?.delta?.audio?.data;
       if (audioChunk) chunks.push(audioChunk);
+      if (typeof parsed.usage?.cost === "number") costUsd = parsed.usage.cost;
     }
   }
 
@@ -503,7 +562,7 @@ export async function generateAudioClip({ modelId, prompt }: GenerateAudioClipPa
   }
 
   const pcm = Buffer.from(chunks.join(""), "base64");
-  return { base64: wrapPcmAsWav(pcm, 24000, 1).toString("base64"), mimeType: "audio/wav" };
+  return { base64: wrapPcmAsWav(pcm, 24000, 1).toString("base64"), mimeType: "audio/wav", costUsd };
 }
 
 export interface GenerateSpeechParams {
@@ -523,6 +582,10 @@ export interface GenerateSpeechParams {
 export interface GeneratedSpeech {
   base64: string;
   mimeType: string;
+  // Always undefined: this endpoint returns raw audio bytes, not a JSON body
+  // usage.cost could be read from. Kept for shape parity with the other
+  // Generated* return types that do populate it.
+  costUsd?: number;
 }
 
 async function requestSpeech(

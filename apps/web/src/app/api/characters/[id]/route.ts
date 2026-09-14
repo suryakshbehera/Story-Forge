@@ -17,6 +17,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 const patchSchema = z.object({
   name: z.string().min(1).optional(),
   identity: z.string().optional().nullable(),
+  age: z.string().optional().nullable(),
   appearance: z.string().optional().nullable(),
   personality: z.string().optional().nullable(),
   clothing: z.string().optional().nullable(),

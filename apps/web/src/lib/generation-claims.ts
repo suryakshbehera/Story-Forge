@@ -23,11 +23,30 @@ export function isGenerationActive(startedAt: string | Date | null | undefined, 
   return Date.now() - new Date(startedAt).getTime() < STALE_MS[jobType];
 }
 
+// Human-readable stage name per job type — distinct from InFlightJob.label
+// below, which names the *entity* ("Shot 3", "Scene 2"). The job tray shows
+// both: stage says what kind of work is running, label says on what.
+export const STAGE_LABELS: Record<GenerationJobType, string> = {
+  shotImage: "Image generation",
+  narration: "Narration",
+  dialogueAudio: "Dialogue audio",
+  video: "Video generation",
+  music: "Music generation",
+  sfx: "SFX generation",
+  silentAssembly: "Silent assembly",
+  finalAssembly: "Final render",
+};
+
 // Shared shape for the header's job tray — one entry per currently-active
 // claim, resolved server-side in app/api/projects/[id]/jobs/route.ts.
+// etaSeconds is the observed-median duration for this job type (see
+// GenerationEvent/getGenerationEstimate) minus elapsed time, or null when
+// there's not yet enough history to estimate from.
 export interface InFlightJob {
   jobType: GenerationJobType;
+  stage: string;
   label: string;
   startedAt: string;
   href: string;
+  etaSeconds: number | null;
 }

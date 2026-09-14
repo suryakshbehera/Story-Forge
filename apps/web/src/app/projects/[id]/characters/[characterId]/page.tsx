@@ -39,6 +39,7 @@ export default async function CharacterDetailPage({
               initialFields={{
                 name: character.name,
                 identity: character.identity ?? "",
+                age: character.age ?? "",
                 appearance: character.appearance ?? "",
                 personality: character.personality ?? "",
                 clothing: character.clothing ?? "",

@@ -27,6 +27,8 @@ export function SceneAudioPanel({
   initialSfx,
   initialMusicGenerationStartedAt,
   initialSfxGenerationStartedAt,
+  initialMusicError,
+  initialSfxError,
 }: {
   sceneId: string;
   initialMusicPrompt: string;
@@ -37,6 +39,10 @@ export function SceneAudioPanel({
   initialSfx: AudioTake[];
   initialMusicGenerationStartedAt: string | null;
   initialSfxGenerationStartedAt: string | null;
+  // Durable failures from GenerationEvent (getActiveFailures), seeding each
+  // AudioTrackSection's lastError below — see ShotItem's lastImageError.
+  initialMusicError?: GenerationErrorInfo | null;
+  initialSfxError?: GenerationErrorInfo | null;
 }) {
   const [musicPrompt, setMusicPrompt] = useState(initialMusicPrompt);
   const [savedMusicPrompt, setSavedMusicPrompt] = useState(initialMusicPrompt);
@@ -99,6 +105,7 @@ export function SceneAudioPanel({
         initialTakes={initialMusic}
         staleKey="music"
         initialGenerationStartedAt={initialMusicGenerationStartedAt}
+        initialError={initialMusicError}
       />
 
       <AudioTrackSection
@@ -116,6 +123,7 @@ export function SceneAudioPanel({
         initialTakes={initialSfx}
         staleKey="sfx"
         initialGenerationStartedAt={initialSfxGenerationStartedAt}
+        initialError={initialSfxError}
       />
 
       <Button size="sm" onClick={() => save()} disabled={!dirty || saving} className="self-start">
@@ -141,6 +149,7 @@ function AudioTrackSection({
   initialTakes,
   staleKey,
   initialGenerationStartedAt,
+  initialError,
 }: {
   label: string;
   sceneId: string;
@@ -156,12 +165,13 @@ function AudioTrackSection({
   initialTakes: AudioTake[];
   staleKey: "music" | "sfx";
   initialGenerationStartedAt: string | null;
+  initialError?: GenerationErrorInfo | null;
 }) {
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(() => isGenerationActive(initialGenerationStartedAt, staleKey));
   const [uploading, setUploading] = useState(false);
   const [takes, setTakes] = useState(initialTakes);
-  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(initialError ?? null);
   const fileRef = useRef<HTMLInputElement>(null);
   const { confirm, ConfirmDialog } = useConfirm();
   const unmountedRef = useRef(false);

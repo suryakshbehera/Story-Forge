@@ -100,6 +100,26 @@ export function splitFixedDurations(targetSeconds: number, legCount: number, opt
   if (legs === 0) return [];
   if (opts.length === 0) return Array(legs).fill(Math.max(1, Math.round(Math.max(targetSeconds, 0) / legs)));
 
+  // Each leg here is a shot pair, and every pair's own generatePairSegments
+  // call (scene-video.ts) already chains a single leg's target into multiple
+  // fixed-duration sub-segments via planVideoSegments/planFixedSegments (up
+  // to MAX_SEGMENTS each) — a leg is not limited to one clip. The
+  // single-value-per-leg search below predates that and assumed it was, so
+  // for a fair share bigger than the model's longest single clip it would
+  // silently cap the whole scene's video at legs*max(opts) regardless of how
+  // long targetSeconds actually was (confirmed live: a 2-pair, ~36s-target
+  // dialogue scene came back as two 8s clips = 16s total, leaving the video
+  // frozen on its last frame for the remaining ~20s of narration/dialogue
+  // audio). Once a fair share needs more than one clip, hand every leg an
+  // even, unsnapped share instead and let each leg's own chaining round it —
+  // the tight joint-optimization below is only meaningful (and only
+  // preserves its "avoid overshoot" guarantee) when one clip per leg is
+  // actually enough.
+  if (targetSeconds / legs > opts[opts.length - 1]) {
+    const share = Math.max(targetSeconds, 0) / legs;
+    return Array(legs).fill(share);
+  }
+
   // sumsAtStep[k] = every sum reachable using exactly k legs from `opts`.
   // Small in practice (a handful of fixed durations, a modest leg count from
   // shot count), so tracking every reachable sum per step is cheap — no need

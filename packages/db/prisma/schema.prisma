@@ -270,6 +270,19 @@ model Scene {
   title       String?
   description String @db.Text
 
+  // Temporal memory (scene-to-scene) — the world's state as SHOT_PLANNING
+  // resolved it at the end of this scene, for whatever categories don't
+  // already live on Shot: environment (location/time/weather/lighting),
+  // unfinished actions, spatial layout, hard continuity anchors, and the
+  // cause->effect story state. Character/object state is deliberately NOT
+  // duplicated here — that's already carried via the scene's last Shot's
+  // continuity/continuityNotes (see scene-continuity.ts), which this
+  // complements rather than replaces. Untyped Json?, same "AI-response
+  // boundary" posture as Shot.continuity: parsed defensively, never trusted.
+  // Drafted by the same SHOT_PLANNING call that plans this scene's shots (no
+  // extra model call), consumed by the NEXT scene's SHOT_PLANNING prompt.
+  closingState Json?
+
   visualMode       SceneVisualMode @default(ILLUSTRATION)
   visualModeReason String?         @db.Text
 
@@ -384,14 +397,199 @@ model Scene {
 // not versioned — same reasoning as Scene itself.
 // ─────────────────────────────────────────────────────────────────────────
 
+// Purely additive since the original 7: DOLLY/TRACK/CRANE/HANDHELD were added
+// once Director AI made the zoom-vs-dolly distinction expressible ("slow
+// push-in" is a dolly, not a zoom — the camera physically translates, which
+// changes perspective and parallax; a zoom only changes field of view). The
+// original 7 values are never renamed or removed: they're already stored on
+// live Shot rows and inside live AiModelOption.config.preferredCameraMovements
+// JSON, which is untyped and would silently stop matching on a rename.
+//
+// ILLUSTRATION scenes render these as ffmpeg Ken Burns moves over a still
+// (buildCameraFilter, video-assembly.ts), where a dolly and a zoom are
+// necessarily the same affine transform; IMAGE_TO_VIDEO scenes send them as
+// prose to a video model (cameraMovementInstruction, scene-video.ts), where
+// the distinction is real and worth expressing.
+// Grouped by family, not alphabetically — this order is what the shot editor
+// dropdown and the model-routing checkboxes render in.
+//
+// PAN_UP/PAN_DOWN were renamed to TILT_UP/TILT_DOWN (a pan is horizontal
+// rotation; vertical rotation is a tilt) via ALTER TYPE … RENAME VALUE, which
+// updates every stored Shot row automatically because the enum label IS the
+// storage. PAN_LEFT/PAN_RIGHT keep their names — those were always correct.
+// The rename does NOT reach AiModelOption.config.preferredCameraMovements,
+// which holds these as plain JSON strings; the same migration rewrites those.
 enum CameraMovement {
   STATIC
+
+  // Optical — the lens changes, the camera body does not move.
   ZOOM_IN
   ZOOM_OUT
+  CRASH_ZOOM
+
+  // Translation toward/away from the subject — perspective and parallax change.
+  DOLLY_IN
+  DOLLY_OUT
+  // Dolly and zoom in opposition: the subject holds size while the background
+  // scale shifts. Not decomposable into a dolly plus a zoom, because the whole
+  // effect is that they happen simultaneously and cancel.
+  DOLLY_ZOOM
+
+  // Rotation in place — the camera pivots, its position fixed.
   PAN_LEFT
   PAN_RIGHT
-  PAN_UP
-  PAN_DOWN
+  WHIP_PAN
+  TILT_UP
+  TILT_DOWN
+  ROLL
+
+  // Lateral / vertical translation of the camera body.
+  TRACK_LEFT
+  TRACK_RIGHT
+  // Pedestal is the camera body rising/falling on its column — parallel
+  // translation. A crane arcs the viewpoint through space on an arm, and a
+  // tilt merely rotates without moving. Three different shots.
+  PEDESTAL_UP
+  PEDESTAL_DOWN
+  CRANE_UP
+  CRANE_DOWN
+
+  // Circular travel around the subject.
+  ARC_LEFT
+  ARC_RIGHT
+
+  // Texture / platform rather than a direction of travel.
+  STEADICAM_FOLLOW
+  HANDHELD
+  AERIAL
+}
+
+// ── Director AI cinematography vocabulary ────────────────────────────────
+// Resolved per shot by SHOT_PLANNING (or the backfill pass,
+// directExistingShots in lib/shots.ts) and rendered into the image prompt by
+// buildCameraDirectionBlock (lib/shot-images.ts). Every one of the columns
+// below is nullable with NO default, deliberately: null means "the Director
+// said nothing about this, let the image model decide", which is different
+// from — and better than — defaulting every shot to a bland eye-level
+// medium. A default would silently flatten every shot in the product into
+// the same look; null keeps the prompt silent on that axis instead.
+//
+// Enums are closed vocabularies (a fixed film-grammar term list the UI can
+// offer as a dropdown); the two free-text columns (focusPoint,
+// subjectMovement) stay prose for the same reason Character.appearance does
+// — no useful closed set exists for "what the eye should land on".
+
+enum ShotSize {
+  EXTREME_WIDE
+  WIDE
+  FULL
+  MEDIUM
+  MEDIUM_CLOSE_UP
+  CLOSE_UP
+  EXTREME_CLOSE_UP
+}
+
+enum CameraAngle {
+  EYE_LEVEL
+  LOW
+  HIGH
+  OVERHEAD
+  DUTCH
+  OVER_THE_SHOULDER
+  POV
+}
+
+enum ShotFraming {
+  SINGLE
+  TWO_SHOT
+  THREE_SHOT
+  GROUP
+  INSERT
+  ESTABLISHING
+}
+
+enum DepthOfField {
+  SHALLOW
+  MEDIUM
+  DEEP
+}
+
+enum LightingStyle {
+  NATURAL
+  SOFT
+  HARD
+  HIGH_KEY
+  LOW_KEY
+  BACKLIT
+  SILHOUETTE
+  GOLDEN_HOUR
+  MOONLIT
+  PRACTICAL
+}
+
+enum ShotComposition {
+  CENTERED
+  RULE_OF_THIRDS
+  SYMMETRICAL
+  LEADING_LINES
+  FRAME_WITHIN_FRAME
+  NEGATIVE_SPACE
+  DIAGONAL
+}
+
+// Director AI emotion vocabulary — same "curated closed set, not an
+// unbounded label list" reasoning as CameraMovement: a model given 100
+// near-synonyms clusters on 3-4 "safe" ones, one given ~35 clearly
+// distinguished ones actually discriminates. Nuance beyond this vocabulary
+// belongs in Shot.facialExpression/bodyLanguage (prose), not in more enum
+// values — mirrors focusPoint/subjectMovement sitting alongside ShotSize/
+// CameraAngle.
+enum Emotion {
+  JOY
+  LOVE
+  HOPE
+  PRIDE
+  RELIEF
+  SADNESS
+  GRIEF
+  LONELINESS
+  DESPAIR
+  NOSTALGIA
+  ANGER
+  RAGE
+  FRUSTRATION
+  RESENTMENT
+  FEAR
+  ANXIETY
+  DREAD
+  PANIC
+  SURPRISE
+  SHOCK
+  AWE
+  CONFUSION
+  CURIOSITY
+  SHAME
+  GUILT
+  JEALOUSY
+  BETRAYAL
+  DESIRE
+  DETERMINATION
+  COURAGE
+  DEFIANCE
+  TRIUMPH
+  SUSPENSE
+  CALM
+  DOUBT
+  EXHAUSTION
+}
+
+// How strongly the emotion reads, not how long it lasts. Three tiers, same
+// granularity as DepthOfField — a model asked for a percentage clusters on
+// round numbers; asked to pick a tier, it actually commits to one.
+enum EmotionIntensity {
+  SUBTLE
+  MODERATE
+  INTENSE
 }
 
 model Shot {
@@ -402,6 +600,27 @@ model Shot {
 
   order       Int
   description String @db.Text
+
+  // Free-text note of what changed by the end of this shot (props picked up/
+  // dropped, wardrobe or physical-condition changes, etc.) — AI-drafted at
+  // SHOT_PLANNING time, user-editable after. Read by the NEXT shot
+  // (order + 1) in generateShotImage for continuity, same "prose with
+  // canonical names" convention as Character.appearance/Location.description.
+  continuityNotes String? @db.Text
+
+  // Resolved continuity snapshot: a JSON array of { subject, state } entries
+  // stating what IS true as of this shot for any character/prop/location
+  // whose state differs from its bible baseline — not a diff of what changed.
+  // AI-drafted at SHOT_PLANNING time (same call as continuityNotes, no extra
+  // model call), instructed to carry forward every still-true entry from
+  // earlier shots in the same scene. Deliberately a snapshot, not a diff
+  // chain: a diff-only note (continuityNotes) requires replaying every prior
+  // shot correctly to reconstruct current state, which is where drift
+  // compounds — a snapshot is self-contained. Read by the NEXT shot the same
+  // way continuityNotes is; the two fields serve different readers
+  // (continuityNotes is the short human-editable summary, continuity is the
+  // structured machine-consumed state).
+  continuity Json?
 
   // ILLUSTRATION scenes: each shot's image is held via Ken Burns for its own
   // explicit duration in this direction, then concatenated in order (see
@@ -437,6 +656,50 @@ model Shot {
   // dangling id is just treated as unset.
   videoModelId String?
 
+  // ── Director AI cinematography (all nullable, no defaults — see the enum
+  // block above for why "null means silent, not bland"). Drafted by
+  // SHOT_PLANNING in the same call as description/continuity (no extra model
+  // call), user-editable in the Cinematography block of shot-manager.tsx,
+  // and read at IMAGE_PROMPTS time by buildCameraDirectionBlock. Lighting is
+  // held across a scene by default and camera angle must respect the scene's
+  // 180-degree axis — both are enforced by instruction in the per-scene
+  // planning prompt, not by a constraint here, since a deliberate lighting
+  // change mid-scene (a door opens, a lamp dies) is legitimate.
+  shotSize     ShotSize?
+  // Focal length in mm, clamped 8-300 on ingest. Free int rather than an
+  // enum: lens choice is genuinely continuous, and a model that says "85"
+  // shouldn't be forced into a nearest-bucket lie.
+  lensMm       Int?
+  cameraAngle  CameraAngle?
+  framing      ShotFraming?
+  depthOfField DepthOfField?
+  // What the eye should land on ("Arjun's hands on the hilt") — prose, since
+  // no useful closed vocabulary exists for this.
+  focusPoint   String?      @db.Text
+  lightingStyle LightingStyle?
+  composition   ShotComposition?
+  // Subject motion *within* the frame, including screen direction ("Arjun
+  // strides in from frame-left") — distinct from cameraMovement, which is
+  // what the camera does. Prose for the same reason as focusPoint; screen
+  // direction in particular has no closed set once more than one subject
+  // moves.
+  subjectMovement String? @db.Text
+
+  // ── Director AI emotion (same rules as cinematography above: nullable, no
+  // defaults, null means silent not bland). Drafted by SHOT_PLANNING in the
+  // same call as description/continuity/cinematography (no extra model
+  // call), read at IMAGE_PROMPTS time (buildEmotionDirectionBlock in
+  // shot-images.ts) and by Voice direction (generateNarrationDirection/
+  // generateDialogueDirection in voice.ts) as scene-level emotional-arc
+  // context — there is no Shot<->DialogueLine link, so Voice reads the
+  // scene's shots as an ordered arc rather than a per-line binding.
+  emotion          Emotion?
+  emotionIntensity EmotionIntensity?
+  // Prose, same reasoning as focusPoint/subjectMovement: no useful closed
+  // vocabulary exists for a specific expression ("eyes widen, jaw tight").
+  facialExpression String?           @db.Text
+  bodyLanguage     String?           @db.Text
+
   images Asset[] @relation("ShotImages")
 
   // Set right before an image-generation call starts, cleared in a finally
@@ -466,6 +729,10 @@ model Character {
 
   name           String
   identity       String? @db.Text
+  // Free-text like the other bible fields ("17", "mid-30s", "looks older
+  // than her 20 years") — an int couldn't capture age-presentation, which is
+  // what actually drifts shot-to-shot without a reference image to pin it.
+  age            String? @db.Text
   appearance     String? @db.Text
   personality    String? @db.Text
   clothing       String? @db.Text
@@ -699,6 +966,18 @@ model Asset {
   modelId    String?
   createdBy  CreatedBy @default(USER)
 
+  // Word-level speech timing for AUDIO_NARRATION/AUDIO_DIALOGUE assets —
+  // JSON array of { word, startSeconds, endSeconds }, aggregated from
+  // ElevenLabs' per-character with-timestamps response (lib/ai/elevenlabs.ts's
+  // generateSpeechWithTimestamps). null for takes generated via Sarvam or
+  // OpenRouter (neither exposes timestamps), and for every non-voice asset
+  // type. Not yet consumed anywhere downstream (buildIllustrationSegment in
+  // video-assembly.ts still scales shots by a uniform per-scene ratio) — that
+  // needs a shot<->narration-segment link that doesn't exist yet; this column
+  // only captures the data so that follow-up doesn't also need a re-generation
+  // pass over every existing voice take.
+  wordTimestamps Json?
+
   // Advisory-only consistency check against locked character/location
   // reference images. null = not validated (e.g. no reference image existed
   // to compare against) — never treated as a failure.
@@ -788,6 +1067,18 @@ enum AiJobType {
   // Kept distinct from VIDEO below, which is reserved for local ffmpeg
   // assembly of the final output (a later, separate phase).
   VIDEO_GENERATION
+  // Tier-2 model-based quality/continuity critic for generated VIDEO_CLIP
+  // assets — mirrors IMAGE_VALIDATION one step over, but judges a clip
+  // (video_url input) instead of a still. One vision call per segment/pair
+  // covering: (1) face/identity + reference consistency against locked
+  // character/location images, (2) continuity adherence against
+  // Shot.continuity/continuityNotes, (3) prompt/motion adherence (does the
+  // clip's actual action match the requested camera movement). Cannot reuse
+  // IMAGE_VALIDATION's model slot — its default (gpt-5.6-luna) doesn't
+  // accept video input at all. Advisory-only, same posture as
+  // IMAGE_VALIDATION and qcPassed: skipped entirely when unconfigured, never
+  // blocks generation. See runVideoValidation in lib/scene-video.ts.
+  VIDEO_VALIDATION
   VIDEO
   // Phase 7 — the "Audio Plan" step: drafts Scene.musicPrompt/sfxPrompt from
   // the scene's description + style context, same shape as IMAGE_PROMPTS.
@@ -875,6 +1166,44 @@ model AiModelOption {
   updatedAt DateTime @updatedAt
 
   @@map("ai_model_options")
+}
+
+enum GenerationEntityType {
+  SCENE
+  SHOT
+  DIALOGUE_LINE
+}
+
+// Cost-capture log for the metered generation job types (IMAGE_GENERATION,
+// VIDEO_GENERATION, VOICE, MUSIC_GENERATION, SFX_GENERATION) — OpenRouter
+// hands back the exact USD cost per call and nothing previously captured it.
+// Append-only (createdAt only, no updatedAt — same convention as Asset/
+// Version), and deliberately no relations to Project/Scene/Shot/DialogueLine:
+// same "dangling id is just treated as unset" reasoning as AiModelOption.modelId
+// above — a cost/audit row should survive its parent scene or shot being
+// deleted, not cascade away with it. costUsd is nullable because only
+// OpenRouter's response bodies expose it; ElevenLabs/Sarvam calls still log
+// provider/duration/success for reliability signal, with costUsd left null.
+model GenerationEvent {
+  id       String    @id @default(cuid())
+  jobType  AiJobType
+  provider String
+  modelId  String?
+
+  projectId  String
+  entityType GenerationEntityType?
+  entityId   String?
+
+  costUsd      Float?
+  durationMs   Int
+  success      Boolean
+  errorMessage String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@index([jobType])
+  @@map("generation_events")
 }
 
 // Phase 13 — a project's preferred model for a given job type, overriding

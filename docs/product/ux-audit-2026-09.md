@@ -5,6 +5,11 @@
 **Status:** v1. First dedicated UX review of the app.
 **Companion:** [`./roadmap.md`](./roadmap.md) (sequencing),
 [`./feature-priorities.md`](./feature-priorities.md).
+**Outward-looking half:** [`./competitor-ux-research-2026-09.md`](./competitor-ux-research-2026-09.md)
+(2026-09-14) — competitor UI/UX study. It continues this document's phase
+numbering (Phase 4+), and reconciles the two items left open here: **2.4 is now
+unblocked** (`GenerationEvent` landed 2026-09-14) and **3.1 is confirmed** by
+two independent competitor precedents, with a third inspector column added.
 
 Evidence labels: `FACT` (read in the source today) / `ASSUMPTION` / `UNKNOWN`.
 

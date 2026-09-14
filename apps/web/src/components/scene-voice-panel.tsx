@@ -65,6 +65,9 @@ export interface DialogueLineItem {
   character: { id: string; name: string; voiceName: string | null };
   audio: AudioTake[];
   audioGenerationStartedAt: string | null;
+  // Durable failure from GenerationEvent (getActiveFailures), seeding the
+  // row's own lastError below — see ShotItem's lastImageError for the idea.
+  lastAudioError?: GenerationErrorInfo | null;
 }
 
 export interface VoiceCharacterOption {
@@ -90,6 +93,7 @@ export function SceneVoicePanel({
   initialNarrationAudio,
   initialNarrationGenerationStartedAt,
   initialDialogueLines,
+  initialNarrationError,
 }: {
   sceneId: string;
   // Both only used to nudge on an ILLUSTRATION timing mismatch after a
@@ -104,6 +108,9 @@ export function SceneVoicePanel({
   initialNarrationAudio: AudioTake[];
   initialNarrationGenerationStartedAt: string | null;
   initialDialogueLines: DialogueLineItem[];
+  // Durable failure from GenerationEvent (getActiveFailures), seeding
+  // narrationLastError below — see ShotItem's lastImageError for the idea.
+  initialNarrationError?: GenerationErrorInfo | null;
 }) {
   const [narration, setNarration] = useState(initialNarration);
   const [savedNarration, setSavedNarration] = useState(initialNarration);
@@ -117,7 +124,7 @@ export function SceneVoicePanel({
   const [generatingNarration, setGeneratingNarration] = useState(() =>
     isGenerationActive(initialNarrationGenerationStartedAt, "narration")
   );
-  const [narrationLastError, setNarrationLastError] = useState<GenerationErrorInfo | null>(null);
+  const [narrationLastError, setNarrationLastError] = useState<GenerationErrorInfo | null>(initialNarrationError ?? null);
   const [narrationDirectionModelId, setNarrationDirectionModelId] = useState("");
   const [directingNarration, setDirectingNarration] = useState(false);
   const unmountedRef = useRef(false);
@@ -637,7 +644,7 @@ function DialogueLineRow({
   const [modelId, setModelId] = useState("");
   const [generating, setGenerating] = useState(() => isGenerationActive(line.audioGenerationStartedAt, "dialogueAudio"));
   const [audio, setAudio] = useState(line.audio);
-  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(null);
+  const [lastError, setLastError] = useState<GenerationErrorInfo | null>(line.lastAudioError ?? null);
   const { confirm, ConfirmDialog } = useConfirm();
   const unmountedRef = useRef(false);
 

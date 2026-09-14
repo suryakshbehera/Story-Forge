@@ -7,6 +7,7 @@ import { runFfmpeg, probeDuration, probeFps, hasAudioStream } from "@/lib/ffmpeg
 import { storage, buildStorageKey } from "@/lib/storage";
 import { effectiveShotSeconds, MIN_SHOT_SECONDS } from "@/lib/illustration-timing";
 import { STALE_MS } from "@/lib/generation-claims";
+import { recordGenerationEvent, resolveParentProjectId } from "@/lib/generation-events";
 
 // Canonical output format every intermediate segment is normalized to, so
 // ffmpeg's concat demuxer can stream-copy them together at the end without
@@ -73,6 +74,20 @@ function cameraPrescaleFilter({ width, height }: VisualTarget): string {
 const ZOOM_STEP_PER_FRAME = 0.0015;
 const ZOOM_MAX = 1.5;
 const PAN_ZOOM = 1.15; // constant zoom while panning, so panning never exposes the source's edge
+// HANDHELD drift, in source pixels. The available travel at PAN_ZOOM is
+// iw*(1-1/1.15) ≈ 13% of width (~250px at 1920), so ±6px is roughly 5% of
+// the pan range — visible as unsteadiness, nowhere near a pan, and it can
+// never reach the frame edge. The two periods are coprime-ish on purpose so
+// x and y don't resynchronize into a visible repeating loop.
+const HANDHELD_AMPLITUDE_PX = 6;
+const HANDHELD_PERIOD_X = 7;
+const HANDHELD_PERIOD_Y = 11;
+// ROLL sweeps from -3° to +3° across the shot (0.0524 rad ≈ 3°). Kept small:
+// the rotation happens on the 2x prescale canvas and is centre-cropped back to
+// target, so a much larger angle would still be safe geometrically, but a roll
+// beyond a few degrees on an establishing still reads as a mistake rather than
+// as unease.
+const ROLL_MAX_RADIANS = 0.0524;
 
 function buildCameraFilter(movement: CameraMovement, frames: number, target: VisualTarget): string {
   if (movement === "STATIC") return scalePadFilter(target);
@@ -92,12 +107,104 @@ function buildCameraFilter(movement: CameraMovement, frames: number, target: Vis
       return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(1-on/${lastFrame})':y='${centerY}':${zoompanTail}`;
     case "PAN_RIGHT":
       return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(on/${lastFrame})':y='${centerY}':${zoompanTail}`;
-    case "PAN_UP":
+    case "TILT_UP":
       return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(1-on/${lastFrame})':${zoompanTail}`;
-    case "PAN_DOWN":
+    case "TILT_DOWN":
       return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(on/${lastFrame})':${zoompanTail}`;
-    default:
+
+    // Dolly and track/crane deliberately reuse the zoom and pan transforms.
+    // The source here is ONE still image, so there is no parallax to move
+    // through: a physical push-in and an optical zoom collapse to the same
+    // affine scale, and lateral/vertical travel collapses to the same
+    // translation as a pan. They stay distinct enum values because the
+    // IMAGE_TO_VIDEO path (cameraMovementInstruction, scene-video.ts) sends
+    // them to a video model that CAN render the difference — so if these
+    // look identical in an ILLUSTRATION render, that's the flat source
+    // image, not a missing mapping.
+    case "DOLLY_IN":
+      return `${prescale},zoompan=z='min(zoom+${ZOOM_STEP_PER_FRAME},${ZOOM_MAX})':x='${centerX}':y='${centerY}':${zoompanTail}`;
+    case "DOLLY_OUT":
+      return `${prescale},zoompan=z='if(eq(on,0),${ZOOM_MAX},max(zoom-${ZOOM_STEP_PER_FRAME},1))':x='${centerX}':y='${centerY}':${zoompanTail}`;
+    case "TRACK_LEFT":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(1-on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+    case "TRACK_RIGHT":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+    case "CRANE_UP":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(1-on/${lastFrame})':${zoompanTail}`;
+    case "CRANE_DOWN":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(on/${lastFrame})':${zoompanTail}`;
+
+    // Handheld is the one new value with a genuinely different shape, so it
+    // gets a real filter rather than falling back to STATIC: two sine
+    // offsets at deliberately unequal periods (so the path never repeats
+    // into an obvious circle or figure-8), riding the same PAN_ZOOM headroom
+    // the pans use so the drift never exposes the source's edge. zoompan
+    // quantizes x/y to integers, which here is a feature — the quantization
+    // reads as micro-shake rather than a glassy-smooth glide.
+    case "HANDHELD":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)/2+${HANDHELD_AMPLITUDE_PX}*sin(on/${HANDHELD_PERIOD_X})':y='(ih-ih/zoom)/2+${HANDHELD_AMPLITUDE_PX}*sin(on/${HANDHELD_PERIOD_Y})':${zoompanTail}`;
+
+    // ROLL is the one addition with an EXACT still-image equivalent: rolling
+    // the camera around the lens axis really is just rotating a flat image,
+    // no parallax required. So it gets a real rotate rather than a stand-in.
+    // Rotation happens on the 2x prescaled canvas and is then centre-cropped
+    // to target, so the corners swept in by the rotation are far outside the
+    // crop and never show as black wedges.
+    case "ROLL":
+      return `${prescale},rotate=a='${ROLL_MAX_RADIANS}*(2*n/${lastFrame}-1)':c=black,crop=${target.width}:${target.height},fps=${target.fps}`;
+
+    // Speed-variant zooms. Ken Burns has no concept of speed — the whole
+    // move is linear across the shot's duration — so these render as their
+    // plain counterparts here. The speed is carried on the IMAGE_TO_VIDEO
+    // path instead (cameraMovementInstruction, scene-video.ts), where the
+    // model can actually act on "fast"/"snap".
+    case "CRASH_ZOOM":
+      return `${prescale},zoompan=z='min(zoom+${ZOOM_STEP_PER_FRAME},${ZOOM_MAX})':x='${centerX}':y='${centerY}':${zoompanTail}`;
+    case "WHIP_PAN":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+
+    // DOLLY_ZOOM's entire effect is the subject holding size while the
+    // background scale changes behind them — that needs depth separation,
+    // which a single flat image doesn't have. Renders as a plain push-in;
+    // the real effect only exists on the IMAGE_TO_VIDEO path.
+    case "DOLLY_ZOOM":
+      return `${prescale},zoompan=z='min(zoom+${ZOOM_STEP_PER_FRAME},${ZOOM_MAX})':x='${centerX}':y='${centerY}':${zoompanTail}`;
+
+    // Pedestal is pure vertical translation, which on a flat plane is the
+    // same transform as a crane's vertical component.
+    case "PEDESTAL_UP":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(1-on/${lastFrame})':${zoompanTail}`;
+    case "PEDESTAL_DOWN":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(on/${lastFrame})':${zoompanTail}`;
+
+    // An arc orbits the subject, which requires seeing around them — there is
+    // no "around" in a flat image, so it degrades to the lateral travel that
+    // an orbit reads as from the front.
+    case "ARC_LEFT":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(1-on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+    case "ARC_RIGHT":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='(iw-iw/zoom)*(on/${lastFrame})':y='${centerY}':${zoompanTail}`;
+
+    // A steadicam follow reads as gliding forward with the subject, so a slow
+    // push-in is the closest flat-image equivalent — smooth by construction,
+    // which is exactly what distinguishes it from HANDHELD above.
+    case "STEADICAM_FOLLOW":
+      return `${prescale},zoompan=z='min(zoom+${ZOOM_STEP_PER_FRAME},${ZOOM_MAX})':x='${centerX}':y='${centerY}':${zoompanTail}`;
+
+    // AERIAL describes a vantage rather than a motion vector. A drone shot
+    // over a still most often reads as a slow rising reveal, so it borrows
+    // the crane-up transform.
+    case "AERIAL":
+      return `${prescale},zoompan=z=${PAN_ZOOM}:x='${centerX}':y='(ih-ih/zoom)*(1-on/${lastFrame})':${zoompanTail}`;
+
+    default: {
+      // Compile-time exhaustiveness: adding a CameraMovement value without a
+      // filter here is a type error, not a silent fall-through to a static
+      // frame that would look like the feature simply didn't work.
+      const unhandled: never = movement;
+      void unhandled;
       return scalePadFilter(target);
+    }
   }
 }
 
@@ -669,6 +776,14 @@ export interface SceneManifestEntry {
   dialogueLines: { character: string; text: string }[];
   musicPrompt: string | null;
   sfxPrompt: string | null;
+  // Scene.closingState (see schema.prisma / scene-continuity.ts) — raw and
+  // unparsed here since this manifest is also serialized to Asset.metadata
+  // and read back later; audio-cue-plan.ts parses it defensively at the
+  // point of use, same posture as everywhere else this crosses the
+  // AI-response boundary. Lets the Audio Cue Plan pass ground ambience/music
+  // continuity in the same environment/story-state Shot Planning resolved,
+  // instead of inferring it fresh from the video alone.
+  closingState: unknown;
 }
 
 export interface SerializedSilentVideo {
@@ -712,6 +827,8 @@ export async function generateSilentAssembly({
   parentId,
   modelId,
 }: GenerateSilentAssemblyParams): Promise<SerializedSilentVideo> {
+  const projectId = await resolveParentProjectId(parentType, parentId);
+  const startedAt = Date.now();
   const scenes = await loadReadyScenes(parentType, parentId);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-silent-"));
@@ -736,6 +853,7 @@ export async function generateSilentAssembly({
         dialogueLines: scene.dialogueLines.map((l) => ({ character: l.character.name, text: l.text })),
         musicPrompt: scene.musicPrompt,
         sfxPrompt: scene.sfxPrompt,
+        closingState: scene.closingState,
       });
       cursor += durationSeconds;
     }
@@ -768,7 +886,26 @@ export async function generateSilentAssembly({
       });
     });
 
+    await recordGenerationEvent({
+      jobType: "VIDEO",
+      provider: "ffmpeg-silent-assembly",
+      projectId,
+      entityId: parentId,
+      durationMs: Date.now() - startedAt,
+      success: true,
+    });
     return serializeSilentVideo(asset);
+  } catch (error) {
+    await recordGenerationEvent({
+      jobType: "VIDEO",
+      provider: "ffmpeg-silent-assembly",
+      projectId,
+      entityId: parentId,
+      durationMs: Date.now() - startedAt,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   } finally {
     await fs.rm(workDir, { recursive: true, force: true });
   }
@@ -889,6 +1026,8 @@ export async function assembleVideo({
   modelId,
   includeClipAudio = false,
 }: AssembleVideoParams): Promise<SerializedFinalVideo> {
+  const projectId = await resolveParentProjectId(parentType, parentId);
+  const startedAt = Date.now();
   const scenes = await loadReadyScenes(parentType, parentId);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-assembly-"));
@@ -926,7 +1065,26 @@ export async function assembleVideo({
       });
     });
 
+    await recordGenerationEvent({
+      jobType: "VIDEO",
+      provider: "ffmpeg-final-assembly",
+      projectId,
+      entityId: parentId,
+      durationMs: Date.now() - startedAt,
+      success: true,
+    });
     return serializeFinalVideo(asset);
+  } catch (error) {
+    await recordGenerationEvent({
+      jobType: "VIDEO",
+      provider: "ffmpeg-final-assembly",
+      projectId,
+      entityId: parentId,
+      durationMs: Date.now() - startedAt,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   } finally {
     await fs.rm(workDir, { recursive: true, force: true });
   }

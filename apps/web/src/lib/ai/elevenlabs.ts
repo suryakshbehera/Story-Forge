@@ -137,6 +137,16 @@ export interface GeneratedSpeech {
   mimeType: string;
 }
 
+export interface WordTimestamp {
+  word: string;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface GeneratedSpeechWithTimestamps extends GeneratedSpeech {
+  wordTimestamps: WordTimestamp[];
+}
+
 // deliveryNotes is free-text delivery direction (e.g. "anxious, quiet,
 // hesitant pauses"). ElevenLabs' closest equivalent is voice_settings.style,
 // a 0-1 "exaggeration" knob, not a free-text field — there's no real
@@ -150,14 +160,26 @@ function styleFromInstructions(instructions?: string): number | undefined {
   return instructions?.trim() ? 0.5 : undefined;
 }
 
-// VOICE — ElevenLabs' Text-to-Speech endpoint.
-export async function generateSpeech({
+// VOICE — ElevenLabs' Text-to-Speech-with-timestamps endpoint. Used for every
+// TTS call (narration and dialogue) instead of the plain /text-to-speech
+// endpoint — same request shape and cost, per ElevenLabs' docs, so there's no
+// reason to keep both. Confirmed against ElevenLabs' API reference 2026-09-14: POST
+// /v1/text-to-speech/{voice_id}/with-timestamps takes the identical request
+// body/query params as the plain endpoint, but its response is JSON —
+// { audio_base64, alignment: { characters, character_start_times_seconds,
+// character_end_times_seconds }, normalized_alignment } — not a raw audio
+// body, so it can't reuse readAudioResponse above. `alignment` (not
+// `normalized_alignment`) is used since it corresponds to the original text
+// passed in, not ElevenLabs' internal normalized form. Timestamps are
+// per-character only — there's no word-level option — so
+// wordsFromCharacterAlignment aggregates them by splitting on whitespace.
+export async function generateSpeechWithTimestamps({
   modelId,
   text,
   voiceId,
   instructions,
   speed,
-}: GenerateSpeechParams): Promise<GeneratedSpeech> {
+}: GenerateSpeechParams): Promise<GeneratedSpeechWithTimestamps> {
   const apiKey = requireApiKey();
 
   const voiceSettings: Record<string, number> = {};
@@ -166,7 +188,7 @@ export async function generateSpeech({
   if (speed !== undefined) voiceSettings.speed = speed;
 
   const response = await fetchWithTimeout(
-    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=${OUTPUT_FORMAT}`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/with-timestamps?output_format=${OUTPUT_FORMAT}`,
     {
       method: "POST",
       headers: {
@@ -182,7 +204,52 @@ export async function generateSpeech({
     60_000
   );
 
-  return readAudioResponse(response, "text-to-speech");
+  if (!response.ok) {
+    const body = await response.text();
+    throw new ElevenLabsError(`ElevenLabs text-to-speech-with-timestamps request failed (${response.status}): ${body}`);
+  }
+  const data = await response.json();
+  const audioBase64 = typeof data?.audio_base64 === "string" ? data.audio_base64 : null;
+  if (!audioBase64) {
+    throw new ElevenLabsError("ElevenLabs returned no audio data for text-to-speech-with-timestamps.");
+  }
+
+  return {
+    base64: audioBase64,
+    mimeType: "audio/mpeg",
+    wordTimestamps: wordsFromCharacterAlignment(data?.alignment),
+  };
+}
+
+function wordsFromCharacterAlignment(alignment: unknown): WordTimestamp[] {
+  if (!alignment || typeof alignment !== "object") return [];
+  const { characters, character_start_times_seconds, character_end_times_seconds } = alignment as Record<string, unknown>;
+  if (
+    !Array.isArray(characters) ||
+    !Array.isArray(character_start_times_seconds) ||
+    !Array.isArray(character_end_times_seconds)
+  ) {
+    return [];
+  }
+
+  const words: WordTimestamp[] = [];
+  let current: { chars: string[]; start: number } | null = null;
+  for (let i = 0; i < characters.length; i++) {
+    const char = String(characters[i]);
+    if (/\s/.test(char)) {
+      if (current) {
+        words.push({ word: current.chars.join(""), startSeconds: current.start, endSeconds: Number(character_end_times_seconds[i - 1]) });
+        current = null;
+      }
+      continue;
+    }
+    if (!current) current = { chars: [], start: Number(character_start_times_seconds[i]) };
+    current.chars.push(char);
+    if (i === characters.length - 1) {
+      words.push({ word: current.chars.join(""), startSeconds: current.start, endSeconds: Number(character_end_times_seconds[i]) });
+    }
+  }
+  return words;
 }
 
 export interface GenerateSoundEffectParams {

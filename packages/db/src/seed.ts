@@ -50,6 +50,24 @@ const defaultModels: Array<{
     // resolution. Drives the multi-segment suggestion in scene-video.ts.
     config: { durationMode: "fixed", fixedDurations: [4, 6, 8], resolutions: ["720p"], supportsNativeAudio: true },
   },
+  // Not the default — Veo 3.1 stays the default VIDEO_GENERATION choice.
+  // Config matches OpenRouter's live GET /api/v1/videos/models entry,
+  // confirmed during the 2026-09-14 capability-matrix backfill.
+  {
+    jobType: "VIDEO_GENERATION",
+    provider: "openrouter",
+    modelId: "bytedance/seedance-2.0",
+    displayName: "seedance 2.0",
+    isDefault: false,
+    config: {
+      durationMode: "range",
+      minDurationSeconds: 4,
+      maxDurationSeconds: 15,
+      resolutions: ["480p", "720p", "1080p", "4K"],
+      supportsNativeAudio: true,
+      supportsLastFrame: true,
+    },
+  },
   { jobType: "VIDEO", provider: "local", modelId: "ffmpeg", displayName: "FFmpeg (local render)" },
   { jobType: "MUSIC_GENERATION", provider: "elevenlabs", modelId: "music_v2", displayName: "Eleven Music v2" },
   { jobType: "SFX_GENERATION", provider: "elevenlabs", modelId: "eleven_text_to_sound_v2", displayName: "Eleven Sound Effects v2" },
@@ -61,6 +79,9 @@ const defaultModels: Array<{
   { jobType: "STORY_INGESTION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "BLUEPRINT_PLANNING", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
   { jobType: "MOTION_PROMPT_DRAFTING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
+  // Video-input-capable, unlike IMAGE_VALIDATION's gpt-5.6-luna default —
+  // see the AiJobType.VIDEO_VALIDATION schema comment.
+  { jobType: "VIDEO_VALIDATION", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
   { jobType: "AUDIO_CUE_PLANNING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
   { jobType: "DURATION_RECOMMENDATION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
 ];

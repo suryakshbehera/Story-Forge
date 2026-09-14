@@ -18,28 +18,224 @@ import {
   Trash2,
   ChevronUp,
   ChevronDown,
+  ChevronRight,
+  Clapperboard,
   ImagePlus,
   Upload,
   CheckCircle2,
   XCircle,
   HelpCircle,
 } from "lucide-react";
+import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "@/components/ui/collapsible";
+import type { CameraMovementValue } from "@/lib/video-model-config";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { TermHint } from "@/components/term-hint";
 import { getModelsForJobType } from "@/lib/model-registry-cache";
 import type { ModelOption } from "@/components/model-select";
 import { GenerationErrorBanner, type GenerationErrorInfo } from "@/components/generation-error";
 
-export type CameraMovement = "STATIC" | "ZOOM_IN" | "ZOOM_OUT" | "PAN_LEFT" | "PAN_RIGHT" | "PAN_UP" | "PAN_DOWN";
+// Re-exported from the shared list rather than redeclared, so this dropdown
+// can't drift from what SHOT_PLANNING is allowed to draft (it used to be its
+// own hand-written union, which is exactly how a value ends up draftable but
+// not selectable, or vice versa).
+export type CameraMovement = CameraMovementValue;
 
+// Labels name the real distinction where it's easy to confuse — a dolly is
+// not a zoom, a track is not a pan — since this dropdown is where a user
+// overrides the Director's choice by hand.
 const CAMERA_MOVEMENT_LABELS: Record<CameraMovement, string> = {
   STATIC: "None (static)",
-  ZOOM_IN: "Zoom in",
-  ZOOM_OUT: "Zoom out",
-  PAN_LEFT: "Pan left",
-  PAN_RIGHT: "Pan right",
-  PAN_UP: "Pan up",
-  PAN_DOWN: "Pan down",
+  ZOOM_IN: "Zoom in (optical)",
+  ZOOM_OUT: "Zoom out (optical)",
+  CRASH_ZOOM: "Crash zoom (fast)",
+  DOLLY_IN: "Dolly in (push toward)",
+  DOLLY_OUT: "Dolly out (pull back)",
+  DOLLY_ZOOM: "Dolly zoom (Vertigo effect)",
+  PAN_LEFT: "Pan left (pivot)",
+  PAN_RIGHT: "Pan right (pivot)",
+  WHIP_PAN: "Whip pan (fast, blurred)",
+  TILT_UP: "Tilt up (pivot)",
+  TILT_DOWN: "Tilt down (pivot)",
+  ROLL: "Roll (horizon rotates)",
+  TRACK_LEFT: "Track left (travel)",
+  TRACK_RIGHT: "Track right (travel)",
+  PEDESTAL_UP: "Pedestal up (body rises)",
+  PEDESTAL_DOWN: "Pedestal down (body drops)",
+  CRANE_UP: "Crane up (sweeping rise)",
+  CRANE_DOWN: "Crane down (sweeping descent)",
+  ARC_LEFT: "Arc left (orbit)",
+  ARC_RIGHT: "Arc right (orbit)",
+  STEADICAM_FOLLOW: "Steadicam follow (smooth)",
+  HANDHELD: "Handheld (unsteady)",
+  AERIAL: "Aerial / drone (from above)",
+};
+
+// ── Director AI cinematography ───────────────────────────────────────────
+// Mirrors the Prisma enums (schema.prisma) and the prose labels in
+// lib/shot-images.ts. Every one of these is nullable end to end: "Not set"
+// is a real, common, correct value meaning the Director made no deliberate
+// choice on that axis, and the image prompt then says nothing about it.
+export type ShotSize = "EXTREME_WIDE" | "WIDE" | "FULL" | "MEDIUM" | "MEDIUM_CLOSE_UP" | "CLOSE_UP" | "EXTREME_CLOSE_UP";
+export type CameraAngle = "EYE_LEVEL" | "LOW" | "HIGH" | "OVERHEAD" | "DUTCH" | "OVER_THE_SHOULDER" | "POV";
+export type ShotFraming = "SINGLE" | "TWO_SHOT" | "THREE_SHOT" | "GROUP" | "INSERT" | "ESTABLISHING";
+export type DepthOfField = "SHALLOW" | "MEDIUM" | "DEEP";
+export type LightingStyle =
+  | "NATURAL"
+  | "SOFT"
+  | "HARD"
+  | "HIGH_KEY"
+  | "LOW_KEY"
+  | "BACKLIT"
+  | "SILHOUETTE"
+  | "GOLDEN_HOUR"
+  | "MOONLIT"
+  | "PRACTICAL";
+export type ShotComposition =
+  | "CENTERED"
+  | "RULE_OF_THIRDS"
+  | "SYMMETRICAL"
+  | "LEADING_LINES"
+  | "FRAME_WITHIN_FRAME"
+  | "NEGATIVE_SPACE"
+  | "DIAGONAL";
+
+const SHOT_SIZE_LABELS: Record<ShotSize, string> = {
+  EXTREME_WIDE: "Extreme wide",
+  WIDE: "Wide",
+  FULL: "Full",
+  MEDIUM: "Medium",
+  MEDIUM_CLOSE_UP: "Medium close-up",
+  CLOSE_UP: "Close-up",
+  EXTREME_CLOSE_UP: "Extreme close-up",
+};
+const CAMERA_ANGLE_LABELS: Record<CameraAngle, string> = {
+  EYE_LEVEL: "Eye level",
+  LOW: "Low angle",
+  HIGH: "High angle",
+  OVERHEAD: "Overhead",
+  DUTCH: "Dutch (canted)",
+  OVER_THE_SHOULDER: "Over the shoulder",
+  POV: "POV",
+};
+const SHOT_FRAMING_LABELS: Record<ShotFraming, string> = {
+  SINGLE: "Single",
+  TWO_SHOT: "Two-shot",
+  THREE_SHOT: "Three-shot",
+  GROUP: "Group",
+  INSERT: "Insert",
+  ESTABLISHING: "Establishing",
+};
+const DEPTH_OF_FIELD_LABELS: Record<DepthOfField, string> = {
+  SHALLOW: "Shallow",
+  MEDIUM: "Medium",
+  DEEP: "Deep",
+};
+const LIGHTING_STYLE_LABELS: Record<LightingStyle, string> = {
+  NATURAL: "Natural",
+  SOFT: "Soft",
+  HARD: "Hard",
+  HIGH_KEY: "High key",
+  LOW_KEY: "Low key",
+  BACKLIT: "Backlit",
+  SILHOUETTE: "Silhouette",
+  GOLDEN_HOUR: "Golden hour",
+  MOONLIT: "Moonlit",
+  PRACTICAL: "Practical",
+};
+const SHOT_COMPOSITION_LABELS: Record<ShotComposition, string> = {
+  CENTERED: "Centered",
+  RULE_OF_THIRDS: "Rule of thirds",
+  SYMMETRICAL: "Symmetrical",
+  LEADING_LINES: "Leading lines",
+  FRAME_WITHIN_FRAME: "Frame within frame",
+  NEGATIVE_SPACE: "Negative space",
+  DIAGONAL: "Diagonal",
+};
+
+// ── Director AI emotion ───────────────────────────────────────────────────
+// Same nullable-everywhere contract as cinematography above, one axis over
+// (see lib/emotion.ts and schema.prisma's Emotion/EmotionIntensity enums).
+export type Emotion =
+  | "JOY"
+  | "LOVE"
+  | "HOPE"
+  | "PRIDE"
+  | "RELIEF"
+  | "SADNESS"
+  | "GRIEF"
+  | "LONELINESS"
+  | "DESPAIR"
+  | "NOSTALGIA"
+  | "ANGER"
+  | "RAGE"
+  | "FRUSTRATION"
+  | "RESENTMENT"
+  | "FEAR"
+  | "ANXIETY"
+  | "DREAD"
+  | "PANIC"
+  | "SURPRISE"
+  | "SHOCK"
+  | "AWE"
+  | "CONFUSION"
+  | "CURIOSITY"
+  | "SHAME"
+  | "GUILT"
+  | "JEALOUSY"
+  | "BETRAYAL"
+  | "DESIRE"
+  | "DETERMINATION"
+  | "COURAGE"
+  | "DEFIANCE"
+  | "TRIUMPH"
+  | "SUSPENSE"
+  | "CALM"
+  | "DOUBT"
+  | "EXHAUSTION";
+export type EmotionIntensity = "SUBTLE" | "MODERATE" | "INTENSE";
+
+const EMOTION_LABELS: Record<Emotion, string> = {
+  JOY: "Joy",
+  LOVE: "Love",
+  HOPE: "Hope",
+  PRIDE: "Pride",
+  RELIEF: "Relief",
+  SADNESS: "Sadness",
+  GRIEF: "Grief",
+  LONELINESS: "Loneliness",
+  DESPAIR: "Despair",
+  NOSTALGIA: "Nostalgia",
+  ANGER: "Anger",
+  RAGE: "Rage",
+  FRUSTRATION: "Frustration",
+  RESENTMENT: "Resentment",
+  FEAR: "Fear",
+  ANXIETY: "Anxiety",
+  DREAD: "Dread",
+  PANIC: "Panic",
+  SURPRISE: "Surprise",
+  SHOCK: "Shock",
+  AWE: "Awe",
+  CONFUSION: "Confusion",
+  CURIOSITY: "Curiosity",
+  SHAME: "Shame",
+  GUILT: "Guilt",
+  JEALOUSY: "Jealousy",
+  BETRAYAL: "Betrayal",
+  DESIRE: "Desire",
+  DETERMINATION: "Determination",
+  COURAGE: "Courage",
+  DEFIANCE: "Defiance",
+  TRIUMPH: "Triumph",
+  SUSPENSE: "Suspense",
+  CALM: "Calm",
+  DOUBT: "Doubt",
+  EXHAUSTION: "Exhaustion",
+};
+const EMOTION_INTENSITY_LABELS: Record<EmotionIntensity, string> = {
+  SUBTLE: "Subtle",
+  MODERATE: "Moderate",
+  INTENSE: "Intense",
 };
 
 export interface ShotImageItem {
@@ -54,7 +250,31 @@ export interface ShotItem {
   id: string;
   order: number;
   description: string;
+  // AI-drafted at Generate Shots time, user-editable after — state that
+  // carries forward from THIS shot into the next one's image generation
+  // (props picked up/dropped, wardrobe/physical changes). See
+  // shot-images.ts's loadPreviousShot/buildContinuityBlock.
+  continuityNotes: string | null;
   cameraMovement: CameraMovement;
+  // Director AI cinematography — AI-drafted at Generate Shots / Direct this
+  // scene time, user-editable in the Cinematography block below. null means
+  // "no deliberate choice", not "default": the image prompt stays silent on
+  // that axis rather than asserting a bland value.
+  shotSize: ShotSize | null;
+  lensMm: number | null;
+  cameraAngle: CameraAngle | null;
+  framing: ShotFraming | null;
+  depthOfField: DepthOfField | null;
+  focusPoint: string | null;
+  lightingStyle: LightingStyle | null;
+  composition: ShotComposition | null;
+  subjectMovement: string | null;
+  // Director AI emotion — same AI-drafted/user-editable contract as
+  // cinematography above, in the Performance block below.
+  emotion: Emotion | null;
+  emotionIntensity: EmotionIntensity | null;
+  facialExpression: string | null;
+  bodyLanguage: string | null;
   durationSeconds: number | null;
   // IMAGE_TO_VIDEO only — manual override of which VIDEO_GENERATION model
   // generates this shot's pair (shot[i]->shot[i+1]). null = no override, use
@@ -66,6 +286,12 @@ export interface ShotItem {
   // the staleness rule that keeps this from being read as "generating"
   // forever if the server died mid-request.
   imageGenerationStartedAt: string | null;
+  // Seeds imageLastError below from durable GenerationEvent data (see
+  // lib/generation-events.ts's getActiveFailures) so a failed image
+  // generation survives a reload instead of vanishing once its toast does —
+  // undefined on any response that isn't the initial page load (a live
+  // generate() failure already sets imageLastError directly).
+  lastImageError?: GenerationErrorInfo | null;
 }
 
 // Shots are continuity, not alternates — shot 2 continues the scene from
@@ -84,6 +310,7 @@ export function ShotManager({
   validationModelId,
   imageInstructions,
   shotPlanningModelId,
+  unmatchedNames,
   onShotsChange,
 }: {
   sceneId: string;
@@ -94,6 +321,12 @@ export function ShotManager({
   validationModelId: string;
   imageInstructions: string;
   shotPlanningModelId: string;
+  // Names the AI mentioned in this scene's own text (from the last Generate
+  // Scenes pass) that don't match a tagged Character/Location yet — see
+  // SceneManager's sceneUnmatchedNames. Empty/undefined means none; gates
+  // generateShots below with a confirm, since shots planned now won't get
+  // continuity/reference-image context for whatever these names refer to.
+  unmatchedNames?: string[];
   // Shots live in this component's own state (image generation/selection
   // happens per-shot below, never round-tripping through the parent scene
   // object) — reported up so SceneManager's copy of scene.shots doesn't go
@@ -103,6 +336,7 @@ export function ShotManager({
 }) {
   const [shots, setShots] = useState(initialShots);
   const [planning, setPlanning] = useState(false);
+  const [directing, setDirecting] = useState(false);
   const [adding, setAdding] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState<number | null>(null);
   const { confirm, ConfirmDialog } = useConfirm();
@@ -144,6 +378,14 @@ export function ShotManager({
       toast.error("Pick a Shot Planning model first.");
       return;
     }
+    if (unmatchedNames && unmatchedNames.length > 0) {
+      const ok = await confirm({
+        title: "This scene mentions untagged characters/locations",
+        description: `"${unmatchedNames.join('", "')}" ${unmatchedNames.length > 1 ? "aren't" : "isn't"} tagged as a Character or Location yet, so shots planned now won't get continuity or reference-image context for ${unmatchedNames.length > 1 ? "them" : "it"}. Add ${unmatchedNames.length > 1 ? "them" : "it"} in Characters/Locations and tag this scene first, or continue anyway.`,
+        confirmLabel: "Generate Anyway",
+      });
+      if (!ok) return;
+    }
     const regenerateAll = shots.length > 0;
     if (regenerateAll) {
       const ok = await confirm({
@@ -172,6 +414,36 @@ export function ShotManager({
       toast.error(err instanceof Error ? err.message : "Shot planning failed.");
     } finally {
       setPlanning(false);
+    }
+  }
+
+  // Cinematography-only pass over the shots that already exist — unlike
+  // Regenerate Shots, this destroys nothing (no deletes, no re-descriptions,
+  // images untouched), so it needs no confirm. It's how pre-Director shots,
+  // and any shot added by hand, get their camera fields filled in.
+  async function directShots() {
+    if (!shotPlanningModelId) {
+      toast.error("Pick a Shot Planning model first.");
+      return;
+    }
+    setDirecting(true);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/shots/direct`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId: shotPlanningModelId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Directing failed");
+      }
+      const data: { shots: ShotItem[]; reason: string | null } = await res.json();
+      setShots(data.shots);
+      toast.success(data.reason ? `Directed ${data.shots.length} shot(s) — ${data.reason}` : `Directed ${data.shots.length} shot(s).`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Directing failed.");
+    } finally {
+      setDirecting(false);
     }
   }
 
@@ -225,6 +497,16 @@ export function ShotManager({
             <Button size="sm" variant="outline" disabled={planning} onClick={generateShots}>
               <Sparkles className="size-3.5" />
               {planning ? "Planning…" : "Regenerate Shots"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={directing}
+              onClick={directShots}
+              title="Fill in the cinematography (shot size, lens, angle, lighting, composition) for every existing shot in one pass. Doesn't change descriptions, continuity or images."
+            >
+              <Clapperboard className="size-3.5" />
+              {directing ? "Directing…" : "Direct this scene"}
             </Button>
             <Button size="sm" variant="outline" disabled={adding} onClick={addShot}>
               <Plus className="size-3.5" />
@@ -306,7 +588,26 @@ function ShotCard({
   onDelete: (id: string, order: number) => void;
 }) {
   const [description, setDescription] = useState(shot.description);
+  const [continuityNotes, setContinuityNotes] = useState(shot.continuityNotes ?? "");
   const [cameraMovement, setCameraMovement] = useState<CameraMovement>(shot.cameraMovement);
+  // Cinematography: enums held as `T | null` (null = "Not set"), lensMm as a
+  // string like every other numeric input here so an empty box stays empty
+  // rather than becoming 0.
+  const [shotSize, setShotSize] = useState<ShotSize | null>(shot.shotSize);
+  const [lensMm, setLensMm] = useState(shot.lensMm?.toString() ?? "");
+  const [cameraAngle, setCameraAngle] = useState<CameraAngle | null>(shot.cameraAngle);
+  const [framing, setFraming] = useState<ShotFraming | null>(shot.framing);
+  const [depthOfField, setDepthOfField] = useState<DepthOfField | null>(shot.depthOfField);
+  const [focusPoint, setFocusPoint] = useState(shot.focusPoint ?? "");
+  const [lightingStyle, setLightingStyle] = useState<LightingStyle | null>(shot.lightingStyle);
+  const [composition, setComposition] = useState<ShotComposition | null>(shot.composition);
+  const [subjectMovement, setSubjectMovement] = useState(shot.subjectMovement ?? "");
+  const [cinematographyOpen, setCinematographyOpen] = useState(false);
+  const [emotion, setEmotion] = useState<Emotion | null>(shot.emotion);
+  const [emotionIntensity, setEmotionIntensity] = useState<EmotionIntensity | null>(shot.emotionIntensity);
+  const [facialExpression, setFacialExpression] = useState(shot.facialExpression ?? "");
+  const [bodyLanguage, setBodyLanguage] = useState(shot.bodyLanguage ?? "");
+  const [performanceOpen, setPerformanceOpen] = useState(false);
   const [durationSeconds, setDurationSeconds] = useState(shot.durationSeconds?.toString() ?? "");
   const [videoModelId, setVideoModelId] = useState(shot.videoModelId ?? "");
   const [saving, setSaving] = useState(false);
@@ -314,7 +615,7 @@ function ShotCard({
   const [deleting, setDeleting] = useState(false);
   const [imageGenerating, setImageGenerating] = useState(() => isImageGenerationActive(shot.imageGenerationStartedAt));
   const [imageUploading, setImageUploading] = useState(false);
-  const [imageLastError, setImageLastError] = useState<GenerationErrorInfo | null>(null);
+  const [imageLastError, setImageLastError] = useState<GenerationErrorInfo | null>(shot.lastImageError ?? null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const unmountedRef = useRef(false);
   const { confirm, ConfirmDialog } = useConfirm();
@@ -356,9 +657,86 @@ function ShotCard({
 
   const dirty =
     description !== shot.description ||
+    continuityNotes !== (shot.continuityNotes ?? "") ||
     cameraMovement !== shot.cameraMovement ||
+    shotSize !== shot.shotSize ||
+    lensMm !== (shot.lensMm?.toString() ?? "") ||
+    cameraAngle !== shot.cameraAngle ||
+    framing !== shot.framing ||
+    depthOfField !== shot.depthOfField ||
+    focusPoint !== (shot.focusPoint ?? "") ||
+    lightingStyle !== shot.lightingStyle ||
+    composition !== shot.composition ||
+    subjectMovement !== (shot.subjectMovement ?? "") ||
+    emotion !== shot.emotion ||
+    emotionIntensity !== shot.emotionIntensity ||
+    facialExpression !== (shot.facialExpression ?? "") ||
+    bodyLanguage !== (shot.bodyLanguage ?? "") ||
     durationSeconds !== (shot.durationSeconds?.toString() ?? "") ||
     videoModelId !== (shot.videoModelId ?? "");
+
+  // A "Direct this scene" pass (or a Regenerate) replaces this card's shot
+  // prop wholesale — the local fields have to re-seed from it, or the inputs
+  // would keep showing pre-direction values until a reload. Done as a
+  // render-phase adjustment rather than an effect (React's documented
+  // "adjusting state when a prop changes" pattern): an effect here would
+  // cascade an extra render per card, which react-hooks/set-state-in-effect
+  // rejects. Keyed on the server's own nine values, so an unrelated
+  // re-render (a newly generated image arriving, say) can't clobber a
+  // half-typed edit.
+  const cinematographySignature = JSON.stringify([
+    shot.shotSize,
+    shot.lensMm,
+    shot.cameraAngle,
+    shot.framing,
+    shot.depthOfField,
+    shot.focusPoint,
+    shot.lightingStyle,
+    shot.composition,
+    shot.subjectMovement,
+  ]);
+  const [syncedCinematography, setSyncedCinematography] = useState(cinematographySignature);
+  if (syncedCinematography !== cinematographySignature) {
+    setSyncedCinematography(cinematographySignature);
+    setShotSize(shot.shotSize);
+    setLensMm(shot.lensMm?.toString() ?? "");
+    setCameraAngle(shot.cameraAngle);
+    setFraming(shot.framing);
+    setDepthOfField(shot.depthOfField);
+    setFocusPoint(shot.focusPoint ?? "");
+    setLightingStyle(shot.lightingStyle);
+    setComposition(shot.composition);
+    setSubjectMovement(shot.subjectMovement ?? "");
+  }
+
+  // Same re-seed contract as cinematographySignature above, one axis over —
+  // a "Direct this scene" pass replaces emotion fields wholesale too.
+  const emotionSignature = JSON.stringify([shot.emotion, shot.emotionIntensity, shot.facialExpression, shot.bodyLanguage]);
+  const [syncedEmotion, setSyncedEmotion] = useState(emotionSignature);
+  if (syncedEmotion !== emotionSignature) {
+    setSyncedEmotion(emotionSignature);
+    setEmotion(shot.emotion);
+    setEmotionIntensity(shot.emotionIntensity);
+    setFacialExpression(shot.facialExpression ?? "");
+    setBodyLanguage(shot.bodyLanguage ?? "");
+  }
+
+  // Shown on the collapsed trigger so a directed shot is distinguishable
+  // from an undirected one without opening the block.
+  const directedFieldCount = [
+    shotSize,
+    lensMm.trim() || null,
+    cameraAngle,
+    framing,
+    depthOfField,
+    focusPoint.trim() || null,
+    lightingStyle,
+    composition,
+    subjectMovement.trim() || null,
+  ].filter(Boolean).length;
+  const directedEmotionFieldCount = [emotion, emotionIntensity, facialExpression.trim() || null, bodyLanguage.trim() || null].filter(
+    Boolean
+  ).length;
 
   async function save() {
     setSaving(true);
@@ -368,7 +746,21 @@ function ShotCard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           description,
+          continuityNotes: continuityNotes.trim() || null,
           cameraMovement,
+          shotSize,
+          lensMm: lensMm ? Number(lensMm) : null,
+          cameraAngle,
+          framing,
+          depthOfField,
+          focusPoint: focusPoint.trim() || null,
+          lightingStyle,
+          composition,
+          subjectMovement: subjectMovement.trim() || null,
+          emotion,
+          emotionIntensity,
+          facialExpression: facialExpression.trim() || null,
+          bodyLanguage: bodyLanguage.trim() || null,
           durationSeconds: durationSeconds ? Number(durationSeconds) : null,
           videoModelId: videoModelId || null,
         }),
@@ -545,6 +937,140 @@ function ShotCard({
           <Textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
 
+        <div className="grid gap-1.5">
+          <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+            Continuity notes (optional)
+            <TermHint text="What changes by the end of this shot — a prop picked up, a wardrobe or physical change. AI drafts this when shots are generated; it's automatically read into the NEXT shot's image generation, and you can edit it here." />
+          </Label>
+          <Textarea
+            rows={2}
+            placeholder="e.g. Arjun is now holding the iron sword in his right hand"
+            value={continuityNotes}
+            onChange={(e) => setContinuityNotes(e.target.value)}
+          />
+        </div>
+
+        <Collapsible open={cinematographyOpen} onOpenChange={setCinematographyOpen}>
+          <CollapsibleTrigger className="group flex w-full items-center gap-1.5 rounded-md border px-2 py-1.5 text-left text-xs font-medium text-muted-foreground hover:text-foreground">
+            <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[panel-open]:rotate-90" />
+            Cinematography
+            {directedFieldCount > 0 && <span className="text-muted-foreground">({directedFieldCount} set)</span>}
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <div className="flex flex-col gap-2.5 pt-2.5">
+              <p className="text-xs text-muted-foreground">
+                How this shot is photographed. AI fills these in when shots are generated, or via &ldquo;Direct this
+                scene&rdquo;. Anything left as &ldquo;Not set&rdquo; is left to the image model — that&apos;s a valid
+                choice, not a gap to fill.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Shot size</Label>
+                  <NullableEnumSelect labels={SHOT_SIZE_LABELS} value={shotSize} onChange={setShotSize} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Camera angle</Label>
+                  <NullableEnumSelect labels={CAMERA_ANGLE_LABELS} value={cameraAngle} onChange={setCameraAngle} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Framing</Label>
+                  <NullableEnumSelect labels={SHOT_FRAMING_LABELS} value={framing} onChange={setFraming} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Lens (mm)</Label>
+                  <Input
+                    type="number"
+                    min={8}
+                    max={300}
+                    className="w-24"
+                    placeholder="auto"
+                    value={lensMm}
+                    onChange={(e) => setLensMm(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Depth of field</Label>
+                  <NullableEnumSelect labels={DEPTH_OF_FIELD_LABELS} value={depthOfField} onChange={setDepthOfField} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+                    Lighting
+                    <TermHint text="Lighting normally holds across a whole scene — change it on one shot only when the story does (a door opens, a lamp is snuffed, time passes), or the cut will read as a jump." />
+                  </Label>
+                  <NullableEnumSelect labels={LIGHTING_STYLE_LABELS} value={lightingStyle} onChange={setLightingStyle} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Composition</Label>
+                  <NullableEnumSelect labels={SHOT_COMPOSITION_LABELS} value={composition} onChange={setComposition} />
+                </div>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs text-muted-foreground">Focus point (optional)</Label>
+                <Input
+                  placeholder="e.g. Arjun's hands on the hilt"
+                  value={focusPoint}
+                  onChange={(e) => setFocusPoint(e.target.value)}
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+                  Subject movement (optional)
+                  <TermHint text="What the subjects do inside the frame, including screen direction — not what the camera does. Keeping screen direction consistent across shots is what stops a scene from flipping sides on a cut." />
+                </Label>
+                <Input
+                  placeholder="e.g. Arjun strides in from frame-left and stops at centre"
+                  value={subjectMovement}
+                  onChange={(e) => setSubjectMovement(e.target.value)}
+                />
+              </div>
+            </div>
+          </CollapsiblePanel>
+        </Collapsible>
+
+        <Collapsible open={performanceOpen} onOpenChange={setPerformanceOpen}>
+          <CollapsibleTrigger className="group flex w-full items-center gap-1.5 rounded-md border px-2 py-1.5 text-left text-xs font-medium text-muted-foreground hover:text-foreground">
+            <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[panel-open]:rotate-90" />
+            Performance
+            {directedEmotionFieldCount > 0 && <span className="text-muted-foreground">({directedEmotionFieldCount} set)</span>}
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <div className="flex flex-col gap-2.5 pt-2.5">
+              <p className="text-xs text-muted-foreground">
+                The emotional beat of this shot. AI fills these in when shots are generated, or via &ldquo;Direct this
+                scene&rdquo;. Anything left as &ldquo;Not set&rdquo; is left to the image model.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Emotion</Label>
+                  <NullableEnumSelect labels={EMOTION_LABELS} value={emotion} onChange={setEmotion} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Intensity</Label>
+                  <NullableEnumSelect labels={EMOTION_INTENSITY_LABELS} value={emotionIntensity} onChange={setEmotionIntensity} />
+                </div>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs text-muted-foreground">Facial expression (optional)</Label>
+                <Input
+                  placeholder="e.g. jaw tight, eyes narrowed"
+                  value={facialExpression}
+                  onChange={(e) => setFacialExpression(e.target.value)}
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs text-muted-foreground">Body language (optional)</Label>
+                <Input
+                  placeholder="e.g. shoulders drawn in, arms crossed protectively"
+                  value={bodyLanguage}
+                  onChange={(e) => setBodyLanguage(e.target.value)}
+                />
+              </div>
+            </div>
+          </CollapsiblePanel>
+        </Collapsible>
+
         <div className="flex flex-wrap items-end gap-3">
           {sceneVisualMode === "ILLUSTRATION" && (
             <div className="grid gap-1.5">
@@ -647,10 +1173,52 @@ function ShotCard({
   );
 }
 
+// Same shape as CameraMovementSelect, but for the cinematography enums,
+// where null is a first-class value. Uses a sentinel option rather than an
+// empty string for the same reason ShotVideoModelSelect does — base-ui's
+// Select treats "" as no-selection and would render an empty trigger instead
+// of the "Not set" label.
+const NOT_SET_VALUE = "__not_set__";
+
+function NullableEnumSelect<T extends string>({
+  labels,
+  value,
+  onChange,
+  className = "w-44",
+}: {
+  labels: Record<T, string>;
+  value: T | null;
+  onChange: (v: T | null) => void;
+  className?: string;
+}) {
+  const items: Record<string, string> = { [NOT_SET_VALUE]: "Not set" };
+  for (const key of Object.keys(labels) as T[]) items[key] = labels[key];
+
+  return (
+    <Select
+      value={value ?? NOT_SET_VALUE}
+      onValueChange={(v) => v && onChange(v === NOT_SET_VALUE ? null : (v as T))}
+      items={items}
+    >
+      <SelectTrigger className={className}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={NOT_SET_VALUE}>Not set</SelectItem>
+        {(Object.keys(labels) as T[]).map((key) => (
+          <SelectItem key={key} value={key}>
+            {labels[key]}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function CameraMovementSelect({ value, onChange }: { value: CameraMovement; onChange: (v: CameraMovement) => void }) {
   return (
     <Select value={value} onValueChange={(v) => v && onChange(v as CameraMovement)} items={CAMERA_MOVEMENT_LABELS}>
-      <SelectTrigger className="w-40">
+      <SelectTrigger className="w-52">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>

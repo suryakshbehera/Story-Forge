@@ -1,10 +1,23 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { prisma } from "@/lib/db";
+import { prisma, type AiJobType } from "@/lib/db";
 import { getProjectStatus } from "@/lib/project-status";
+import { getProjectSpend } from "@/lib/generation-events";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CheckCircle2, Circle } from "lucide-react";
+
+// Only the metered job types (see generation-events.ts's getProjectSpend)
+// ever appear here — every other AiJobType is a planning/prompting call
+// that isn't cost-tracked (see narrata-cost-capture-built), so it never
+// shows up in a groupBy on GenerationEvent regardless of this map.
+const SPEND_JOB_TYPE_LABELS: Partial<Record<AiJobType, string>> = {
+  IMAGE_GENERATION: "Images",
+  VIDEO_GENERATION: "Video clips",
+  VOICE: "Voice",
+  MUSIC_GENERATION: "Music",
+  SFX_GENERATION: "SFX",
+};
 
 function StatusRow({
   label,
@@ -40,7 +53,7 @@ export default async function ProjectOverviewPage({ params }: { params: Promise<
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) notFound();
 
-  const status = await getProjectStatus(id, project.type);
+  const [status, spend] = await Promise.all([getProjectStatus(id, project.type), getProjectSpend(id)]);
   const allDone =
     status.storyDone &&
     status.scenes.total > 0 &&
@@ -94,6 +107,27 @@ export default async function ProjectOverviewPage({ params }: { params: Promise<
             done={status.finalRenderCount > 0}
             href={status.scenesHref}
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Spend to date</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          <p className="text-2xl font-semibold">${spend.totalUsd.toFixed(2)}</p>
+          {spend.byJobType.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No paid generations yet.</p>
+          ) : (
+            <div className="flex flex-col gap-1 text-sm text-muted-foreground">
+              {spend.byJobType.map((group) => (
+                <div key={group.jobType} className="flex items-center justify-between">
+                  <span>{SPEND_JOB_TYPE_LABELS[group.jobType] ?? group.jobType}</span>
+                  <span>${group.totalUsd.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
 

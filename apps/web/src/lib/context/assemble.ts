@@ -86,6 +86,7 @@ export async function assembleContext({ projectId, episodeId }: AssembleContextP
         [
           `### ${c.name}`,
           c.identity && `Identity: ${c.identity}`,
+          c.age && `Age: ${c.age}`,
           c.appearance && `Appearance: ${c.appearance}`,
           c.personality && `Personality: ${c.personality}`,
           c.clothing && `Clothing: ${c.clothing}`,

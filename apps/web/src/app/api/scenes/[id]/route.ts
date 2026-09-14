@@ -2,15 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { SCENE_INCLUDE, resequenceScenes, mapSceneShots } from "@/lib/scenes";
+import { CAMERA_MOVEMENTS } from "@/lib/video-model-config";
 
 const patchSchema = z.object({
   title: z.string().optional().nullable(),
   description: z.string().min(1).optional(),
   visualMode: z.enum(["ILLUSTRATION", "IMAGE_TO_VIDEO", "TEXT_TO_VIDEO"]).optional(),
   visualModeReason: z.string().optional().nullable(),
-  cameraMovement: z
-    .enum(["STATIC", "ZOOM_IN", "ZOOM_OUT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN"])
-    .optional(),
+  cameraMovement: z.enum(CAMERA_MOVEMENTS).optional(),
   narration: z.string().optional().nullable(),
   narrationDeliveryNotes: z.string().optional().nullable(),
   narrationSpeed: z.number().min(0.25).max(4).optional().nullable(),

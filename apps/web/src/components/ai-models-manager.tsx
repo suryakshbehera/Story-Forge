@@ -37,6 +37,7 @@ const JOB_TYPES = [
   "IMAGE_VALIDATION",
   "VOICE",
   "VIDEO_GENERATION",
+  "VIDEO_VALIDATION",
   "VIDEO",
   "AUDIO_PLANNING",
   "MUSIC_GENERATION",
@@ -64,6 +65,7 @@ const JOB_LABELS: Record<JobType, string> = {
   IMAGE_VALIDATION: "Image Validation",
   VOICE: "Voice",
   VIDEO_GENERATION: "Video Generation",
+  VIDEO_VALIDATION: "Video Validation",
   VIDEO: "Video",
   AUDIO_PLANNING: "Audio Planning",
   MUSIC_GENERATION: "Music Generation",
@@ -225,14 +227,35 @@ export function AiModelsManager({ initialModels }: { initialModels: ModelRow[] }
 // video-model-config.ts / video-segmentation.ts) — how many clips a scene
 // needs and at what duration/resolution is computed from this, since
 // OpenRouter has no confirmed live endpoint for per-model capabilities.
+// Record<CameraMovementValue, …> on purpose: a movement added to
+// CAMERA_MOVEMENTS without a label here is a compile error, not a checkbox
+// that silently renders blank. Existing stored preferredCameraMovements JSON
+// is unaffected by additions — the enum only ever grows.
 const CAMERA_MOVEMENT_LABELS: Record<CameraMovementValue, string> = {
   STATIC: "Static",
   ZOOM_IN: "Zoom in",
   ZOOM_OUT: "Zoom out",
+  CRASH_ZOOM: "Crash zoom",
+  DOLLY_IN: "Dolly in",
+  DOLLY_OUT: "Dolly out",
+  DOLLY_ZOOM: "Dolly zoom (Vertigo)",
   PAN_LEFT: "Pan left",
   PAN_RIGHT: "Pan right",
-  PAN_UP: "Pan up",
-  PAN_DOWN: "Pan down",
+  WHIP_PAN: "Whip pan",
+  TILT_UP: "Tilt up",
+  TILT_DOWN: "Tilt down",
+  ROLL: "Roll",
+  TRACK_LEFT: "Track left",
+  TRACK_RIGHT: "Track right",
+  PEDESTAL_UP: "Pedestal up",
+  PEDESTAL_DOWN: "Pedestal down",
+  CRANE_UP: "Crane up",
+  CRANE_DOWN: "Crane down",
+  ARC_LEFT: "Arc left",
+  ARC_RIGHT: "Arc right",
+  STEADICAM_FOLLOW: "Steadicam follow",
+  HANDHELD: "Handheld",
+  AERIAL: "Aerial / drone",
 };
 
 function VideoConfigFields({

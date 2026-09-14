@@ -1,0 +1,11 @@
+-- CreateEnum
+CREATE TYPE "Emotion" AS ENUM ('JOY', 'LOVE', 'HOPE', 'PRIDE', 'RELIEF', 'SADNESS', 'GRIEF', 'LONELINESS', 'DESPAIR', 'NOSTALGIA', 'ANGER', 'RAGE', 'FRUSTRATION', 'RESENTMENT', 'FEAR', 'ANXIETY', 'DREAD', 'PANIC', 'SURPRISE', 'SHOCK', 'AWE', 'CONFUSION', 'CURIOSITY', 'SHAME', 'GUILT', 'JEALOUSY', 'BETRAYAL', 'DESIRE', 'DETERMINATION', 'COURAGE', 'DEFIANCE', 'TRIUMPH', 'SUSPENSE', 'CALM', 'DOUBT', 'EXHAUSTION');
+
+-- CreateEnum
+CREATE TYPE "EmotionIntensity" AS ENUM ('SUBTLE', 'MODERATE', 'INTENSE');
+
+-- AlterTable
+ALTER TABLE "shots" ADD COLUMN     "bodyLanguage" TEXT,
+ADD COLUMN     "emotion" "Emotion",
+ADD COLUMN     "emotionIntensity" "EmotionIntensity",
+ADD COLUMN     "facialExpression" TEXT;

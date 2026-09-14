@@ -10,13 +10,17 @@ const bodySchema = z.object({
   resolution: z.string().optional(),
   generateAudio: z.boolean().optional(),
   includeCastReferences: z.boolean().optional(),
+  validationModelId: z.string().optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: sceneId } = await params;
   const body = bodySchema.parse(await req.json().catch(() => ({})));
 
-  const model = await getModelOrDefault("VIDEO_GENERATION", body.modelId);
+  const [model, validationModel] = await Promise.all([
+    getModelOrDefault("VIDEO_GENERATION", body.modelId),
+    getModelOrDefault("VIDEO_VALIDATION", body.validationModelId),
+  ]);
   if (!model) {
     return NextResponse.json(
       { error: "No Video Generation model is configured. Add one in Settings → AI Models." },
@@ -40,6 +44,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       resolution: body.resolution,
       generateAudio: body.generateAudio,
       includeCastReferences: body.includeCastReferences,
+      // Advisory-only — an unconfigured model just skips the check.
+      validationModelId: validationModel?.modelId ?? null,
     });
     return NextResponse.json(clips, { status: 201 });
   } catch (error) {

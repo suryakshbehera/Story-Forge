@@ -7,6 +7,7 @@ import { generateAudioClip } from "@/lib/ai/openrouter";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { probeDuration } from "@/lib/ffmpeg";
 import { STALE_MS } from "@/lib/generation-claims";
+import { recordGenerationEvent, resolveSceneProjectId } from "@/lib/generation-events";
 
 // Music/SFX have two providers now (see lib/ai/elevenlabs.ts's generateMusic/
 // generateSoundEffect and lib/ai/openrouter.ts's generateAudioClip) —
@@ -27,7 +28,7 @@ async function generateSfxForProvider({
   modelId: string;
   prompt: string;
   durationSeconds?: number;
-}): Promise<{ base64: string; mimeType: string }> {
+}): Promise<{ base64: string; mimeType: string; costUsd?: number }> {
   if (provider === "elevenlabs") {
     return generateSoundEffect({ modelId, prompt, durationSeconds });
   }
@@ -52,7 +53,7 @@ async function generateMusicForProvider({
   modelId: string;
   prompt: string;
   durationSeconds?: number;
-}): Promise<{ base64: string; mimeType: string }> {
+}): Promise<{ base64: string; mimeType: string; costUsd?: number }> {
   if (provider === "elevenlabs") {
     return generateMusic({ prompt, durationSeconds });
   }
@@ -141,11 +142,40 @@ export async function generateSceneMusic({
   }
 
   const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
-  const generated = await generateMusicForProvider({
+  const projectId = await resolveSceneProjectId(sceneId);
+  const startedAt = Date.now();
+  let generated: { base64: string; mimeType: string; costUsd?: number };
+  try {
+    generated = await generateMusicForProvider({
+      provider,
+      modelId,
+      prompt: scene.musicPrompt,
+      durationSeconds: durationSeconds ?? undefined,
+    });
+  } catch (error) {
+    await recordGenerationEvent({
+      jobType: "MUSIC_GENERATION",
+      provider,
+      modelId,
+      projectId,
+      entityType: "SCENE",
+      entityId: sceneId,
+      durationMs: Date.now() - startedAt,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  await recordGenerationEvent({
+    jobType: "MUSIC_GENERATION",
     provider,
     modelId,
-    prompt: scene.musicPrompt,
-    durationSeconds: durationSeconds ?? undefined,
+    projectId,
+    entityType: "SCENE",
+    entityId: sceneId,
+    costUsd: generated.costUsd,
+    durationMs: Date.now() - startedAt,
+    success: true,
   });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `music.${extFromMime(generated.mimeType)}`;
@@ -230,11 +260,40 @@ export async function generateSceneSfx({
   }
 
   const durationSeconds = await getSceneVoiceDurationSeconds(sceneId);
-  const generated = await generateSfxForProvider({
+  const projectId = await resolveSceneProjectId(sceneId);
+  const startedAt = Date.now();
+  let generated: { base64: string; mimeType: string; costUsd?: number };
+  try {
+    generated = await generateSfxForProvider({
+      provider,
+      modelId,
+      prompt: scene.sfxPrompt,
+      durationSeconds: durationSeconds ?? undefined,
+    });
+  } catch (error) {
+    await recordGenerationEvent({
+      jobType: "SFX_GENERATION",
+      provider,
+      modelId,
+      projectId,
+      entityType: "SCENE",
+      entityId: sceneId,
+      durationMs: Date.now() - startedAt,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  await recordGenerationEvent({
+    jobType: "SFX_GENERATION",
     provider,
     modelId,
-    prompt: scene.sfxPrompt,
-    durationSeconds: durationSeconds ?? undefined,
+    projectId,
+    entityType: "SCENE",
+    entityId: sceneId,
+    costUsd: generated.costUsd,
+    durationMs: Date.now() - startedAt,
+    success: true,
   });
   const buffer = Buffer.from(generated.base64, "base64");
   const fileName = `sfx.${extFromMime(generated.mimeType)}`;

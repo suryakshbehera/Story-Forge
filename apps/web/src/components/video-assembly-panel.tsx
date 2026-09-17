@@ -21,6 +21,11 @@ export interface FinalVideoItem {
   createdAt: string | Date;
   fileName: string | null;
   sizeBytes: number | null;
+  // Dubbing — null for the project's own primary-language render, an
+  // INDIAN_LANGUAGES value for a dub render. This panel only ever renders
+  // the primary-language list; TranslationsPanel filters the same
+  // underlying array by language instead of fetching a separate one.
+  language?: string | null;
 }
 
 // parentType/parentId route to /api/stories/[id]/video/... or
@@ -55,7 +60,10 @@ export function VideoAssemblyPanel({
   const [generating, setGenerating] = useState(() =>
     isGenerationActive(initialFinalVideoGenerationStartedAt, "finalAssembly")
   );
-  const [finalVideos, setFinalVideos] = useState(initialFinalVideos);
+  // Dubbing — this panel only ever shows/manages the primary-language
+  // render history; dub renders (Asset.language set) are TranslationsPanel's
+  // concern, reading the same finalVideos array below with its own filter.
+  const [finalVideos, setFinalVideos] = useState(initialFinalVideos.filter((v) => !v.language));
   const [lastError, setLastError] = useState<GenerationErrorInfo | null>(initialError ?? null);
   // Off by default — matches the pre-existing behavior of always discarding
   // a video clip's own baked-in audio (e.g. Veo3 Lite's generated sound) in

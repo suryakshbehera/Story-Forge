@@ -23,7 +23,9 @@ const JOB_LABELS: Record<string, string> = {
   MUSIC_GENERATION: "Music Generation",
   SFX_GENERATION: "SFX Generation",
   AUDIO_CUE_PLANNING: "Audio Cue Planning",
+  AUDIO_MIXING_PLANNING: "Audio Mixing (Sound Engineer)",
   VIDEO: "Final Assembly (Video)",
+  TRANSLATION: "Translation",
 };
 
 const GLOBAL_DEFAULT_VALUE = "__global_default__";

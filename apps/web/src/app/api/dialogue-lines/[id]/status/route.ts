@@ -8,7 +8,13 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const { id } = await params;
   const line = await prisma.dialogueLine.findUnique({
     where: { id },
-    include: { character: { select: { id: true, name: true, voiceName: true } }, audio: { orderBy: { createdAt: "desc" } } },
+    include: {
+      character: { select: { id: true, name: true, voiceName: true } },
+      // Dubbing — see scenes/[id]/status's identical comment: this feeds
+      // the primary-language DialogueLineRow's poll loop only.
+      audio: { where: { language: null }, orderBy: { createdAt: "desc" } },
+      translations: true,
+    },
   });
   if (!line) {
     return NextResponse.json({ error: "Dialogue line not found" }, { status: 404 });

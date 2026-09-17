@@ -19,8 +19,13 @@ WORKDIR /app
 FROM base AS deps
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY apps/web/package.json ./apps/web/package.json
+# apps/mobile is now a workspace importer in the lockfile — its package.json
+# must exist on disk for `--frozen-lockfile` to verify the lockfile, even
+# though --filter below excludes its (large, native) deps from this image.
+COPY apps/mobile/package.json ./apps/mobile/package.json
 COPY packages/db/package.json ./packages/db/package.json
-RUN pnpm install --frozen-lockfile
+COPY packages/contract/package.json ./packages/contract/package.json
+RUN pnpm install --frozen-lockfile --filter web... --filter db...
 
 FROM deps AS build
 COPY . .

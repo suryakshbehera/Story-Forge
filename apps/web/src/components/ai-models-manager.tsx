@@ -51,7 +51,9 @@ const JOB_TYPES = [
   "BLUEPRINT_PLANNING",
   "MOTION_PROMPT_DRAFTING",
   "AUDIO_CUE_PLANNING",
+  "AUDIO_MIXING_PLANNING",
   "DURATION_RECOMMENDATION",
+  "TRANSLATION",
 ] as const;
 
 type JobType = (typeof JOB_TYPES)[number];
@@ -79,7 +81,9 @@ const JOB_LABELS: Record<JobType, string> = {
   BLUEPRINT_PLANNING: "Blueprint Planning",
   MOTION_PROMPT_DRAFTING: "Motion Prompt Drafting",
   AUDIO_CUE_PLANNING: "Audio Cue Planning",
+  AUDIO_MIXING_PLANNING: "Audio Mixing (Sound Engineer)",
   DURATION_RECOMMENDATION: "Duration Recommendation",
+  TRANSLATION: "Translation",
 };
 
 export interface ModelRow {

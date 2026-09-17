@@ -345,6 +345,36 @@ function shotDirectionInstruction(startShot: SceneShot, endShot: SceneShot | und
   return lines.length > 0 ? `Shot direction (resolved by the Director for this shot):\n${lines.join("\n")}` : null;
 }
 
+// A pair's start image is a real rendered still of that exact shot, so the
+// video model can already see the subject's pose there — what a single still
+// can't convey is momentum: whether that pose is mid-run or about to begin
+// running. Left unstated, a mid-action starting frame tends to get
+// re-interpreted as the start of a fresh beat, the same failure subSegmentPrompt
+// (above) already exists to prevent one level down, within a single pair's own
+// frame-chained sub-segments — this is that fix applied across the pair
+// boundary instead.
+//
+// Camera-aware: when the Director kept the same CameraMovement across the
+// cut, the camera's own motion is one continuous move spanning both pairs, so
+// it gets told to continue alongside the subject. When the Director changed
+// it, the new camera move is a deliberate instruction — telling the model to
+// also continue the *previous* shot's camera motion here would fight
+// cameraMovementInstruction's line for this pair, so only the subject's
+// physical action is carried forward, and the note says explicitly to follow
+// the new camera direction rather than the old one. undefined previousPair
+// (the scene's first pair) returns null — there is no prior shot to continue
+// from.
+function crossPairContinuationNote(pair: PairPlan, previousPair: PairPlan | undefined): string | null {
+  if (!previousPair) return null;
+  const priorMotion = previousPair.startShot.subjectMovement?.trim();
+  const motionClause = priorMotion ? `"${priorMotion}" was already in progress` : "motion was already in progress";
+  const sameCameraMovement = pair.startShot.cameraMovement === previousPair.startShot.cameraMovement;
+
+  return sameCameraMovement
+    ? `Continuing directly from the previous shot: ${motionClause} as this shot begins, and the camera's own movement continues too — this is one continuous motion spanning the cut, not a fresh beginning. Continue both the subject's action and the camera's motion rather than restarting either.`
+    : `Continuing directly from the previous shot: ${motionClause} as this shot begins — the starting frame is a mid-action moment, not a fresh beginning. Continue the subject's motion, but the camera direction below is a deliberate change from the previous shot's — follow it fully rather than carrying over the previous shot's camera movement.`;
+}
+
 // motionPrompt is pure camera/motion direction "layered on top of" the scene
 // (see its schema comment and MOTION_PROMPT_SYSTEM_PROMPT below), so the
 // description/transition text is always included and motionPrompt — when
@@ -356,7 +386,7 @@ function shotDirectionInstruction(startShot: SceneShot, endShot: SceneShot | und
 // approved draft) scene-level text, so it outranks the per-shot Director
 // fields wherever the two disagree. Director AI never writes into
 // motionPrompt itself — the only writer is the user, via the Prompt Builder.
-function buildPairPrompt(scene: SceneForVideo, pair: PairPlan): string {
+function buildPairPrompt(scene: SceneForVideo, pair: PairPlan, previousPair: PairPlan | undefined): string {
   const descriptionOrTransition = pair.endShot
     ? `${scene.description}\n\nTransition: from "${pair.startShot.description}" to "${pair.endShot.description}"`
     : scene.description;
@@ -365,6 +395,7 @@ function buildPairPrompt(scene: SceneForVideo, pair: PairPlan): string {
 
   return [
     descriptionOrTransition,
+    crossPairContinuationNote(pair, previousPair),
     shotDirection,
     motion && `Motion (director override): ${motion}`,
     cameraMovementInstruction(pair.startShot.cameraMovement),
@@ -810,7 +841,7 @@ export async function generateSceneVideo({
       for (const [pairIndex, pair] of pairs.entries()) {
         const pairModel = pairModels[pairIndex];
         const pairTarget = pair.startShot.durationSeconds ?? autoPairTargets[pairIndex];
-        const pairPrompt = buildPairPrompt(scene, pair);
+        const pairPrompt = buildPairPrompt(scene, pair, pairs[pairIndex - 1]);
 
         await generatePairSegments({
           projectId,
@@ -996,7 +1027,7 @@ export async function regenerateScenePairVideo({
   }
   const pairModel = pairModels[pairIndex];
   const pairTarget = pair.startShot.durationSeconds ?? autoPairTargets[pairIndex];
-  const pairPrompt = buildPairPrompt(scene, pair);
+  const pairPrompt = buildPairPrompt(scene, pair, pairs[pairIndex - 1]);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-video-retake-"));
   try {
@@ -1355,7 +1386,7 @@ export async function selectSceneVideoClip(sceneId: string, assetId: string): Pr
     }
     await tx.asset.updateMany({ where: { videoSceneId: sceneId, isSelected: true }, data: { isSelected: false } });
     const where = asset.videoBatchId ? { videoSceneId: sceneId, videoBatchId: asset.videoBatchId } : { id: assetId };
-    await tx.asset.updateMany({ where, data: { isSelected: true } });
+    await tx.asset.updateMany({ where, data: { isSelected: true, reviewedAt: new Date() } });
     const batch = await tx.asset.findMany({ where, orderBy: { videoSegmentOrder: "asc" } });
     return batch.map(serializeSceneVideoClip);
   });

@@ -1,5 +1,6 @@
 import { prisma, type AiJobType, type GenerationEntityType } from "@/lib/db";
 import type { ScenesParentType } from "@/lib/scenes";
+import { notifyGenerationFinished } from "@/lib/notify";
 
 // A Scene's project is reached via Story or Episode→Season — resolving it
 // here (rather than accepting a projectId from the client) is what makes
@@ -75,6 +76,12 @@ export async function recordGenerationEvent(input: RecordGenerationEventInput): 
   } catch {
     // Telemetry only — never let a logging failure break generation.
   }
+  // Mobile push (M1.2) — fire-and-forget, never awaited, never throws. Hung
+  // off this terminal-state write rather than the release*() claim-release
+  // path: release*() knows only an entity id, not success/failure or the
+  // project, and this call already has every field a notification needs.
+  // See docs/product/mobile-technical-plan-2026-09.md §4.
+  notifyGenerationFinished(input);
 }
 
 export interface GenerationEstimate {

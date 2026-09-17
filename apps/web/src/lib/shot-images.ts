@@ -667,7 +667,11 @@ export async function selectShotImage(shotId: string, assetId: string): Promise<
       throw new Error("Asset does not belong to this shot.");
     }
     await tx.asset.updateMany({ where: { shotId, isSelected: true }, data: { isSelected: false } });
-    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    // reviewedAt: a human affirmed this take — see mobile-technical-plan-2026-09.md §5.2.
+    const updated = await tx.asset.update({
+      where: { id: assetId },
+      data: { isSelected: true, reviewedAt: new Date() },
+    });
     return serializeShotImage(updated);
   });
 }

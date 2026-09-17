@@ -7,6 +7,10 @@ import { generateNarrationAudio, claimNarrationGeneration, releaseNarrationGener
 
 const bodySchema = z.object({
   modelId: z.string().optional(),
+  // Dubbing — omitted generates the project's own primary language exactly
+  // as before; set, generates that dub language instead. See
+  // lib/voice.ts's generateNarrationAudio.
+  language: z.string().optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -27,7 +31,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const audio = await generateNarrationAudio({ sceneId, modelId: model.modelId, provider: model.provider });
+    const audio = await generateNarrationAudio({ sceneId, modelId: model.modelId, provider: model.provider, language: body.language });
     return NextResponse.json(audio, { status: 201 });
   } catch (error) {
     if (error instanceof ElevenLabsError || error instanceof SarvamError) {

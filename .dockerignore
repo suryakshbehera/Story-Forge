@@ -17,6 +17,16 @@ build
 storage/*
 !storage/.gitkeep
 
+# apps/mobile isn't part of the web image (see Dockerfile's `deps` stage
+# --filter). These are its dev-only/native-build artifacts; its package.json
+# and TS source still need to reach the build context, so this isn't a
+# blanket "apps/mobile" exclude (that would also hide the package.json the
+# deps stage COPYs explicitly).
+apps/mobile/.expo
+apps/mobile/ios
+apps/mobile/android
+apps/mobile/.vscode
+
 *.log
 *.tsbuildinfo
 .DS_Store

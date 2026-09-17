@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
-import { SESSION_COOKIE_NAME, getUserFromToken } from "@/lib/auth";
+import { extractToken, getUserFromToken } from "@/lib/auth";
 
 // Central authorization gate for the whole app. Next.js 16 renamed
 // middleware.ts to proxy.ts and — new in 16 — Proxy now defaults to the
@@ -20,7 +20,7 @@ import { SESSION_COOKIE_NAME, getUserFromToken } from "@/lib/auth";
 // from a "use client" component to an /api/* Route Handler), so it doesn't
 // apply yet — but it will if that ever changes.
 
-const PUBLIC_PATHS = ["/login", "/signup", "/api/auth/login", "/api/auth/signup"];
+const PUBLIC_PATHS = ["/login", "/signup", "/api/auth/login", "/api/auth/signup", "/api/auth/token"];
 
 const ADMIN_ONLY_PREFIXES = ["/settings", "/api/admin"];
 
@@ -36,6 +36,26 @@ const ADMIN_WRITE_ONLY_PREFIXES = ["/api/ai-models"];
 //     route itself (ownerId: user.id), nothing to check beforehand.
 //   - GET /api/projects and "/" — list endpoints; proxy can't do row-level
 //     filtering, the route/page itself adds `WHERE ownerId` unless admin.
+//   - GET /api/mobile/v1/me and /api/mobile/v1/projects — the mobile BFF's
+//     own equivalents of the two rules above: /me only ever returns the
+//     caller's own data (keyed by x-user-id, nothing to check), /projects is
+//     a list endpoint that scopes by ownerId (or all, if admin) itself, same
+//     as GET /api/projects. See docs/product/mobile-technical-plan-2026-09.md §1.6.
+//   - GET /api/mobile/v1/activity and /api/mobile/v1/review — same "list
+//     endpoint" reasoning: cross-project by default, an optional ?projectId
+//     query param (not a path segment RESOLVERS could match) is scoped by
+//     ownedProjectsWhere(user) inside every query, so an unowned projectId
+//     yields nothing rather than leaking anything.
+//   - POST/DELETE /api/mobile/v1/takes/[assetId]/keep — :assetId isn't
+//     project-resolvable by the regex table below (the same 13-FK problem
+//     storage reads have), so ownership is resolved inline via
+//     lib/read/asset-ownership.ts's resolveAssetProjectId instead.
+//   - /api/mobile/v1/inbox/** — CaptureItem is owned by User, not Project
+//     (a capture can arrive before any project is chosen), so RESOLVERS
+//     structurally cannot gate it. Every handler checks item.userId itself;
+//     the one filing exception is POST /inbox/[id]/file, which additionally
+//     verifies the FILING TARGET's project ownership before re-pointing an
+//     Asset onto it. See lib/inbox.ts.
 //   - GET /api/storage/[...key] — Asset has 13 different optional parent
 //     FKs (characterId, locationId, shotId, narrationSceneId,
 //     dialogueLineId, videoSceneId, musicSceneId, sfxSceneId,
@@ -68,6 +88,13 @@ const RESOLVERS: Array<{ prefix: RegExp; resolve: Resolver }> = [
   // id right after "projects/" IS the project id, so one entry covers all
   // ~20 nested routes at once.
   { prefix: /^\/(?:api\/)?projects\/([^/]+)/, resolve: (id) => Promise.resolve(id) },
+
+  // Mobile BFF's per-project detail route. Doesn't fall under the entry
+  // above — that one requires "projects/" with nothing before it in the
+  // path, and this is "/api/mobile/v1/projects/[id]". Without this, any
+  // logged-in user could read any project through the BFF. See
+  // docs/product/mobile-technical-plan-2026-09.md §1.6.
+  { prefix: /^\/api\/mobile\/v1\/projects\/([^/]+)/, resolve: (id) => Promise.resolve(id) },
 
   // Season, Character, Location each have projectId directly.
   {
@@ -128,7 +155,12 @@ function isApiPath(pathname: string): boolean {
 }
 
 function deny(request: NextRequest, pathname: string, status: 401 | 403): NextResponse {
-  if (isApiPath(pathname)) {
+  // A native client has no HTML login page to redirect to — sending it one
+  // is a confusing parse error where a clean 401 would let it just prompt
+  // for login again. Checked before the isApiPath branch so it also covers
+  // a (hypothetical) non-/api/ path hit with a bearer token.
+  const isBearerRequest = request.headers.get("authorization")?.startsWith("Bearer ") ?? false;
+  if (isApiPath(pathname) || isBearerRequest) {
     return NextResponse.json({ error: status === 401 ? "Unauthorized" : "Forbidden" }, { status });
   }
   if (status === 401) {
@@ -147,7 +179,7 @@ export default async function proxy(request: NextRequest): Promise<NextResponse>
     return NextResponse.next();
   }
 
-  const rawToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const rawToken = extractToken(request);
   const user = rawToken ? await getUserFromToken(rawToken) : null;
 
   if (!user) {

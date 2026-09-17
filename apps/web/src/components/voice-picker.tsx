@@ -16,19 +16,26 @@ import type { VoiceCatalogEntry } from "@/app/api/voices/route";
 // Module-level cache/in-flight dedup — same reasoning as
 // lib/model-registry-cache.ts: several pickers can be open across a page
 // (per-character forms, the narrator field), no reason to refetch the same
-// catalog for each.
-let voicesPromise: Promise<VoiceCatalogEntry[]> | null = null;
-function getVoiceCatalog(): Promise<VoiceCatalogEntry[]> {
-  if (!voicesPromise) {
-    voicesPromise = fetch("/api/voices")
+// catalog for each. Keyed by language since /api/voices' response now
+// depends on it (a Sarvam-unsupported language drops the Sarvam half) —
+// every picker on a page shares one project language, so this still
+// collapses to one in-flight fetch per page in practice.
+const voicesPromiseCache = new Map<string, Promise<VoiceCatalogEntry[]>>();
+function getVoiceCatalog(language: string | null | undefined): Promise<VoiceCatalogEntry[]> {
+  const key = language ?? "";
+  let entry = voicesPromiseCache.get(key);
+  if (!entry) {
+    const url = key ? `/api/voices?language=${encodeURIComponent(key)}` : "/api/voices";
+    entry = fetch(url)
       .then((res) => res.json())
       .then((data: { voices: VoiceCatalogEntry[] }) => data.voices)
       .catch(() => {
-        voicesPromise = null;
+        voicesPromiseCache.delete(key);
         return [];
       });
+    voicesPromiseCache.set(key, entry);
   }
-  return voicesPromise;
+  return entry;
 }
 
 // Keeps the underlying value plain free text (Character.voiceName /
@@ -37,16 +44,34 @@ function getVoiceCatalog(): Promise<VoiceCatalogEntry[]> {
 // an ID by hand. Manual entry still works: the text Input next to the
 // Browse button accepts anything, same "AI/tools propose, never force"
 // idiom as the rest of the app.
-export function VoicePicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+export function VoicePicker({
+  value,
+  onChange,
+  language,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  // The project's Story/StoryBible.language (see lib/languages.ts's
+  // resolveProjectLanguage) — narrows out Sarvam voices that can't actually
+  // speak this language. Optional: omitted, the picker shows every voice,
+  // same as before this prop existed.
+  language?: string | null;
+}) {
   const [open, setOpen] = useState(false);
   const [voices, setVoices] = useState<VoiceCatalogEntry[] | null>(null);
   const [query, setQuery] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Tracks which language `voices` was loaded for, so a reopen with the same
+  // language reuses state instead of flashing back to "Loading…" — only a
+  // genuine language change (or first open) triggers a refetch.
+  const loadedLanguageRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
-    if (!open || voices) return;
-    getVoiceCatalog().then(setVoices);
-  }, [open, voices]);
+    if (!open) return;
+    if (voices !== null && loadedLanguageRef.current === language) return;
+    loadedLanguageRef.current = language;
+    getVoiceCatalog(language).then(setVoices);
+  }, [open, voices, language]);
 
   function play(previewUrl: string) {
     audioRef.current?.pause();

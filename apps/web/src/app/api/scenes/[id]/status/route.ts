@@ -14,10 +14,21 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const scene = await prisma.scene.findUnique({
     where: { id },
     include: {
-      narrationAudio: { orderBy: { createdAt: "desc" } },
+      // Dubbing — this status endpoint feeds the *primary*-language
+      // SceneVoicePanel's poll loop only (TranslationsPanel manages its own
+      // state independently, never polls this route), so narrationAudio/
+      // dialogueLines[].audio are scoped to language: null the same way
+      // scene-manager.tsx scopes SceneVoicePanel's initial props — a poll
+      // response replacing state wholesale must not reintroduce a dub
+      // language's takes that the initial load correctly excluded.
+      narrationAudio: { where: { language: null }, orderBy: { createdAt: "desc" } },
       dialogueLines: {
         orderBy: { order: "asc" },
-        include: { character: { select: { id: true, name: true, voiceName: true } }, audio: { orderBy: { createdAt: "desc" } } },
+        include: {
+          character: { select: { id: true, name: true, voiceName: true } },
+          audio: { where: { language: null }, orderBy: { createdAt: "desc" } },
+          translations: true,
+        },
       },
       videoClips: { orderBy: { createdAt: "desc" } },
       music: { orderBy: { createdAt: "desc" } },

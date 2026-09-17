@@ -18,7 +18,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelSelect } from "@/components/model-select";
-import { SceneVoicePanel, type AudioTake, type DialogueLineItem } from "@/components/scene-voice-panel";
+import {
+  SceneVoicePanel,
+  type AudioTake,
+  type DialogueLineItem,
+  type SceneTranslationItem,
+} from "@/components/scene-voice-panel";
 import { SceneVideoPanel, type SceneVideoClipItem } from "@/components/scene-video-panel";
 import { SceneAudioPanel } from "@/components/scene-audio-panel";
 import { ShotManager, type ShotItem } from "@/components/shot-manager";
@@ -67,6 +72,9 @@ export interface SceneItem {
   narrationSpeed: number | null;
   narrationAudio: AudioTake[];
   dialogueLines: DialogueLineItem[];
+  // Dubbing — this scene's translation into every dub language translated
+  // so far (empty until a Translations panel run adds one).
+  translations: SceneTranslationItem[];
   motionPrompt: string | null;
   videoPrompt: string | null;
   videoDurationSeconds: number | null;
@@ -110,6 +118,18 @@ const VISUAL_MODE_LABELS: Record<SceneVisualMode, string> = {
   TEXT_TO_VIDEO: "Text → Video",
 };
 
+// Dubbing — `scenes` state here is shared with TranslationsPanel's own
+// initial data (both panels are seeded from the same SSR query, see
+// story/scenes/page.tsx), so it carries every dub language's audio takes
+// alongside the primary language's. SceneVoicePanel is the *primary*-
+// language editing surface only — its own doc comment says so — so its
+// initial props must be pre-filtered here rather than trusting every take
+// array to already be primary-only. `language: null` is the primary
+// language's convention throughout (see Asset.language in schema.prisma).
+function primaryLanguageTakes<T extends { language?: string | null }>(takes: T[]): T[] {
+  return takes.filter((t) => !t.language);
+}
+
 // For scenes that are genuinely new or just replaced everything (addScene,
 // generate's regenerateAll) — SCENE_INCLUDE doesn't fetch Phase 4's
 // narrationAudio/dialogueLines, so the response has them as `undefined`, and
@@ -125,6 +145,7 @@ function withVoiceDefaults(scene: SceneItem): SceneItem {
     narrationSpeed: scene.narrationSpeed ?? null,
     narrationAudio: scene.narrationAudio ?? [],
     dialogueLines: scene.dialogueLines ?? [],
+    translations: scene.translations ?? [],
     videoClips: scene.videoClips ?? [],
     music: scene.music ?? [],
     sfx: scene.sfx ?? [],
@@ -139,6 +160,7 @@ export function SceneManager({
   characters,
   locations,
   initialNarratorVoiceName,
+  language,
 }: {
   parentType: "story" | "episode";
   parentId: string;
@@ -147,6 +169,9 @@ export function SceneManager({
   characters: TagOption[];
   locations: TagOption[];
   initialNarratorVoiceName: string | null;
+  // The project's Story/StoryBible.language — see lib/languages.ts's
+  // resolveProjectLanguage. Narrows the narrator VoicePicker below.
+  language?: string | null;
 }) {
   const [scenes, setScenes] = useState(initialScenes);
   const [modelId, setModelId] = useState("");
@@ -212,6 +237,7 @@ export function SceneManager({
                 ...scene,
                 narrationAudio: scene.narrationAudio ?? s.narrationAudio,
                 dialogueLines: scene.dialogueLines ?? s.dialogueLines,
+                translations: scene.translations ?? s.translations,
                 videoClips: scene.videoClips ?? s.videoClips,
                 music: scene.music ?? s.music,
                 sfx: scene.sfx ?? s.sfx,
@@ -231,6 +257,7 @@ export function SceneManager({
           ...u,
           narrationAudio: u.narrationAudio ?? existing?.narrationAudio ?? [],
           dialogueLines: u.dialogueLines ?? existing?.dialogueLines ?? [],
+          translations: u.translations ?? existing?.translations ?? [],
           videoClips: u.videoClips ?? existing?.videoClips ?? [],
           music: u.music ?? existing?.music ?? [],
           sfx: u.sfx ?? existing?.sfx ?? [],
@@ -378,7 +405,7 @@ export function SceneManager({
           <Field label="Narrator voice — used for every scene's narration in this project">
             <div className="flex gap-2">
               <div className="max-w-md flex-1">
-                <VoicePicker value={narratorVoiceName} onChange={setNarratorVoiceName} />
+                <VoicePicker value={narratorVoiceName} onChange={setNarratorVoiceName} language={language} />
               </div>
               <Button
                 size="sm"
@@ -579,8 +606,12 @@ function SceneRow({
 
   const shotsComplete = scene.shots.length > 0 && scene.shots.every((s) => s.images.some((img) => img.isSelected));
   const videoComplete = scene.videoClips.some((c) => c.isSelected);
+  // Dubbing — scoped to the primary language only (primaryLanguageTakes),
+  // same reasoning as the SceneVoicePanel props below: a selected dub-only
+  // take must not mark the primary-language "Voice" section complete.
   const voiceComplete =
-    scene.narrationAudio.some((a) => a.isSelected) || scene.dialogueLines.some((l) => l.audio.some((a) => a.isSelected));
+    primaryLanguageTakes(scene.narrationAudio).some((a) => a.isSelected) ||
+    scene.dialogueLines.some((l) => primaryLanguageTakes(l.audio).some((a) => a.isSelected));
   const audioComplete = scene.music.some((a) => a.isSelected) || scene.sfx.some((a) => a.isSelected);
 
   const dirty =
@@ -802,9 +833,9 @@ function SceneRow({
               initialNarration={scene.narration ?? ""}
               initialNarrationDeliveryNotes={scene.narrationDeliveryNotes}
               initialNarrationSpeed={scene.narrationSpeed}
-              initialNarrationAudio={scene.narrationAudio}
+              initialNarrationAudio={primaryLanguageTakes(scene.narrationAudio)}
               initialNarrationGenerationStartedAt={scene.narrationGenerationStartedAt}
-              initialDialogueLines={scene.dialogueLines}
+              initialDialogueLines={scene.dialogueLines.map((line) => ({ ...line, audio: primaryLanguageTakes(line.audio) }))}
               initialNarrationError={scene.lastNarrationError ?? null}
             />
           </CollapsiblePanel>

@@ -215,6 +215,10 @@ export interface SerializedFinalVideo {
   createdAt: Date;
   fileName: string | null;
   sizeBytes: number | null;
+  // Dubbing — null for the project's own primary-language render, an
+  // INDIAN_LANGUAGES value for a dub render. See Asset.language in
+  // schema.prisma.
+  language: string | null;
 }
 
 export function serializeFinalVideo(asset: Asset): SerializedFinalVideo {
@@ -225,6 +229,7 @@ export function serializeFinalVideo(asset: Asset): SerializedFinalVideo {
     createdAt: asset.createdAt,
     fileName: asset.fileName,
     sizeBytes: asset.sizeBytes,
+    language: asset.language,
   };
 }
 
@@ -287,35 +292,45 @@ function belongsToSilentParent(asset: Asset, parentType: ScenesParentType, paren
   return parentType === "story" ? asset.storySilentVideoId === parentId : asset.episodeSilentVideoId === parentId;
 }
 
-const ASSEMBLY_SCENE_INCLUDE = {
-  shots: {
-    orderBy: { order: "asc" as const },
-    include: { images: { where: { isSelected: true }, take: 1 } },
-  },
-  // No `take: 1` — a scene's selected take can be several frame-chained
-  // segments (see Asset.videoBatchId/videoSegmentOrder in scene-video.ts),
-  // all sharing isSelected: true, ordered so buildVisualSegment can
-  // concatenate them back into one continuous clip.
-  videoClips: { where: { isSelected: true }, orderBy: { videoSegmentOrder: "asc" } },
-  narrationAudio: { where: { isSelected: true }, take: 1 },
-  dialogueLines: {
-    orderBy: { order: "asc" as const },
-    include: {
-      audio: { where: { isSelected: true }, take: 1 },
-      // Only needed by generateSilentAssembly's cue-plan manifest below
-      // (buildSceneVoiceTrack ignores it) — included here rather than a
-      // second scene include so both passes share one query shape.
-      character: { select: { name: true } },
+// A function, not a static object — narrationAudio/dialogueLines[].audio's
+// `isSelected: true` is no longer unique per scene now that dubbing exists
+// (each language gets its own independently-selected take, see
+// lib/voice.ts's selectNarrationAudio), so the query must also filter by
+// which language's take this render wants. `language: null` (the default,
+// every render before dubbing existed) means the project's own primary
+// language. music/sfx stay unfiltered by language — those are never
+// generated per-language, the same bed/effect plays under every dub.
+function assemblySceneInclude(language: string | null) {
+  return {
+    shots: {
+      orderBy: { order: "asc" as const },
+      include: { images: { where: { isSelected: true }, take: 1 } },
     },
-  },
-  // Same reasoning as dialogueLines.character above — only read by
-  // generateSilentAssembly, for the cue-planning prompt's per-scene roster.
-  characters: { select: { name: true } },
-  music: { where: { isSelected: true }, take: 1 },
-  sfx: { where: { isSelected: true }, take: 1 },
-} satisfies Prisma.SceneInclude;
+    // No `take: 1` — a scene's selected take can be several frame-chained
+    // segments (see Asset.videoBatchId/videoSegmentOrder in scene-video.ts),
+    // all sharing isSelected: true, ordered so buildVisualSegment can
+    // concatenate them back into one continuous clip.
+    videoClips: { where: { isSelected: true }, orderBy: { videoSegmentOrder: "asc" as const } },
+    narrationAudio: { where: { isSelected: true, language }, take: 1 },
+    dialogueLines: {
+      orderBy: { order: "asc" as const },
+      include: {
+        audio: { where: { isSelected: true, language }, take: 1 },
+        // Only needed by generateSilentAssembly's cue-plan manifest below
+        // (buildSceneVoiceTrack ignores it) — included here rather than a
+        // second scene include so both passes share one query shape.
+        character: { select: { name: true } },
+      },
+    },
+    // Same reasoning as dialogueLines.character above — only read by
+    // generateSilentAssembly, for the cue-planning prompt's per-scene roster.
+    characters: { select: { name: true } },
+    music: { where: { isSelected: true }, take: 1 },
+    sfx: { where: { isSelected: true }, take: 1 },
+  } satisfies Prisma.SceneInclude;
+}
 
-type AssemblyScene = Prisma.SceneGetPayload<{ include: typeof ASSEMBLY_SCENE_INCLUDE }>;
+type AssemblyScene = Prisma.SceneGetPayload<{ include: ReturnType<typeof assemblySceneInclude> }>;
 
 function extFromMime(mimeType: string | null): string {
   switch (mimeType) {
@@ -559,27 +574,125 @@ async function padVoiceToMatch(voicePath: string, workDir: string, index: number
   return outPath;
 }
 
+// Sound Engineer (AUDIO_MIXING_PLANNING) — an optional music fade at the
+// scene's own boundaries, from Scene.musicFadeInSeconds/musicFadeOutSeconds.
+// Both null/0 (the default, and every scene rendered before this existed)
+// returns an empty list, so the filter chain below is byte-for-byte the one
+// it always was. Each fade is clamped to the scene's own duration so a
+// nonsense value (an AI proposal, or a hand-typed one) can only ever produce
+// a fade covering the whole scene, never an `afade` starting before 0 or
+// after the stream ends — which ffmpeg would accept silently and render as
+// no fade at all, or as silence.
+function musicFadeFilters(duration: number, fadeIn: number | null, fadeOut: number | null): string[] {
+  const filters: string[] = [];
+  const inSeconds = fadeIn != null && fadeIn > 0 ? Math.min(fadeIn, duration) : 0;
+  const outSeconds = fadeOut != null && fadeOut > 0 ? Math.min(fadeOut, duration) : 0;
+  if (inSeconds > 0) {
+    filters.push(`afade=t=in:st=0:d=${inSeconds.toFixed(3)}`);
+  }
+  if (outSeconds > 0) {
+    filters.push(`afade=t=out:st=${Math.max(duration - outSeconds, 0).toFixed(3)}:d=${outSeconds.toFixed(3)}`);
+  }
+  return filters;
+}
+
 // Loops (music) or pads-with-silence (sfx) a single asset to exactly
 // `duration` seconds with `volume` applied, so it can be layered under the
 // scene's voice track. Looping suits a music bed shorter than the scene;
 // padding suits a one-shot sound effect — looping a sound effect would sound
 // like a glitch, not ambience.
+//
+// `fadeIn`/`fadeOut` are the Sound Engineer's optional music fades (see
+// musicFadeFilters above); sfx never passes them. They're appended AFTER
+// `apad` deliberately: a fade-out is positioned relative to the stream's
+// final length, which for the padded sfx case is the padded length, not the
+// source's own. For looped music `apad` isn't in the chain at all (an
+// infinitely looped stream is trimmed by `-t` instead), so ordering is moot
+// there.
 async function buildAmbienceLayer(
   asset: Asset,
   workDir: string,
   name: string,
   duration: number,
   volume: number,
-  loop: boolean
+  loop: boolean,
+  fadeIn: number | null = null,
+  fadeOut: number | null = null
 ): Promise<string> {
   const srcPath = await writeAssetToTemp(asset, workDir, `${name}-src`);
   const outPath = path.join(workDir, `${name}.wav`);
   const durationStr = duration.toFixed(3);
+  const filterChain = [`volume=${volume}`, ...(loop ? [] : ["apad"]), ...musicFadeFilters(duration, fadeIn, fadeOut)].join(",");
   await runFfmpeg([
     ...(loop ? ["-stream_loop", "-1"] : []),
     "-i", srcPath,
-    "-af", loop ? `volume=${volume}` : `volume=${volume},apad`,
+    "-af", filterChain,
     "-t", durationStr,
+    "-ar", String(AUDIO_RATE),
+    "-ac", "2",
+    outPath,
+  ]);
+  return outPath;
+}
+
+// Sound Engineer (AUDIO_MIXING_PLANNING) — ffmpeg's sidechaincompress, keyed
+// off the scene's voice track, so the music bed dips while someone is
+// speaking and recovers in the gaps rather than sitting at one permanently
+// low level for the whole scene (which is all Scene.musicVolume alone can do).
+//
+// Input order is load-bearing and easy to get backwards: sidechaincompress
+// takes the signal to be compressed FIRST and the signal that triggers the
+// compression SECOND, so [0:a] must be the music and [1:a] the voice.
+// Swapping them silently produces a valid render in which the *dialogue*
+// ducks under the music — exactly the problem this step exists to fix.
+//
+// Deliberately its own pass rather than folded into mixAudioLayers' amix
+// graph: this needs exactly two named, related streams, whereas
+// mixAudioLayers takes a variable-length list whose members come and go per
+// scene (no voice, no music, optional sfx, optional clip audio). Wiring a
+// two-input filter into that positional list would mean index bookkeeping
+// that breaks quietly the first time a layer is absent. The intermediate is
+// PCM wav, so the extra hop is lossless — and every scene that isn't ducking
+// skips this function entirely and reaches the untouched amix stage exactly
+// as before.
+//
+// Both inputs are already exactly `duration` seconds long by construction
+// (buildAmbienceLayer's `-t`, padVoiceToMatch's apad+`-t`); `-t` here is a
+// belt-and-braces guard so a framesync edge case can't hand back a layer of
+// a different length than the other layers amix is about to mix it with.
+// Tuned against measured output, not picked off a defaults list — an earlier
+// threshold of 0.1 measured as a 0.4 dB duck, i.e. nothing. sidechaincompress
+// compares the sidechain's RMS level against `threshold` in LINEAR amplitude,
+// and reduces the main input by (1 - 1/ratio) × (however many dB the sidechain
+// overshoots). Generated speech sits around -18 dBFS RMS (≈ 0.126 linear), so
+// a threshold anywhere near 0.1 leaves almost no overshoot to act on.
+//
+// 0.02 (≈ -34 dBFS) with ratio 3 measures ~12 dB of reduction under normal
+// speech, ~4 dB under an unusually quiet line and ~16 dB under a loud one —
+// a duck a listener reads as "the music got out of the way", not as the music
+// being muted and un-muted. A threshold this low is only safe because the
+// voice track is generated TTS concatenated with digital silence (see
+// buildSceneVoiceTrack/padVoiceToMatch): there's no room tone or breath in
+// the gaps to trigger it, which is what would otherwise make the bed pump.
+const DUCK_THRESHOLD = 0.02;
+const DUCK_RATIO = 3;
+const DUCK_ATTACK_MS = 20; // fast enough to catch a line's first syllable
+const DUCK_RELEASE_MS = 400; // slow enough not to pump between words
+async function duckMusicUnderVoice(
+  musicPath: string,
+  voicePath: string,
+  workDir: string,
+  name: string,
+  duration: number
+): Promise<string> {
+  const outPath = path.join(workDir, `${name}-ducked.wav`);
+  await runFfmpeg([
+    "-i", musicPath,
+    "-i", voicePath,
+    "-filter_complex",
+    `[0:a][1:a]sidechaincompress=threshold=${DUCK_THRESHOLD}:ratio=${DUCK_RATIO}:attack=${DUCK_ATTACK_MS}:release=${DUCK_RELEASE_MS}:makeup=1[ducked]`,
+    "-map", "[ducked]",
+    "-t", duration.toFixed(3),
     "-ar", String(AUDIO_RATE),
     "-ac", "2",
     outPath,
@@ -630,7 +743,28 @@ async function muxSceneSegment(visualPath: string, audioPath: string | null, wor
   return outPath;
 }
 
-async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: number, includeClipAudio: boolean): Promise<string> {
+interface SceneSegmentResult {
+  path: string;
+  // The segment's real rendered length — already computed here as
+  // `finalDuration`, returned so assembleVideo can record an accurate
+  // per-scene timeline on the final Asset's metadata (what the Sound
+  // Engineer pass later reads) without re-probing every segment.
+  durationSeconds: number;
+  // Which layers this scene's mix actually ended up containing, and the
+  // parameters it was rendered with. Also purely for that manifest: telling
+  // the Sound Engineer "this scene has music at 0.25 with no ducking" is the
+  // difference between it critiquing the mix and it guessing at one.
+  hasVoice: boolean;
+  hasMusic: boolean;
+  hasSfx: boolean;
+}
+
+async function buildSceneSegment(
+  scene: AssemblyScene,
+  workDir: string,
+  index: number,
+  includeClipAudio: boolean
+): Promise<SceneSegmentResult> {
   const voicePath = await buildSceneVoiceTrack(scene, workDir, index);
   const voiceDuration = voicePath ? await probeDuration(voicePath) : 0;
 
@@ -649,20 +783,53 @@ async function buildSceneSegment(scene: AssemblyScene, workDir: string, index: n
   const visualPath = await padVisualToMatch(rawVisualPath, workDir, index, finalDuration, visualDuration);
 
   const layers: string[] = [];
-  if (voicePath) layers.push(await padVoiceToMatch(voicePath, workDir, index, finalDuration));
+  // Kept as its own binding, not just pushed into `layers`: it's also the
+  // sidechain key for ducking below, and "the voice layer" has to stay
+  // identifiable once clip audio/music/sfx are in the same list. Clip audio
+  // deliberately does NOT count as voice here — it's the video model's own
+  // baked-in soundtrack, not narration/dialogue, so ducking music under it
+  // would be ducking under ambience.
+  const voiceLayerPath = voicePath ? await padVoiceToMatch(voicePath, workDir, index, finalDuration) : null;
+  if (voiceLayerPath) layers.push(voiceLayerPath);
   if (clipPath && includeClipAudio) {
     const clipAudioPath = await extractClipAudioLayer(clipPath, workDir, `scene${index}-clipaudio`, finalDuration);
     if (clipAudioPath) layers.push(clipAudioPath);
   }
   if (scene.music[0]) {
-    layers.push(await buildAmbienceLayer(scene.music[0], workDir, `scene${index}-music`, finalDuration, scene.musicVolume, true));
+    const musicLayer = await buildAmbienceLayer(
+      scene.music[0],
+      workDir,
+      `scene${index}-music`,
+      finalDuration,
+      scene.musicVolume,
+      true,
+      scene.musicFadeInSeconds,
+      scene.musicFadeOutSeconds
+    );
+    // Ducking needs something to duck under — a scene with music but no
+    // narration/dialogue keeps its flat level regardless of the flag, rather
+    // than being handed a silent sidechain (which sidechaincompress would
+    // read as "never over threshold" and pass through unchanged anyway, at
+    // the cost of a pointless ffmpeg pass).
+    layers.push(
+      scene.duckMusicUnderDialogue && voiceLayerPath
+        ? await duckMusicUnderVoice(musicLayer, voiceLayerPath, workDir, `scene${index}-music`, finalDuration)
+        : musicLayer
+    );
   }
   if (scene.sfx[0]) {
     layers.push(await buildAmbienceLayer(scene.sfx[0], workDir, `scene${index}-sfx`, finalDuration, scene.sfxVolume, false));
   }
 
   const audioPath = await mixAudioLayers(layers, workDir, index, finalDuration);
-  return muxSceneSegment(visualPath, audioPath, workDir, index, finalDuration);
+  const segmentPath = await muxSceneSegment(visualPath, audioPath, workDir, index, finalDuration);
+  return {
+    path: segmentPath,
+    durationSeconds: finalDuration,
+    hasVoice: voiceLayerPath != null,
+    hasMusic: scene.music.length > 0,
+    hasSfx: scene.sfx.length > 0,
+  };
 }
 
 async function concatSegments(segmentPaths: string[], workDir: string, outPath: string): Promise<void> {
@@ -682,15 +849,25 @@ async function concatSegments(segmentPaths: string[], workDir: string, outPath: 
 // keeps plain hard cuts so its per-scene manifest's startSeconds/
 // durationSeconds (assumed non-overlapping) stay exactly correct — crossfade
 // transitions are reserved for the real Final Assembly render alone.
-async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, outPath: string): Promise<void> {
+//
+// Returns each segment's actual start time in the finished render. Those are
+// NOT a running sum of the segment durations — every transition overlaps its
+// two neighbours, so each scene after the first starts `d` seconds earlier
+// than a naive sum would say, and the drift compounds across a long episode.
+// The numbers are already computed here (they're xfade's own `offset`), so
+// handing them back is exact by construction; recomputing them in
+// assembleVideo would mean duplicating the clamping rule below and silently
+// desyncing the Sound Engineer's per-scene timeline the day it changes.
+async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, outPath: string): Promise<number[]> {
   if (segmentPaths.length === 1) {
     await fs.copyFile(segmentPaths[0], outPath);
-    return;
+    return [0];
   }
 
   const durations = await Promise.all(segmentPaths.map((p) => probeDuration(p)));
 
   const filterParts: string[] = [];
+  const startSeconds: number[] = [0];
   let videoLabel = "0:v";
   let audioLabel = "0:a";
   let runningDuration = durations[0];
@@ -704,6 +881,7 @@ async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, 
       MIN_TRANSITION_SECONDS
     );
     const offset = Math.max(runningDuration - d, 0);
+    startSeconds.push(offset);
     const vOut = `v${i}`;
     const aOut = `a${i}`;
     filterParts.push(
@@ -735,17 +913,18 @@ async function crossfadeConcatSegments(segmentPaths: string[], workDir: string, 
     "-ar", String(AUDIO_RATE),
     outPath,
   ]);
+  return startSeconds;
 }
 
 // Shared by assembleVideo and generateSilentAssembly below — every scene
 // needs a selected visual (image per shot, or a clip) before either can
 // build anything; reports every unready scene at once rather than stopping
 // at the first.
-async function loadReadyScenes(parentType: ScenesParentType, parentId: string): Promise<AssemblyScene[]> {
+async function loadReadyScenes(parentType: ScenesParentType, parentId: string, language: string | null): Promise<AssemblyScene[]> {
   const scenes = await prisma.scene.findMany({
     where: parentWhere(parentType, parentId),
     orderBy: { order: "asc" },
-    include: ASSEMBLY_SCENE_INCLUDE,
+    include: assemblySceneInclude(language),
   });
 
   if (scenes.length === 0) {
@@ -784,6 +963,25 @@ export interface SceneManifestEntry {
   // continuity in the same environment/story-state Shot Planning resolved,
   // instead of inferring it fresh from the video alone.
   closingState: unknown;
+  // Sound Engineer (AUDIO_MIXING_PLANNING) — the mix this scene was actually
+  // rendered with, and which layers it actually contains. Only written by
+  // assembleVideo (the real, audio-mixed render); absent on a SILENT_VIDEO
+  // manifest, which by definition has no mix to describe. Optional rather
+  // than nullable so a manifest serialized before this existed still parses
+  // as a valid SceneManifestEntry when read back out of Asset.metadata —
+  // same defensive posture as closingState above.
+  mix?: SceneMixState;
+}
+
+export interface SceneMixState {
+  musicVolume: number;
+  sfxVolume: number;
+  duckMusicUnderDialogue: boolean;
+  musicFadeInSeconds: number | null;
+  musicFadeOutSeconds: number | null;
+  hasVoice: boolean;
+  hasMusic: boolean;
+  hasSfx: boolean;
 }
 
 export interface SerializedSilentVideo {
@@ -829,7 +1027,11 @@ export async function generateSilentAssembly({
 }: GenerateSilentAssemblyParams): Promise<SerializedSilentVideo> {
   const projectId = await resolveParentProjectId(parentType, parentId);
   const startedAt = Date.now();
-  const scenes = await loadReadyScenes(parentType, parentId);
+  // Picture-only — narrationAudio/dialogueLines[].audio aren't consumed
+  // below (only scene.narration's text is, for the cue-plan manifest), so
+  // which language's take gets queried is irrelevant. null keeps this one
+  // query shape shared with assembleVideo's default (primary-language) call.
+  const scenes = await loadReadyScenes(parentType, parentId, null);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-silent-"));
   try {
@@ -933,7 +1135,10 @@ export async function selectSilentVideo(
       where: { ...parentSilentVideoWhere(parentType, parentId), isSelected: true },
       data: { isSelected: false },
     });
-    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    const updated = await tx.asset.update({
+      where: { id: assetId },
+      data: { isSelected: true, reviewedAt: new Date() },
+    });
     return serializeSilentVideo(updated);
   });
 }
@@ -954,6 +1159,14 @@ export function mapSilentVideos<T extends { silentVideos: Asset[] }>(parent: T) 
 
 const CUE_PLAN_ATTACHMENT_WIDTH = 640;
 const CUE_PLAN_ATTACHMENT_FPS = 8;
+// Audio settings for the one attachment that keeps its soundtrack (the Sound
+// Engineer's final-mix review — see getSelectedFinalMix). Mono at a low
+// bitrate: the model is judging *level relationships* between voice, music
+// and sfx, which a downmix preserves exactly, not stereo imaging or fidelity.
+// Kept at the full sample rate anyway because the saving from halving it is
+// negligible next to the video track, and resampling artefacts are the last
+// thing a mix critique needs.
+const MIX_ATTACHMENT_AUDIO_BITRATE = "64k";
 
 // getSelectedSilentPicture used to base64 the selected take's raw bytes
 // as-is — a full FULL_RES (1920x1080/30fps) render of the whole story/
@@ -966,8 +1179,15 @@ const CUE_PLAN_ATTACHMENT_FPS = 8;
 // detail, so this transcodes a much smaller copy — same total duration (so
 // it still lines up with the manifest's per-scene timing), just far fewer
 // pixels and frames — and sends that instead of the original.
-async function shrinkForCuePlanAttachment(bytes: Buffer): Promise<Buffer> {
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-cueplan-shrink-"));
+//
+// `keepAudio` is the one axis the two callers differ on. The cue plan watches
+// a silent picture, so it drops audio outright (`-an`) — nothing to keep. The
+// Sound Engineer reviews the finished mix, where the soundtrack IS the
+// subject: stripping it would leave it critiquing levels it can't hear. The
+// video treatment is identical either way, since both passes only need to
+// recognize what's on screen per scene.
+async function shrinkForModelAttachment(bytes: Buffer, keepAudio: boolean): Promise<Buffer> {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-attachment-shrink-"));
   try {
     const inPath = path.join(workDir, "in.mp4");
     const outPath = path.join(workDir, "out.mp4");
@@ -978,7 +1198,7 @@ async function shrinkForCuePlanAttachment(bytes: Buffer): Promise<Buffer> {
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-crf", "30",
-      "-an",
+      ...(keepAudio ? ["-c:a", "aac", "-b:a", MIX_ATTACHMENT_AUDIO_BITRATE, "-ac", "1"] : ["-an"]),
       outPath,
     ]);
     return await fs.readFile(outPath);
@@ -1002,7 +1222,42 @@ export async function getSelectedSilentPicture(
   if (!asset) return null;
   const bytes = await storage.get(asset.storageKey);
   if (!bytes) return null;
-  const shrunk = await shrinkForCuePlanAttachment(bytes);
+  const shrunk = await shrinkForModelAttachment(bytes, false);
+  return {
+    base64: shrunk.toString("base64"),
+    mimeType: "video/mp4",
+    manifest: (asset.metadata as unknown as SceneManifestEntry[] | null) ?? [],
+  };
+}
+
+// The Sound Engineer's counterpart to getSelectedSilentPicture above, and
+// deliberately not the same thing: this reads the selected FINAL_VIDEO —
+// the render that already has narration, dialogue, music and sfx mixed into
+// it — with its audio track intact, because critiquing a mix requires
+// hearing it. See lib/audio-mixing-plan.ts.
+//
+// Scoped to `language: null` (the project's own primary-language render) to
+// match what VideoAssemblyPanel itself shows and manages. Dub renders share
+// this scene's music/sfx assets and mix fields verbatim (see
+// assemblySceneInclude), so a mix plan drafted against the primary render
+// applies to every dub too — drafting per-language would propose the same
+// numbers at N times the cost.
+//
+// null means nothing has been assembled/selected yet; an empty manifest
+// means the selected take predates assembleVideo recording one, which the
+// caller reports as "re-run Final Assembly" rather than guessing at a
+// timeline.
+export async function getSelectedFinalMix(
+  parentType: ScenesParentType,
+  parentId: string
+): Promise<{ base64: string; mimeType: string; manifest: SceneManifestEntry[] } | null> {
+  const asset = await prisma.asset.findFirst({
+    where: { ...parentVideoWhere(parentType, parentId), language: null, isSelected: true },
+  });
+  if (!asset) return null;
+  const bytes = await storage.get(asset.storageKey);
+  if (!bytes) return null;
+  const shrunk = await shrinkForModelAttachment(bytes, true);
   return {
     base64: shrunk.toString("base64"),
     mimeType: "video/mp4",
@@ -1018,6 +1273,15 @@ interface AssembleVideoParams {
   // a video clip's own audio track (e.g. Veo3 Lite's generated sound) in
   // favor of just narration/dialogue/music/sfx.
   includeClipAudio?: boolean;
+  // Dubbing — omitted/undefined renders the project's own primary language
+  // exactly as before. Set, re-runs this same pipeline pulling that dub
+  // language's selected narration/dialogue takes instead (via
+  // assemblySceneInclude) — visuals, music, and sfx are identical either
+  // way (see assemblySceneInclude's comment for why those aren't
+  // per-language), only the voice track and therefore each scene's
+  // ILLUSTRATION pacing (buildIllustrationSegment's scaleToSeconds) differ.
+  // See lib/localization.ts.
+  language?: string;
 }
 
 export async function assembleVideo({
@@ -1025,39 +1289,78 @@ export async function assembleVideo({
   parentId,
   modelId,
   includeClipAudio = false,
+  language,
 }: AssembleVideoParams): Promise<SerializedFinalVideo> {
   const projectId = await resolveParentProjectId(parentType, parentId);
   const startedAt = Date.now();
-  const scenes = await loadReadyScenes(parentType, parentId);
+  const scenes = await loadReadyScenes(parentType, parentId, language ?? null);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "narrata-assembly-"));
   try {
-    const segmentPaths: string[] = [];
+    const segments: SceneSegmentResult[] = [];
     for (const [index, scene] of scenes.entries()) {
-      segmentPaths.push(await buildSceneSegment(scene, workDir, index, includeClipAudio));
+      segments.push(await buildSceneSegment(scene, workDir, index, includeClipAudio));
     }
 
     const finalPath = path.join(workDir, "final.mp4");
-    await crossfadeConcatSegments(segmentPaths, workDir, finalPath);
+    const startSeconds = await crossfadeConcatSegments(
+      segments.map((s) => s.path),
+      workDir,
+      finalPath
+    );
+
+    // Same per-scene manifest generateSilentAssembly records on its own take,
+    // with this render's mix state added — see SceneManifestEntry. Stored on
+    // the Asset rather than recomputed later so the Sound Engineer pass
+    // (lib/audio-mixing-plan.ts) is grounded in the scene state that produced
+    // the exact render it's listening to, not in whatever the scenes have
+    // been edited into since. Start times come from the crossfade step's own
+    // offsets, so they account for transition overlap.
+    const manifest: SceneManifestEntry[] = scenes.map((scene, index) => ({
+      sceneId: scene.id,
+      order: scene.order,
+      title: scene.title,
+      startSeconds: startSeconds[index] ?? 0,
+      durationSeconds: segments[index].durationSeconds,
+      characterNames: scene.characters.map((c) => c.name),
+      narration: scene.narration,
+      dialogueLines: scene.dialogueLines.map((l) => ({ character: l.character.name, text: l.text })),
+      musicPrompt: scene.musicPrompt,
+      sfxPrompt: scene.sfxPrompt,
+      closingState: scene.closingState,
+      mix: {
+        musicVolume: scene.musicVolume,
+        sfxVolume: scene.sfxVolume,
+        duckMusicUnderDialogue: scene.duckMusicUnderDialogue,
+        musicFadeInSeconds: scene.musicFadeInSeconds,
+        musicFadeOutSeconds: scene.musicFadeOutSeconds,
+        hasVoice: segments[index].hasVoice,
+        hasMusic: segments[index].hasMusic,
+        hasSfx: segments[index].hasSfx,
+      },
+    }));
 
     const buffer = await fs.readFile(finalPath);
-    const key = buildStorageKey(parentType === "story" ? "stories" : "episodes", parentId, "final.mp4");
+    const fileName = language ? `final-${language}.mp4` : "final.mp4";
+    const key = buildStorageKey(parentType === "story" ? "stories" : "episodes", parentId, fileName);
     await storage.put(key, buffer);
 
     const parentField = parentType === "story" ? { storyVideoId: parentId } : { episodeVideoId: parentId };
     const asset = await prisma.$transaction(async (tx) => {
       await tx.asset.updateMany({
-        where: { ...parentVideoWhere(parentType, parentId), isSelected: true },
+        where: { ...parentVideoWhere(parentType, parentId), language: language ?? null, isSelected: true },
         data: { isSelected: false },
       });
       return tx.asset.create({
         data: {
           type: "FINAL_VIDEO",
           storageKey: key,
-          fileName: "final.mp4",
+          fileName,
           mimeType: "video/mp4",
           sizeBytes: buffer.byteLength,
+          metadata: manifest as unknown as Prisma.InputJsonValue,
           ...parentField,
+          language: language ?? null,
           isSelected: true,
           modelId,
           createdBy: "AI",
@@ -1108,11 +1411,17 @@ export async function selectFinalVideo(
     if (!belongsToParent(asset, parentType, parentId)) {
       throw new Error(`Final video does not belong to this ${parentType}.`);
     }
+    // Scoped to this asset's own language — a dub render's take history is
+    // independent of the primary language's, and of every other dub
+    // language's. See selectNarrationAudio's identical reasoning in voice.ts.
     await tx.asset.updateMany({
-      where: { ...parentVideoWhere(parentType, parentId), isSelected: true },
+      where: { ...parentVideoWhere(parentType, parentId), language: asset.language, isSelected: true },
       data: { isSelected: false },
     });
-    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    const updated = await tx.asset.update({
+      where: { id: assetId },
+      data: { isSelected: true, reviewedAt: new Date() },
+    });
     return serializeFinalVideo(updated);
   });
 }

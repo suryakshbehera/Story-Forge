@@ -96,8 +96,17 @@ export async function getSceneVoiceDurationSeconds(sceneId: string): Promise<num
   const scene = await prisma.scene.findUniqueOrThrow({
     where: { id: sceneId },
     include: {
-      narrationAudio: { where: { isSelected: true }, take: 1 },
-      dialogueLines: { include: { audio: { where: { isSelected: true }, take: 1 } } },
+      // Dubbing — `isSelected: true` is no longer unique per scene (each
+      // dub language gets its own independently-selected take, see
+      // lib/voice.ts's selectNarrationAudio), so `language: null` pins this
+      // to the primary language specifically. Every caller of this function
+      // (Music/SFX duration hints, IMAGE_TO_VIDEO clip duration matching,
+      // illustration timing warnings) is itself primary-language-only —
+      // music/sfx are never generated per-language, and dub video export
+      // reads its own language's takes directly via video-assembly.ts's
+      // assemblySceneInclude, not through this helper.
+      narrationAudio: { where: { isSelected: true, language: null }, take: 1 },
+      dialogueLines: { include: { audio: { where: { isSelected: true, language: null }, take: 1 } } },
     },
   });
 
@@ -231,7 +240,10 @@ export async function selectSceneMusic(sceneId: string, assetId: string): Promis
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: assetId } });
     if (asset.musicSceneId !== sceneId) throw new Error("Music take does not belong to this scene.");
     await tx.asset.updateMany({ where: { musicSceneId: sceneId, isSelected: true }, data: { isSelected: false } });
-    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    const updated = await tx.asset.update({
+      where: { id: assetId },
+      data: { isSelected: true, reviewedAt: new Date() },
+    });
     return serializeAudioAsset(updated);
   });
 }
@@ -349,7 +361,10 @@ export async function selectSceneSfx(sceneId: string, assetId: string): Promise<
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: assetId } });
     if (asset.sfxSceneId !== sceneId) throw new Error("SFX take does not belong to this scene.");
     await tx.asset.updateMany({ where: { sfxSceneId: sceneId, isSelected: true }, data: { isSelected: false } });
-    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    const updated = await tx.asset.update({
+      where: { id: assetId },
+      data: { isSelected: true, reviewedAt: new Date() },
+    });
     return serializeAudioAsset(updated);
   });
 }

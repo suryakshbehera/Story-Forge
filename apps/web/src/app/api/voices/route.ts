@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { listVoices, ElevenLabsError } from "@/lib/ai/elevenlabs";
 import { SARVAM_SPEAKERS } from "@/lib/ai/sarvam";
+import { sarvamLanguageCode } from "@/lib/languages";
 
 export interface VoiceCatalogEntry {
   provider: "elevenlabs" | "sarvam";
@@ -14,14 +15,29 @@ export interface VoiceCatalogEntry {
 // provider a project/character will end up using (voiceId is free text,
 // resolved against whichever provider is picked at generation time, per
 // lib/voice.ts), so it needs both lists to search/filter across.
-export async function GET() {
-  const sarvamVoices: VoiceCatalogEntry[] = SARVAM_SPEAKERS.map((s) => ({
-    provider: "sarvam",
-    voiceId: s.voiceId,
-    name: `${s.voiceId[0].toUpperCase()}${s.voiceId.slice(1)} (${s.gender})`,
-    description: null,
-    previewUrl: null,
-  }));
+//
+// Optional `?language=` narrows the Sarvam half: every Sarvam speaker works
+// across all its supported languages via the language_code param (not a
+// per-speaker trait, see ai/sarvam.ts), so a language Sarvam's fixed 11
+// doesn't cover means none of its speakers would actually work — hiding the
+// whole list rather than any specific voice. ElevenLabs voices aren't
+// filtered here: its language coverage is a per-*model* property (see
+// lib/languages.ts's elevenLabsLanguageSupported, enforced at generation
+// time in lib/voice.ts), not a per-voice one, so no voice in this list can
+// be ruled out just from the language alone.
+export async function GET(request: Request) {
+  const language = new URL(request.url).searchParams.get("language");
+  const sarvamUsable = !language || sarvamLanguageCode(language) !== null;
+
+  const sarvamVoices: VoiceCatalogEntry[] = !sarvamUsable
+    ? []
+    : SARVAM_SPEAKERS.map((s) => ({
+        provider: "sarvam",
+        voiceId: s.voiceId,
+        name: `${s.voiceId[0].toUpperCase()}${s.voiceId.slice(1)} (${s.gender})`,
+        description: null,
+        previewUrl: null,
+      }));
 
   try {
     const elevenLabsVoices: VoiceCatalogEntry[] = (await listVoices()).map((v) => ({

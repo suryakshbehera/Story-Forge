@@ -3,7 +3,8 @@ import { prisma, Prisma, type Asset } from "@/lib/db";
 import { callChatModel, generateSpeech as generateOpenRouterSpeech, OpenRouterError } from "@/lib/ai/openrouter";
 import { generateSpeechWithTimestamps as generateElevenLabsSpeech, ElevenLabsError, type WordTimestamp } from "@/lib/ai/elevenlabs";
 import { generateSpeech as generateSarvamSpeech, SarvamError } from "@/lib/ai/sarvam";
-import { sarvamLanguageCode } from "@/lib/languages";
+import { sarvamLanguageCode, elevenLabsLanguageSupported, resolveSceneLanguage } from "@/lib/languages";
+import { getSceneTranslation, getDialogueLineTranslation, resolveVoiceForLanguage } from "@/lib/localization";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { STALE_MS } from "@/lib/generation-claims";
 import { recordGenerationEvent, resolveSceneProjectId } from "@/lib/generation-events";
@@ -20,6 +21,10 @@ export interface SerializedAudioTake {
   // yet; exposed here so a future caption/per-shot-sync UI doesn't need a
   // schema or API change to reach it.
   wordTimestamps: WordTimestamp[] | null;
+  // Dubbing — null for the project's own primary-language takes, an
+  // INDIAN_LANGUAGES value for a dub take. See Asset.language in
+  // schema.prisma.
+  language: string | null;
 }
 
 // Audio takes are usually mp3 (ElevenLabs/Sarvam always, OpenRouter for most
@@ -39,24 +44,8 @@ export function serializeAudioTake(asset: Asset): SerializedAudioTake {
     isSelected: asset.isSelected,
     createdAt: asset.createdAt,
     wordTimestamps: (asset.wordTimestamps as WordTimestamp[] | null) ?? null,
+    language: asset.language,
   };
-}
-
-// Story.language / StoryBible.language — the same field STORY_WRITING/
-// SCENE_PLANNING/etc. already read via assembleContext() to decide what
-// language to actually write narration/dialogue text in (confirmed live
-// 2026-08-18: narration for an Odia-language project is genuine Odia
-// script). Reused here for the same project, not re-asked, so a Sarvam call
-// can't drift from the language its own text was written in.
-async function resolveSceneLanguage(sceneId: string): Promise<string | null> {
-  const scene = await prisma.scene.findUniqueOrThrow({
-    where: { id: sceneId },
-    include: {
-      story: true,
-      episode: { include: { season: { include: { project: { include: { storyBible: true } } } } } },
-    },
-  });
-  return scene.story?.language ?? scene.episode?.season.project.storyBible?.language ?? null;
 }
 
 // VOICE has three providers (see lib/ai/elevenlabs.ts, lib/ai/sarvam.ts,
@@ -80,6 +69,7 @@ async function generateSpeechForProvider({
   sceneId,
   instructions,
   speed,
+  language: dubLanguage,
 }: {
   provider: string;
   modelId: string;
@@ -88,9 +78,18 @@ async function generateSpeechForProvider({
   sceneId: string;
   instructions?: string;
   speed?: number;
+  // Dubbing — the dub's own target language, already known by the caller
+  // (generateNarrationAudio/generateDialogueAudio resolved it from the
+  // translation row, not from the Scene/Story). When set, this is used
+  // as-is instead of resolveSceneLanguage's Story/StoryBible lookup below —
+  // a dub call must validate against the language it's actually generating,
+  // never silently fall back to the project's own primary language.
+  language?: string;
 }): Promise<{ base64: string; mimeType: string; costUsd?: number; wordTimestamps?: WordTimestamp[] }> {
+  const resolveLanguage = () => (dubLanguage !== undefined ? Promise.resolve(dubLanguage) : resolveSceneLanguage(sceneId));
+
   if (provider === "sarvam") {
-    const language = await resolveSceneLanguage(sceneId);
+    const language = await resolveLanguage();
     const languageCode = sarvamLanguageCode(language);
     if (!languageCode) {
       throw new SarvamError(
@@ -102,6 +101,12 @@ async function generateSpeechForProvider({
     return generateSarvamSpeech({ modelId, text, voiceId, languageCode, speed });
   }
   if (provider === "elevenlabs") {
+    const language = await resolveLanguage();
+    if (!elevenLabsLanguageSupported(modelId, language)) {
+      throw new ElevenLabsError(
+        `ElevenLabs' ${modelId} model doesn't support "${language}" — set a different Voice model in Settings → AI Models (e.g. a Sarvam model, if this language is one of its 11), or pick a language ${modelId} does support.`
+      );
+    }
     return generateElevenLabsSpeech({ modelId, text, voiceId, instructions, speed });
   }
   if (provider === "openrouter") {
@@ -120,22 +125,50 @@ export async function generateNarrationAudio({
   sceneId,
   modelId,
   provider,
+  language,
 }: {
   sceneId: string;
   modelId: string;
   provider: string;
+  // Dubbing — omitted/undefined generates the project's own primary
+  // language exactly as before; set, generates that dub language instead,
+  // reading text/voice from the translation/voicesByLanguage side rather
+  // than Scene.narration/Project.narratorVoiceName. See lib/localization.ts.
+  language?: string;
 }): Promise<SerializedAudioTake> {
   const scene = await prisma.scene.findUniqueOrThrow({ where: { id: sceneId } });
-  if (!scene.narration?.trim()) {
-    throw new ElevenLabsError("Write a narration script for this scene before generating audio.");
-  }
-
   const projectId = await resolveSceneProjectId(sceneId);
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
-  if (!project.narratorVoiceName?.trim()) {
-    throw new ElevenLabsError(
-      "Set a Narrator Voice in the Voice Settings panel above before generating narration audio."
-    );
+
+  let text: string;
+  let instructions: string | undefined;
+  let speed: number | undefined;
+  let voiceId: string;
+  if (language) {
+    const translation = await getSceneTranslation(sceneId, language);
+    if (!translation?.narration?.trim()) {
+      throw new ElevenLabsError(`Translate this scene's narration into ${language} before generating audio.`);
+    }
+    voiceId = resolveVoiceForLanguage(project.narratorVoicesByLanguage, language) ?? "";
+    if (!voiceId) {
+      throw new ElevenLabsError(`Set a Narrator Voice for ${language} in the Translations panel before generating narration audio.`);
+    }
+    text = translation.narration;
+    instructions = translation.narrationDeliveryNotes ?? undefined;
+    speed = translation.narrationSpeed ?? undefined;
+  } else {
+    if (!scene.narration?.trim()) {
+      throw new ElevenLabsError("Write a narration script for this scene before generating audio.");
+    }
+    if (!project.narratorVoiceName?.trim()) {
+      throw new ElevenLabsError(
+        "Set a Narrator Voice in the Voice Settings panel above before generating narration audio."
+      );
+    }
+    text = scene.narration;
+    voiceId = project.narratorVoiceName;
+    instructions = scene.narrationDeliveryNotes ?? undefined;
+    speed = scene.narrationSpeed ?? undefined;
   }
 
   const startedAt = Date.now();
@@ -144,11 +177,12 @@ export async function generateNarrationAudio({
     generated = await generateSpeechForProvider({
       provider,
       modelId,
-      text: scene.narration,
-      voiceId: project.narratorVoiceName,
+      text,
+      voiceId,
       sceneId,
-      instructions: scene.narrationDeliveryNotes ?? undefined,
-      speed: scene.narrationSpeed ?? undefined,
+      instructions,
+      speed,
+      language,
     });
   } catch (error) {
     await recordGenerationEvent({
@@ -176,13 +210,13 @@ export async function generateNarrationAudio({
     success: true,
   });
   const buffer = Buffer.from(generated.base64, "base64");
-  const fileName = `narration.${audioExtension(generated.mimeType)}`;
+  const fileName = `narration${language ? `-${language}` : ""}.${audioExtension(generated.mimeType)}`;
   const key = buildStorageKey("scenes", sceneId, fileName);
   await storage.put(key, buffer);
 
   const asset = await prisma.$transaction(async (tx) => {
     await tx.asset.updateMany({
-      where: { narrationSceneId: sceneId, isSelected: true },
+      where: { narrationSceneId: sceneId, language: language ?? null, isSelected: true },
       data: { isSelected: false },
     });
     return tx.asset.create({
@@ -193,8 +227,9 @@ export async function generateNarrationAudio({
         mimeType: generated.mimeType,
         sizeBytes: buffer.byteLength,
         narrationSceneId: sceneId,
+        language: language ?? null,
         isSelected: true,
-        prompt: scene.narration,
+        prompt: text,
         modelId,
         createdBy: "AI",
         wordTimestamps: generated.wordTimestamps ? (generated.wordTimestamps as unknown as Prisma.InputJsonValue) : undefined,
@@ -219,11 +254,17 @@ export async function selectNarrationAudio(sceneId: string, assetId: string): Pr
     if (asset.narrationSceneId !== sceneId) {
       throw new Error("Audio take does not belong to this scene's narration.");
     }
+    // Scoped to this asset's own language (null = primary) — a dub take's
+    // take-history is independent of the primary language's, and of every
+    // other dub language's. See Asset.language in schema.prisma.
     await tx.asset.updateMany({
-      where: { narrationSceneId: sceneId, isSelected: true },
+      where: { narrationSceneId: sceneId, language: asset.language, isSelected: true },
       data: { isSelected: false },
     });
-    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    const updated = await tx.asset.update({
+      where: { id: assetId },
+      data: { isSelected: true, reviewedAt: new Date() },
+    });
     return serializeAudioTake(updated);
   });
 }
@@ -333,6 +374,7 @@ export async function generateNarrationDirection({
 const DIALOGUE_LINE_INCLUDE = {
   character: { select: { id: true, name: true, voiceName: true } },
   audio: { orderBy: { createdAt: "desc" as const } },
+  translations: true,
 };
 
 interface DialogueLineRow {
@@ -344,6 +386,7 @@ interface DialogueLineRow {
   speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: Asset[];
+  translations: { language: string; text: string; deliveryNotes: string | null; speed: number | null }[];
   audioGenerationStartedAt: Date | null;
 }
 
@@ -356,6 +399,7 @@ export interface SerializedDialogueLine {
   speed: number | null;
   character: { id: string; name: string; voiceName: string | null };
   audio: SerializedAudioTake[];
+  translations: { language: string; text: string; deliveryNotes: string | null; speed: number | null }[];
   audioGenerationStartedAt: string | null;
 }
 
@@ -369,6 +413,7 @@ export function serializeDialogueLine(line: DialogueLineRow): SerializedDialogue
     speed: line.speed,
     character: line.character,
     audio: line.audio.map(serializeAudioTake),
+    translations: line.translations,
     audioGenerationStartedAt: line.audioGenerationStartedAt?.toISOString() ?? null,
   };
 }
@@ -708,24 +753,51 @@ export async function generateDialogueAudio({
   dialogueLineId,
   modelId,
   provider,
+  language,
 }: {
   dialogueLineId: string;
   modelId: string;
   provider: string;
+  // Dubbing — see generateNarrationAudio's `language` for the contract.
+  language?: string;
 }): Promise<SerializedAudioTake> {
   const line = await prisma.dialogueLine.findUniqueOrThrow({
     where: { id: dialogueLineId },
     include: { character: true },
   });
 
-  // Always the character's assigned voice — never a per-call override — so
-  // one character sounds the same in every scene of a story. No fallback
-  // default: an unset voice blocks generation rather than silently reusing
-  // a generic voice that two different unassigned characters would share.
-  if (!line.character.voiceName?.trim()) {
-    throw new ElevenLabsError(
-      `Set a voice for ${line.character.name} in their Character profile before generating dialogue audio.`
-    );
+  let text: string;
+  let instructions: string | undefined;
+  let speed: number | undefined;
+  let voiceId: string;
+  if (language) {
+    const translation = await getDialogueLineTranslation(dialogueLineId, language);
+    if (!translation?.text?.trim()) {
+      throw new ElevenLabsError(`Translate this line into ${language} before generating audio.`);
+    }
+    voiceId = resolveVoiceForLanguage(line.character.voicesByLanguage, language) ?? "";
+    if (!voiceId) {
+      throw new ElevenLabsError(
+        `Set a voice for ${line.character.name} in ${language} in the Translations panel before generating dialogue audio.`
+      );
+    }
+    text = translation.text;
+    instructions = translation.deliveryNotes ?? undefined;
+    speed = translation.speed ?? undefined;
+  } else {
+    // Always the character's assigned voice — never a per-call override — so
+    // one character sounds the same in every scene of a story. No fallback
+    // default: an unset voice blocks generation rather than silently reusing
+    // a generic voice that two different unassigned characters would share.
+    if (!line.character.voiceName?.trim()) {
+      throw new ElevenLabsError(
+        `Set a voice for ${line.character.name} in their Character profile before generating dialogue audio.`
+      );
+    }
+    text = line.text;
+    voiceId = line.character.voiceName;
+    instructions = line.deliveryNotes ?? undefined;
+    speed = line.speed ?? undefined;
   }
 
   const projectId = await resolveSceneProjectId(line.sceneId);
@@ -735,11 +807,12 @@ export async function generateDialogueAudio({
     generated = await generateSpeechForProvider({
       provider,
       modelId,
-      text: line.text,
-      voiceId: line.character.voiceName,
+      text,
+      voiceId,
       sceneId: line.sceneId,
-      instructions: line.deliveryNotes ?? undefined,
-      speed: line.speed ?? undefined,
+      instructions,
+      speed,
+      language,
     });
   } catch (error) {
     await recordGenerationEvent({
@@ -767,13 +840,13 @@ export async function generateDialogueAudio({
     success: true,
   });
   const buffer = Buffer.from(generated.base64, "base64");
-  const fileName = `line.${audioExtension(generated.mimeType)}`;
+  const fileName = `line${language ? `-${language}` : ""}.${audioExtension(generated.mimeType)}`;
   const key = buildStorageKey("dialogue-lines", dialogueLineId, fileName);
   await storage.put(key, buffer);
 
   const asset = await prisma.$transaction(async (tx) => {
     await tx.asset.updateMany({
-      where: { dialogueLineId, isSelected: true },
+      where: { dialogueLineId, language: language ?? null, isSelected: true },
       data: { isSelected: false },
     });
     return tx.asset.create({
@@ -784,8 +857,9 @@ export async function generateDialogueAudio({
         mimeType: generated.mimeType,
         sizeBytes: buffer.byteLength,
         dialogueLineId,
+        language: language ?? null,
         isSelected: true,
-        prompt: line.text,
+        prompt: text,
         modelId,
         createdBy: "AI",
         wordTimestamps: generated.wordTimestamps ? (generated.wordTimestamps as unknown as Prisma.InputJsonValue) : undefined,
@@ -802,8 +876,16 @@ export async function selectDialogueAudio(dialogueLineId: string, assetId: strin
     if (asset.dialogueLineId !== dialogueLineId) {
       throw new Error("Audio take does not belong to this dialogue line.");
     }
-    await tx.asset.updateMany({ where: { dialogueLineId, isSelected: true }, data: { isSelected: false } });
-    const updated = await tx.asset.update({ where: { id: assetId }, data: { isSelected: true } });
+    // Scoped to this asset's own language — see selectNarrationAudio's
+    // identical comment.
+    await tx.asset.updateMany({
+      where: { dialogueLineId, language: asset.language, isSelected: true },
+      data: { isSelected: false },
+    });
+    const updated = await tx.asset.update({
+      where: { id: assetId },
+      data: { isSelected: true, reviewedAt: new Date() },
+    });
     return serializeAudioTake(updated);
   });
 }

@@ -17,9 +17,9 @@ enum ProjectType {
 }
 
 model Project {
-  id        String      @id @default(cuid())
-  name      String
-  type      ProjectType
+  id   String      @id @default(cuid())
+  name String
+  type ProjectType
 
   // Phase 4 — the one narrator voice for this whole project, same reasoning
   // as Character.voiceName (free text, provider-specific catalog). Kept at
@@ -29,8 +29,12 @@ model Project {
   // story, not vary per scene.
   narratorVoiceName String?
 
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  // Dubbing — same shape/reasoning as Character.voicesByLanguage above, for
+  // the one project-wide narrator voice instead of a per-character one.
+  narratorVoicesByLanguage Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   story      Story?
   storyBible StoryBible?
@@ -46,6 +50,10 @@ model Project {
   // separate select step). Project-level rather than Story/StoryBible-level
   // since style should hold across Single Video and Series alike.
   styleReferences Asset[] @relation("ProjectStyleReference")
+
+  // Mobile app — captures pre-filed as "started from inside this project"
+  // (see CaptureItem). Optional: a capture can arrive with no project hint.
+  captureItems CaptureItem[]
 
   // Phase 9 — format shape (act structure, typical scene/shot count,
   // runtime, tone) defined once per series so a new episode drafts against
@@ -97,19 +105,19 @@ model Project {
 // ─────────────────────────────────────────────────────────────────────────
 
 model Story {
-  id        String   @id @default(cuid())
-  projectId String   @unique
-  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  id        String  @id @default(cuid())
+  projectId String  @unique
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  topic           String?
-  premise         String?  @db.Text
-  genre           String?
-  tone            String?
-  language        String?
-  duration        String?
-  narrationStyle  String?
-  openingStyle    String?
-  closingStyle    String?
+  topic          String?
+  premise        String? @db.Text
+  genre          String?
+  tone           String?
+  language       String?
+  duration       String?
+  narrationStyle String?
+  openingStyle   String?
+  closingStyle   String?
 
   // Currently-selected content — denormalized copy of the selected Version's payload.
   content String? @db.Text
@@ -199,14 +207,14 @@ model SeriesBlueprint {
 // ─────────────────────────────────────────────────────────────────────────
 
 model Season {
-  id        String   @id @default(cuid())
+  id        String  @id @default(cuid())
   projectId String
-  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  number    Int
-  title     String?
+  number Int
+  title  String?
 
-  episodes  Episode[]
+  episodes Episode[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -268,7 +276,7 @@ model Scene {
 
   order       Int
   title       String?
-  description String @db.Text
+  description String  @db.Text
 
   // Temporal memory (scene-to-scene) — the world's state as SHOT_PLANNING
   // resolved it at the end of this scene, for whatever categories don't
@@ -302,7 +310,7 @@ model Scene {
   // Phase 5 — user-written camera/motion direction for IMAGE_TO_VIDEO scenes,
   // same manual-only pattern as narration (no AI-drafting step). Falls back
   // to `description` at generation time when unset.
-  motionPrompt String? @db.Text
+  motionPrompt         String? @db.Text
   // Desired clip length in seconds, user-set. Provider-specific bounds are
   // enforced at generation time, not in the schema. When unset, generation
   // falls back to the scene's actual narration+dialogue audio length (see
@@ -310,12 +318,12 @@ model Scene {
   videoDurationSeconds Int?
   // Resolution override (e.g. "720p"); falls back to the chosen model's
   // default resolution (AiModelOption.config.resolutions[0]) when unset.
-  videoResolution String?
+  videoResolution      String?
   // Whether to request the model's own native audio track alongside the
   // video (OpenRouter's generate_audio param). Off by default: narration,
   // music, and sfx are always generated separately and layered in at
   // assembly time (see video-assembly.ts), so native audio is opt-in extra.
-  videoGenerateAudio Boolean @default(false)
+  videoGenerateAudio   Boolean @default(false)
 
   // Phase 5 — user-written prompt for TEXT_TO_VIDEO scenes, generated with no
   // source image at all. Kept separate from motionPrompt (which describes
@@ -336,12 +344,37 @@ model Scene {
   sfxPrompt   String? @db.Text
   // Mix levels applied at Phase 6 assembly time (0-1, relative to the voice
   // track which always plays at full volume). Defaults keep music
-  // unobtrusive under dialogue/narration and sfx clearly audible.
-  musicVolume Float @default(0.25)
-  sfxVolume   Float @default(0.8)
+  // unobtrusive under dialogue/narration and sfx clearly audible. Hand-edited
+  // in scene-audio-panel.tsx, and AI-refined by AUDIO_MIXING_PLANNING (the
+  // Sound Engineer step) alongside the three fields below.
+  musicVolume Float   @default(0.25)
+  sfxVolume   Float   @default(0.8)
 
-  characters    Character[]
-  locations     Location[]
+  // Sound Engineer (AUDIO_MIXING_PLANNING) — per-scene mix behaviour applied
+  // at final-assembly time (buildAmbienceLayer/duckMusicUnderVoice in
+  // lib/video-assembly.ts). Same "AI proposes into editable fields, user
+  // reviews and applies" idiom as musicPrompt/sfxPrompt above; these are the
+  // *how it's mixed* half, where musicVolume/sfxVolume are the *how loud*
+  // half.
+  //
+  // duckMusicUnderDialogue: when true AND the scene actually has a voice
+  // track (narration and/or dialogue), the music bed is sidechain-compressed
+  // against that voice track (ffmpeg's sidechaincompress) so it dips while
+  // someone is speaking and recovers in the gaps, instead of relying purely
+  // on a permanently-low musicVolume for the whole scene. Defaults to false,
+  // which reproduces the pre-existing flat `volume=X` behaviour exactly.
+  duckMusicUnderDialogue Boolean @default(false)
+  // Music fade at this scene's own boundaries, in seconds. null (or 0) means
+  // no fade — the pre-existing hard in/out. Deliberately scene-local and
+  // music-only: the final render already crossfades whole adjacent scene
+  // segments (crossfadeConcatSegments), so this is about the score itself
+  // entering/leaving — letting a cue bloom in over an establishing beat, or
+  // fall away before a hard cut — not about the picture transition.
+  musicFadeInSeconds  Float?
+  musicFadeOutSeconds Float?
+
+  characters Character[]
+  locations  Location[]
 
   // Phase 8 — the scene's ordered shots, each carrying its own images (and,
   // for ILLUSTRATION scenes, its own camera movement). Scene stopped being
@@ -353,6 +386,10 @@ model Scene {
   narrationAudio Asset[] @relation("SceneNarrationAudio")
 
   dialogueLines DialogueLine[]
+
+  // Dubbing — translated narration text for languages other than this
+  // scene's own. See SceneTranslation above.
+  translations SceneTranslation[]
 
   // Phase 5 — generated video clips (IMAGE_TO_VIDEO scenes only), same
   // separate-relation reasoning as narrationAudio: mixing clips into `images`
@@ -665,25 +702,25 @@ model Shot {
   // 180-degree axis — both are enforced by instruction in the per-scene
   // planning prompt, not by a constraint here, since a deliberate lighting
   // change mid-scene (a door opens, a lamp dies) is legitimate.
-  shotSize     ShotSize?
+  shotSize        ShotSize?
   // Focal length in mm, clamped 8-300 on ingest. Free int rather than an
   // enum: lens choice is genuinely continuous, and a model that says "85"
   // shouldn't be forced into a nearest-bucket lie.
-  lensMm       Int?
-  cameraAngle  CameraAngle?
-  framing      ShotFraming?
-  depthOfField DepthOfField?
+  lensMm          Int?
+  cameraAngle     CameraAngle?
+  framing         ShotFraming?
+  depthOfField    DepthOfField?
   // What the eye should land on ("Arjun's hands on the hilt") — prose, since
   // no useful closed vocabulary exists for this.
-  focusPoint   String?      @db.Text
-  lightingStyle LightingStyle?
-  composition   ShotComposition?
+  focusPoint      String?          @db.Text
+  lightingStyle   LightingStyle?
+  composition     ShotComposition?
   // Subject motion *within* the frame, including screen direction ("Arjun
   // strides in from frame-left") — distinct from cameraMovement, which is
   // what the camera does. Prose for the same reason as focusPoint; screen
   // direction in particular has no closed set once more than one subject
   // moves.
-  subjectMovement String? @db.Text
+  subjectMovement String?          @db.Text
 
   // ── Director AI emotion (same rules as cinematography above: nullable, no
   // defaults, null means silent not bland). Drafted by SHOT_PLANNING in the
@@ -727,18 +764,18 @@ model Character {
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  name           String
-  identity       String? @db.Text
+  name         String
+  identity     String? @db.Text
   // Free-text like the other bible fields ("17", "mid-30s", "looks older
   // than her 20 years") — an int couldn't capture age-presentation, which is
   // what actually drifts shot-to-shot without a reference image to pin it.
-  age            String? @db.Text
-  appearance     String? @db.Text
-  personality    String? @db.Text
-  clothing       String? @db.Text
-  background     String? @db.Text
-  characterArc   String? @db.Text
-  isLocked       Boolean @default(false)
+  age          String? @db.Text
+  appearance   String? @db.Text
+  personality  String? @db.Text
+  clothing     String? @db.Text
+  background   String? @db.Text
+  characterArc String? @db.Text
+  isLocked     Boolean @default(false)
 
   // Phase 4 — free-text TTS voice name/id (e.g. "alloy"), not a fixed enum:
   // the set of valid voices is provider/model-specific and changes over
@@ -746,6 +783,17 @@ model Character {
   // AiModelOption not hardcoding model ids. Null falls back to whatever
   // voice the user picks at generation time.
   voiceName String?
+
+  // Dubbing — voiceId per dub language, e.g. {"Hindi": "shubh", "Tamil":
+  // "21m00Tcm4TlvDq8ikWAM"} (provider is picked at generation time same as
+  // voiceName always has been, so it isn't stored here). Json?, not a
+  // relation table: this is a small keyed lookup, not something ever
+  // filtered/joined on in SQL, same "free text, changes over time" reasoning
+  // voiceName itself already has. Absent/unset language falls back to no
+  // voice (blocks dub audio generation with the same clear error voiceName
+  // unset gives today) — never silently reuses voiceName, since the primary
+  // provider's voice usually can't speak the dub language at all.
+  voicesByLanguage Json?
 
   referenceImages Asset[]
   scenes          Scene[]
@@ -766,12 +814,12 @@ model Location {
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  name        String
-  description String? @db.Text
+  name         String
+  description  String? @db.Text
   architecture String? @db.Text
-  environment String? @db.Text
-  timeWeather String?
-  visualStyle String? @db.Text
+  environment  String? @db.Text
+  timeWeather  String?
+  visualStyle  String? @db.Text
 
   referenceImages Asset[]
   scenes          Scene[]
@@ -813,6 +861,10 @@ model DialogueLine {
 
   audio Asset[]
 
+  // Dubbing — translated text for languages other than this line's own.
+  // See DialogueLineTranslation above.
+  translations DialogueLineTranslation[]
+
   // Phase 12 — same in-flight generation lock contract as
   // Scene.narrationGenerationStartedAt above, for this line's own voice call.
   audioGenerationStartedAt DateTime?
@@ -822,6 +874,56 @@ model DialogueLine {
 
   @@unique([sceneId, order])
   @@map("dialogue_lines")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Dubbing — translated text for a scene's narration/dialogue into a
+// language other than the Story/StoryBible's own. Deliberately NOT how the
+// project's own (primary) language is stored — Scene.narration/
+// DialogueLine.text already hold that, unchanged, so a project with no dubs
+// at all has zero new rows here. Only ever the *other* languages a user
+// explicitly adds via the Translations panel. See lib/localization.ts.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SceneTranslation {
+  id       String @id @default(cuid())
+  sceneId  String
+  scene    Scene  @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  // One of lib/languages.ts's INDIAN_LANGUAGES, always different from this
+  // scene's own Story/StoryBible.language (enforced in lib/localization.ts,
+  // not the schema — same "free text, not enum" reasoning as Story.language
+  // itself).
+  language String
+
+  // Mirrors Scene.narration/narrationDeliveryNotes/narrationSpeed exactly,
+  // one level over — same fields, translated text instead of original.
+  narration              String? @db.Text
+  narrationDeliveryNotes String? @db.Text
+  narrationSpeed         Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sceneId, language])
+  @@map("scene_translations")
+}
+
+model DialogueLineTranslation {
+  id             String       @id @default(cuid())
+  dialogueLineId String
+  dialogueLine   DialogueLine @relation(fields: [dialogueLineId], references: [id], onDelete: Cascade)
+  language       String
+
+  // Mirrors DialogueLine.text/deliveryNotes/speed exactly.
+  text          String  @db.Text
+  deliveryNotes String? @db.Text
+  speed         Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dialogueLineId, language])
+  @@map("dialogue_line_translations")
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -854,6 +956,11 @@ enum AssetType {
   // Phase 9 — an uploaded PDF/DOCX parsed into StoryBible + Characters +
   // Locations + SeriesBlueprint. Kept after parsing for traceability/re-runs.
   SOURCE_DOCUMENT
+  // Mobile app — bytes captured on a phone (camera/share-sheet/mic) that
+  // haven't been filed into a slot yet. See CaptureItem. Becomes
+  // REFERENCE_IMAGE (or another concrete type) at filing time, when the
+  // Asset's FK is re-pointed at its real parent.
+  CAPTURE
 }
 
 model Asset {
@@ -865,6 +972,15 @@ model Asset {
   mimeType   String?
   sizeBytes  Int?
   metadata   Json?
+
+  // Dubbing — null for every take generated so far (the project's own
+  // primary language; no backfill needed, that's exactly what "unset" means
+  // here) or an INDIAN_LANGUAGES value for a dub take. Only meaningful on
+  // AUDIO_NARRATION/AUDIO_DIALOGUE/FINAL_VIDEO — every isSelected "unselect
+  // the previous take" toggle on those three types scopes by (parent,
+  // language) together, not parent alone, so a dub's take history is
+  // entirely independent of the primary language's. See lib/localization.ts.
+  language String?
 
   characterId String?
   character   Character? @relation(fields: [characterId], references: [id], onDelete: Cascade)
@@ -878,7 +994,7 @@ model Asset {
   shot   Shot?   @relation("ShotImages", fields: [shotId], references: [id], onDelete: Cascade)
 
   narrationSceneId String?
-  narrationScene   Scene? @relation("SceneNarrationAudio", fields: [narrationSceneId], references: [id], onDelete: Cascade)
+  narrationScene   Scene?  @relation("SceneNarrationAudio", fields: [narrationSceneId], references: [id], onDelete: Cascade)
 
   dialogueLineId String?
   dialogueLine   DialogueLine? @relation(fields: [dialogueLineId], references: [id], onDelete: Cascade)
@@ -886,22 +1002,22 @@ model Asset {
   // Phase 5 — generated video clips, kept on their own FK/relation for the
   // same reason narrationAudio is (see Scene.videoClips comment).
   videoSceneId String?
-  videoScene   Scene? @relation("SceneVideoClips", fields: [videoSceneId], references: [id], onDelete: Cascade)
+  videoScene   Scene?  @relation("SceneVideoClips", fields: [videoSceneId], references: [id], onDelete: Cascade)
 
   // Phase 7 — background music / sfx takes, own FK/relation pair each, same
   // reasoning as videoSceneId above.
   musicSceneId String?
-  musicScene   Scene? @relation("SceneMusic", fields: [musicSceneId], references: [id], onDelete: Cascade)
+  musicScene   Scene?  @relation("SceneMusic", fields: [musicSceneId], references: [id], onDelete: Cascade)
 
   sfxSceneId String?
-  sfxScene   Scene? @relation("SceneSfx", fields: [sfxSceneId], references: [id], onDelete: Cascade)
+  sfxScene   Scene?  @relation("SceneSfx", fields: [sfxSceneId], references: [id], onDelete: Cascade)
 
   // Phase 5 — which selected GENERATED_IMAGE this clip was generated from,
   // for traceability when a scene's image is later regenerated/reselected.
   // Self-relation, so it needs its own name and no onDelete cascade action
   // conflict with the other Asset relations above.
-  sourceImageId String?
-  sourceImage   Asset?  @relation("VideoSourceImage", fields: [sourceImageId], references: [id], onDelete: SetNull)
+  sourceImageId      String?
+  sourceImage        Asset?  @relation("VideoSourceImage", fields: [sourceImageId], references: [id], onDelete: SetNull)
   clipsFromThisImage Asset[] @relation("VideoSourceImage")
 
   // Multi-segment video generation — one "Generate Video" call can produce
@@ -929,7 +1045,7 @@ model Asset {
   // asset belongs to exactly one of Story or Episode, enforced at the API
   // layer, not the DB.
   storyVideoId String?
-  storyVideo   Story? @relation("StoryFinalVideo", fields: [storyVideoId], references: [id], onDelete: Cascade)
+  storyVideo   Story?  @relation("StoryFinalVideo", fields: [storyVideoId], references: [id], onDelete: Cascade)
 
   episodeVideoId String?
   episodeVideo   Episode? @relation("EpisodeFinalVideo", fields: [episodeVideoId], references: [id], onDelete: Cascade)
@@ -937,7 +1053,7 @@ model Asset {
   // Assemble-without-Audio attempts — same dual-optional pattern as
   // storyVideoId/episodeVideoId above, for SILENT_VIDEO assets.
   storySilentVideoId String?
-  storySilentVideo   Story? @relation("StorySilentVideo", fields: [storySilentVideoId], references: [id], onDelete: Cascade)
+  storySilentVideo   Story?  @relation("StorySilentVideo", fields: [storySilentVideoId], references: [id], onDelete: Cascade)
 
   episodeSilentVideoId String?
   episodeSilentVideo   Episode? @relation("EpisodeSilentVideo", fields: [episodeSilentVideoId], references: [id], onDelete: Cascade)
@@ -954,6 +1070,13 @@ model Asset {
   projectCoverId String?
   projectCover   Project? @relation("ProjectCoverImage", fields: [projectCoverId], references: [id], onDelete: Cascade)
 
+  // Mobile app — set when this Asset originated as a CaptureItem (camera/
+  // share-sheet/mic on a phone) and hasn't been filed into its real parent
+  // slot yet. Re-pointed to null and the FK above matching its real slot is
+  // set at filing time — see CaptureItem.
+  captureItemId String?
+  captureItem   CaptureItem? @relation("CaptureItemMedia", fields: [captureItemId], references: [id], onDelete: Cascade)
+
   // Generation metadata — meaningful for AI-produced assets (GENERATED_IMAGE,
   // AUDIO_NARRATION, AUDIO_DIALOGUE). isSelected mirrors Version.isSelected:
   // newest generation always becomes selected, older attempts stay browsable,
@@ -965,6 +1088,25 @@ model Asset {
   prompt     String?   @db.Text
   modelId    String?
   createdBy  CreatedBy @default(USER)
+
+  // Mobile app — a take a human wants to hold onto regardless of which one
+  // is currently selected (the "Keep" action). Nullable timestamp rather
+  // than a boolean, matching validationPassed's reasoning: "recently kept"
+  // is orderable and "never kept" is distinguishable from "un-kept". Purely
+  // a user annotation — nothing in generation, assembly or selection reads
+  // it. See docs/product/mobile-app-ux-plan-2026-09.md §4.2 region D.
+  keptAt DateTime?
+
+  // Mobile app — a human has explicitly affirmed this take for its slot,
+  // stamped by the select*() helpers in lib/ (the funnel every "Use this
+  // take" path already goes through, on both web and mobile). Distinct from
+  // isSelected: every generator sets isSelected: true on the newest take
+  // automatically, so isSelected alone can't tell "the machine picked this
+  // and nobody has looked" from "the human chose this". That distinction is
+  // the entire mobile Review queue — see
+  // docs/product/mobile-technical-plan-2026-09.md §5.2. Null on a newly
+  // generated take, which is exactly what puts its slot in the queue.
+  reviewedAt DateTime?
 
   // Word-level speech timing for AUDIO_NARRATION/AUDIO_DIALOGUE assets —
   // JSON array of { word, startSeconds, endSeconds }, aggregated from
@@ -1009,6 +1151,24 @@ model Asset {
 
   createdAt DateTime @default(now())
 
+  // Prisma doesn't create FK indexes on PostgreSQL, and this table had none
+  // at all until now despite carrying 15 nullable FKs that every screen
+  // filters on. The six take "slots" the mobile review queue and every take
+  // panel query, composited with isSelected because "the selected take for
+  // this slot" is the overwhelmingly common query. Reference images
+  // (characterId/locationId) are re-read on every image/video generation
+  // call (lib/shot-images.ts), making them the hottest unindexed columns in
+  // the schema before this. The render/silent-video FKs are deliberately
+  // NOT indexed here — those tables are small and rarely queried; add them
+  // when a slow query says so. See docs/product/mobile-technical-plan-2026-09.md §5.5.
+  @@index([shotId, isSelected])
+  @@index([narrationSceneId, isSelected])
+  @@index([dialogueLineId, isSelected])
+  @@index([videoSceneId, isSelected])
+  @@index([musicSceneId, isSelected])
+  @@index([sfxSceneId, isSelected])
+  @@index([characterId])
+  @@index([locationId])
   @@map("assets")
 }
 
@@ -1038,7 +1198,7 @@ model Version {
   payload       Json
   isSelected    Boolean @default(false)
 
-  prompt             String?  @db.Text
+  prompt             String?   @db.Text
   modelId            String?
   generationSettings Json?
   createdBy          CreatedBy
@@ -1139,6 +1299,21 @@ enum AiJobType {
   // riskier create-new-type/swap/drop-old-type migration) but nothing calls
   // it anymore.
   AUDIO_CUE_PLANNING
+  // The "Sound Engineer" step — one whole-story/episode pass that watches the
+  // currently selected FINAL (already audio-mixed) render, not the silent
+  // picture AUDIO_CUE_PLANNING watches. That difference is the whole point:
+  // this step critiques a mix it can actually hear (dialogue buried under
+  // music, a score that slams in at a cut, jarring level jumps between
+  // scenes), the same way a real sound engineer reviews a rough mix, which
+  // is impossible from a silent picture. Proposes per scene: musicVolume/
+  // sfxVolume (refining the existing fields), duckMusicUnderDialogue, and
+  // musicFadeInSeconds/musicFadeOutSeconds — all of which the final ffmpeg
+  // render already knows how to apply, so applying a plan changes the next
+  // render with no regeneration of any audio asset. Needs a video-input-
+  // capable model, same requirement as AUDIO_CUE_PLANNING/VIDEO_VALIDATION/
+  // MOTION_PROMPT_DRAFTING. See draftAudioMixingPlan in
+  // lib/audio-mixing-plan.ts.
+  AUDIO_MIXING_PLANNING
   // Drafts Scene.videoDurationSeconds: a text-only reasoning call over the
   // scene's description/motion prompt/narration (plus the existing
   // voice-audio-length hint from getSceneVoiceDurationSeconds, when there's
@@ -1147,6 +1322,13 @@ enum AiJobType {
   // reviews and saves" shape as MOTION_PROMPT_DRAFTING one field over — see
   // recommendVideoDuration in lib/scene-video.ts.
   DURATION_RECOMMENDATION
+  // Dubbing — translates a scene's narration + dialogue lines into a target
+  // language the project wasn't originally written in, one call per scene
+  // (same "whole scene at once, not line by line" reasoning as
+  // DIALOGUE_DIRECTION), writing into SceneTranslation/DialogueLineTranslation
+  // rather than overwriting Scene.narration/DialogueLine.text — the original
+  // language stays exactly as written. See lib/localization.ts.
+  TRANSLATION
 }
 
 model AiModelOption {
@@ -1216,9 +1398,9 @@ model GenerationEvent {
 // the global default instead of erroring or silently deleting the project's
 // preference row.
 model ProjectModelDefault {
-  id        String  @id @default(cuid())
+  id        String    @id @default(cuid())
   projectId String
-  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   jobType   AiJobType
 
   aiModelOptionId String?
@@ -1247,10 +1429,10 @@ enum Role {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
+  id           String @id @default(cuid())
+  email        String @unique
   passwordHash String
-  role         Role     @default(USER)
+  role         Role   @default(USER)
 
   ownedProjects Project[]
   sessions      Session[]
@@ -1259,6 +1441,10 @@ model User {
   // them, hence the separate named relation from Invite.usedBy below.
   invitesCreated  Invite[] @relation("InviteCreatedBy")
   invitesRedeemed Invite[] @relation("InviteUsedBy")
+
+  // Mobile app.
+  captureItems CaptureItem[]
+  pushDevices  PushDevice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1302,4 +1488,97 @@ model Invite {
   createdAt DateTime @default(now())
 
   @@map("invites")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Mobile app — capture inbox and push devices.
+// See docs/product/mobile-app-ux-plan-2026-09.md and
+// docs/product/mobile-technical-plan-2026-09.md §5.3-5.4.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum CaptureKind {
+  IMAGE
+  AUDIO_NOTE
+  LINK
+  TEXT
+}
+
+// Captured-but-unfiled material from mobile: a photo, a 2am voice memo, a
+// shared link, a pasted paragraph — arriving before the human has decided
+// which character/location/scene it belongs to. Owned by User, not Project,
+// because "which project" is exactly the question that has not been
+// answered yet; projectId is an optional pre-filing hint when the capture
+// started from inside a project screen.
+//
+// Manual-first is preserved literally: a CaptureItem is never auto-applied
+// to anything. Filing is a human action, and it re-points the media Asset's
+// FK (captureItemId → characterId/locationId/projectStyleId/...) rather than
+// copying bytes, so a filed capture becomes an ordinary reference image with
+// no duplicate storage and no second lineage concept.
+model CaptureItem {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  kind CaptureKind
+
+  // LINK: the URL. TEXT: the shared text. IMAGE/AUDIO_NOTE: an optional caption.
+  text String? @db.Text
+  // AUDIO_NOTE only, if/when speech-to-text is run over it. Never blocks
+  // filing — a voice memo is useful to its author untranscribed.
+  transcript String? @db.Text
+  // Which app the share sheet says it came from, when it says. Diagnostic only.
+  sourceApp String?
+
+  // Set when the human files it. The row is KEPT, not deleted, so "where did
+  // this reference image come from" stays answerable — same reasoning as
+  // Project.sourceDocuments being kept after ingestion.
+  filedAt       DateTime?
+  filedIntoType String? // "character" | "location" | "projectStyle" | "scene"
+  filedIntoId   String?
+
+  media Asset[] @relation("CaptureItemMedia")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, filedAt])
+  @@map("capture_items")
+}
+
+// One row per app install, not per session — a push token outlives a
+// session and must survive token refresh/rotation. Deregistered on
+// DeviceNotRegistered from Expo's push receipts, and on explicit logout.
+model PushDevice {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  expoPushToken String @unique
+  platform      String // "ios" | "android"
+  installId     String // stable per install, generated client-side, kept in SecureStore
+  name          String?
+
+  // Per-project mute. A scalar array rather than a join table: it's read as
+  // a whole on every send, never filtered or joined on in SQL, and is
+  // bounded by how many projects one person owns — same reasoning as
+  // Character.voicesByLanguage being Json.
+  mutedProjectIds String[] @default([])
+
+  // Quiet hours in the device's own local clock; the offset is stored so the
+  // server can resolve "is it 2am for this user" without a timezone database.
+  quietHoursStart       Int? // 0-23
+  quietHoursEnd         Int? // 0-23
+  timezoneOffsetMinutes Int?
+
+  // Backs the <=3/hour notification floor. Stamped on every successful send.
+  lastNotifiedAt DateTime?
+  lastSeenAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@unique([userId, installId])
+  @@map("push_devices")
 }

@@ -23,7 +23,9 @@ const JOB_TYPES = [
   "MUSIC_GENERATION",
   "SFX_GENERATION",
   "AUDIO_CUE_PLANNING",
+  "AUDIO_MIXING_PLANNING",
   "VIDEO",
+  "TRANSLATION",
 ] as const satisfies readonly AiJobType[];
 
 export { JOB_TYPES };

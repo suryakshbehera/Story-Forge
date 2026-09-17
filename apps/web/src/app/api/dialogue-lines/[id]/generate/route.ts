@@ -7,6 +7,8 @@ import { generateDialogueAudio, claimDialogueAudioGeneration, releaseDialogueAud
 
 const bodySchema = z.object({
   modelId: z.string().optional(),
+  // Dubbing — see scenes/[id]/narration/generate's identical field.
+  language: z.string().optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -27,7 +29,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   try {
-    const audio = await generateDialogueAudio({ dialogueLineId, modelId: model.modelId, provider: model.provider });
+    const audio = await generateDialogueAudio({ dialogueLineId, modelId: model.modelId, provider: model.provider, language: body.language });
     return NextResponse.json(audio, { status: 201 });
   } catch (error) {
     if (error instanceof ElevenLabsError || error instanceof SarvamError) {

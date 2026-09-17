@@ -7,6 +7,10 @@ import { FfmpegError } from "@/lib/ffmpeg";
 const bodySchema = z.object({
   modelId: z.string().optional(),
   includeClipAudio: z.boolean().optional(),
+  // Dubbing — omitted renders the project's own primary language exactly as
+  // before; set, renders that dub language instead. See
+  // lib/video-assembly.ts's assembleVideo.
+  language: z.string().optional(),
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -32,6 +36,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       parentId: storyId,
       modelId: model.modelId,
       includeClipAudio: body.includeClipAudio,
+      language: body.language,
     });
     return NextResponse.json(video, { status: 201 });
   } catch (error) {

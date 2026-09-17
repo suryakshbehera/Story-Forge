@@ -7,12 +7,15 @@ import { mapSceneVoiceData } from "@/lib/voice";
 import { mapSceneVideoData } from "@/lib/scene-video";
 import { mapSceneAudioData } from "@/lib/scene-audio";
 import { mapFinalVideos, mapSilentVideos } from "@/lib/video-assembly";
+import { resolveProjectLanguage } from "@/lib/languages";
 import { getActiveFailures, failuresByEntity, sceneVideoFailure, assemblyFailure, toErrorInfo } from "@/lib/generation-events";
 import { EpisodeEditor } from "@/components/episode-editor";
 import { SceneManager } from "@/components/scene-manager";
 import { SilentAssemblyPanel } from "@/components/silent-assembly-panel";
 import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
+import { AudioMixingPlanPanel } from "@/components/audio-mixing-plan-panel";
+import { TranslationsPanel } from "@/components/translations-panel";
 import { StoryChatPanel } from "@/components/story-chat-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TermHint } from "@/components/term-hint";
@@ -20,11 +23,16 @@ import { ArrowLeft } from "lucide-react";
 
 const VOICE_INCLUDE = {
   narrationAudio: { orderBy: { createdAt: "desc" as const } },
+  // Dubbing — every dub language's SceneTranslation/DialogueLineTranslation
+  // row for this scene, so TranslationsPanel can filter client-side rather
+  // than fetching per language. See lib/localization.ts.
+  translations: true,
   dialogueLines: {
     orderBy: { order: "asc" as const },
     include: {
       character: { select: { id: true, name: true, voiceName: true } },
       audio: { orderBy: { createdAt: "desc" as const } },
+      translations: true,
     },
   },
 };
@@ -48,7 +56,10 @@ export default async function EpisodePage({
   if (!episode || episode.seasonId !== seasonId) notFound();
 
   const [project, context, scenes, characters, locations, episodeVideo, failures] = await Promise.all([
-    prisma.project.findUniqueOrThrow({ where: { id: projectId } }),
+    prisma.project.findUniqueOrThrow({
+      where: { id: projectId },
+      include: { story: { select: { language: true } }, storyBible: { select: { language: true } } },
+    }),
     assembleContext({ projectId, episodeId }),
     prisma.scene.findMany({
       where: { episodeId },
@@ -67,8 +78,13 @@ export default async function EpisodePage({
     getActiveFailures(projectId),
   ]);
 
+  const language = resolveProjectLanguage(project);
   const { silentVideos } = mapSilentVideos(episodeVideo);
   const hasSelectedSilentVideo = silentVideos.some((v) => v.isSelected);
+  const { finalVideos } = mapFinalVideos(episodeVideo);
+  // Primary-language renders only — see story/scenes/page.tsx's identical
+  // note and getSelectedFinalMix in lib/video-assembly.ts.
+  const hasSelectedFinalVideo = finalVideos.some((v) => v.isSelected && !v.language);
 
   // Merge durable failure state onto the initial scene tree — see
   // story/scenes/page.tsx's identical block and generation-events.ts's
@@ -89,6 +105,13 @@ export default async function EpisodePage({
       lastSfxError: toErrorInfo(sfxFailures.get(scene.id)),
     };
   }
+  // Depends on withFailures above — must stay below its declaration (a
+  // const's temporal dead zone applies even though withFailures itself, a
+  // function declaration, is hoisted; calling it early threw
+  // "Cannot access 'shotFailures' before initialization" at runtime, caught
+  // by a live smoke test since tsc has no cross-statement ordering check
+  // for this).
+  const initialScenes = mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData).map(withFailures);
 
   return (
     <div className="flex flex-col gap-4">
@@ -155,10 +178,11 @@ export default async function EpisodePage({
             parentType="episode"
             parentId={episode.id}
             projectId={projectId}
-            initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData).map(withFailures)}
+            initialScenes={initialScenes}
             characters={characters}
             locations={locations}
             initialNarratorVoiceName={project.narratorVoiceName}
+            language={language}
           />
         </CardContent>
       </Card>
@@ -198,10 +222,33 @@ export default async function EpisodePage({
         parentType="episode"
         parentId={episodeId}
         projectId={projectId}
-        initialFinalVideos={mapFinalVideos(episodeVideo).finalVideos}
+        initialFinalVideos={finalVideos}
         initialFinalVideoGenerationStartedAt={episodeVideo.finalVideoGenerationStartedAt?.toISOString() ?? null}
         hasSelectedSilentVideo={hasSelectedSilentVideo}
         initialError={toErrorInfo(assemblyFailure(failures, "ffmpeg-final-assembly", episodeId))}
+      />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-1.5 text-base">
+            Sound Engineer — Mix Review
+            <TermHint text="Listens to the assembled final video (the real mix, not the silent picture) and proposes per-scene music/sfx levels, ducking music under dialogue, and music fades at scene boundaries. Apply, then re-run Final Assembly to hear it — no audio is regenerated." />
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <AudioMixingPlanPanel parentType="episode" parentId={episodeId} hasSelectedFinalVideo={hasSelectedFinalVideo} />
+        </CardContent>
+      </Card>
+
+      <TranslationsPanel
+        parentType="episode"
+        parentId={episodeId}
+        projectId={projectId}
+        primaryLanguage={language}
+        initialScenes={initialScenes}
+        initialCharacters={characters}
+        initialNarratorVoicesByLanguage={project.narratorVoicesByLanguage}
+        initialFinalVideos={finalVideos}
       />
     </div>
   );

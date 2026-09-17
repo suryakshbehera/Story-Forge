@@ -52,6 +52,30 @@ export interface AudioTake {
   id: string;
   url: string;
   isSelected: boolean;
+  // Dubbing — null for the project's own primary-language takes (every take
+  // generated before this field existed), an INDIAN_LANGUAGES value for a
+  // dub take. This panel only ever renders primary-language takes (callers
+  // don't filter narrationAudio/audio by it); TranslationsPanel filters the
+  // same underlying arrays by language instead of fetching a separate list.
+  // See lib/languages.ts/lib/localization.ts.
+  language?: string | null;
+}
+
+// Dubbing — one language's translated narration/dialogue, alongside the
+// scene/line's own (untranslated) fields. See SceneTranslation/
+// DialogueLineTranslation in schema.prisma.
+export interface DialogueLineTranslationItem {
+  language: string;
+  text: string;
+  deliveryNotes: string | null;
+  speed: number | null;
+}
+
+export interface SceneTranslationItem {
+  language: string;
+  narration: string | null;
+  narrationDeliveryNotes: string | null;
+  narrationSpeed: number | null;
 }
 
 export interface DialogueLineItem {
@@ -65,6 +89,9 @@ export interface DialogueLineItem {
   character: { id: string; name: string; voiceName: string | null };
   audio: AudioTake[];
   audioGenerationStartedAt: string | null;
+  // Dubbing — this line's translation into every dub language that's been
+  // translated so far (empty until a Translations panel run adds one).
+  translations: DialogueLineTranslationItem[];
   // Durable failure from GenerationEvent (getActiveFailures), seeding the
   // row's own lastError below — see ShotItem's lastImageError for the idea.
   lastAudioError?: GenerationErrorInfo | null;

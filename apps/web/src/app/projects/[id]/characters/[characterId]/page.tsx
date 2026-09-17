@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/db";
+import { resolveProjectLanguage } from "@/lib/languages";
 import { CharacterDetailForm } from "@/components/character-detail-form";
 import { ReferenceImageGallery } from "@/components/reference-image-gallery";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,11 +13,18 @@ export default async function CharacterDetailPage({
   params: Promise<{ id: string; characterId: string }>;
 }) {
   const { id: projectId, characterId } = await params;
-  const character = await prisma.character.findUnique({
-    where: { id: characterId },
-    include: { referenceImages: true },
-  });
+  const [character, project] = await Promise.all([
+    prisma.character.findUnique({
+      where: { id: characterId },
+      include: { referenceImages: true },
+    }),
+    prisma.project.findUnique({
+      where: { id: projectId },
+      include: { story: { select: { language: true } }, storyBible: { select: { language: true } } },
+    }),
+  ]);
   if (!character || character.projectId !== projectId) notFound();
+  const language = project ? resolveProjectLanguage(project) : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -36,6 +44,7 @@ export default async function CharacterDetailPage({
           <CardContent>
             <CharacterDetailForm
               characterId={character.id}
+              language={language}
               initialFields={{
                 name: character.name,
                 identity: character.identity ?? "",

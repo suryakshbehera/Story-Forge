@@ -30,9 +30,14 @@ interface CharacterFields {
 export function CharacterDetailForm({
   characterId,
   initialFields,
+  language,
 }: {
   characterId: string;
   initialFields: CharacterFields;
+  // The project's Story/StoryBible.language — narrows the voice picker to
+  // providers/voices that can actually speak it. See lib/languages.ts's
+  // resolveProjectLanguage.
+  language?: string | null;
 }) {
   const router = useRouter();
   const [fields, setFields] = useState(initialFields);
@@ -141,7 +146,7 @@ export function CharacterDetailForm({
         />
       </Field>
       <Field label="Voice — must match whichever provider you pick when generating">
-        <VoicePicker value={fields.voiceName} onChange={(v) => update("voiceName", v)} />
+        <VoicePicker value={fields.voiceName} onChange={(v) => update("voiceName", v)} language={language} />
       </Field>
       <p className="-mt-2 text-xs text-muted-foreground">
         Used for every dialogue line this character speaks, in every scene — set it once here so the

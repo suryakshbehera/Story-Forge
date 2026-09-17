@@ -8,7 +8,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const episode = await prisma.episode.findUnique({
     where: { id },
     include: {
-      finalVideos: { orderBy: { createdAt: "desc" } },
+      // Dubbing — see stories/[id]/status's identical comment.
+      finalVideos: { where: { language: null }, orderBy: { createdAt: "desc" } },
       silentVideos: { orderBy: { createdAt: "desc" } },
     },
   });

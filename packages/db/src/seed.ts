@@ -83,7 +83,12 @@ const defaultModels: Array<{
   // see the AiJobType.VIDEO_VALIDATION schema comment.
   { jobType: "VIDEO_VALIDATION", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
   { jobType: "AUDIO_CUE_PLANNING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
+  // The Sound Engineer step. Same video-input requirement as AUDIO_CUE_PLANNING
+  // above, and a harder one: it has to hear the render's existing mix, not
+  // just see the picture — see the AiJobType.AUDIO_MIXING_PLANNING comment.
+  { jobType: "AUDIO_MIXING_PLANNING", provider: "openrouter", modelId: "google/gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
   { jobType: "DURATION_RECOMMENDATION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { jobType: "TRANSLATION", provider: "openrouter", modelId: "openai/gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
 ];
 
 // Phase 10 — these three job types moved fully off OpenRouter onto

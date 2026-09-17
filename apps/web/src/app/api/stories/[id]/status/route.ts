@@ -10,7 +10,11 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const story = await prisma.story.findUnique({
     where: { id },
     include: {
-      finalVideos: { orderBy: { createdAt: "desc" } },
+      // Dubbing — this feeds the primary-language VideoAssemblyPanel's poll
+      // loop only (TranslationsPanel never polls this route), so
+      // language: null keeps a dub render from reappearing in that panel
+      // once the poll response replaces its state wholesale.
+      finalVideos: { where: { language: null }, orderBy: { createdAt: "desc" } },
       silentVideos: { orderBy: { createdAt: "desc" } },
     },
   });

@@ -10,16 +10,23 @@ import { SceneManager } from "@/components/scene-manager";
 import { SilentAssemblyPanel } from "@/components/silent-assembly-panel";
 import { AudioCuePlanPanel } from "@/components/audio-cue-plan-panel";
 import { VideoAssemblyPanel } from "@/components/video-assembly-panel";
+import { AudioMixingPlanPanel } from "@/components/audio-mixing-plan-panel";
+import { TranslationsPanel } from "@/components/translations-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TermHint } from "@/components/term-hint";
 
 const VOICE_INCLUDE = {
   narrationAudio: { orderBy: { createdAt: "desc" as const } },
+  // Dubbing — every dub language's SceneTranslation/DialogueLineTranslation
+  // row for this scene, so TranslationsPanel can filter client-side rather
+  // than fetching per language. See lib/localization.ts.
+  translations: true,
   dialogueLines: {
     orderBy: { order: "asc" as const },
     include: {
       character: { select: { id: true, name: true, voiceName: true } },
       audio: { orderBy: { createdAt: "desc" as const } },
+      translations: true,
     },
   },
 };
@@ -59,6 +66,11 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
 
   const { silentVideos } = mapSilentVideos(story);
   const hasSelectedSilentVideo = silentVideos.some((v) => v.isSelected);
+  const { finalVideos } = mapFinalVideos(story);
+  // Primary-language renders only, matching what VideoAssemblyPanel itself
+  // shows and what the Sound Engineer pass reads (see getSelectedFinalMix) —
+  // a selected dub render isn't something it can draft against.
+  const hasSelectedFinalVideo = finalVideos.some((v) => v.isSelected && !v.language);
 
   // Merge durable failure state (audit 2.2's gap) onto the initial scene
   // tree — see generation-events.ts's getActiveFailures for what "active"
@@ -81,16 +93,19 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
     };
   }
 
+  const initialScenes = mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData).map(withFailures);
+
   return (
     <div className="flex flex-col gap-4">
       <SceneManager
         parentType="story"
         parentId={project.story.id}
         projectId={id}
-        initialScenes={mapScenesShots(scenes).map(mapSceneVoiceData).map(mapSceneVideoData).map(mapSceneAudioData).map(withFailures)}
+        initialScenes={initialScenes}
         characters={characters}
         locations={locations}
         initialNarratorVoiceName={project.narratorVoiceName}
+        language={story.language}
       />
 
       <Card>
@@ -128,10 +143,33 @@ export default async function StoryScenesPage({ params }: { params: Promise<{ id
         parentType="story"
         parentId={project.story.id}
         projectId={id}
-        initialFinalVideos={mapFinalVideos(story).finalVideos}
+        initialFinalVideos={finalVideos}
         initialFinalVideoGenerationStartedAt={story.finalVideoGenerationStartedAt?.toISOString() ?? null}
         hasSelectedSilentVideo={hasSelectedSilentVideo}
         initialError={toErrorInfo(assemblyFailure(failures, "ffmpeg-final-assembly", project.story.id))}
+      />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-1.5 text-base">
+            Sound Engineer — Mix Review
+            <TermHint text="Listens to the assembled final video (the real mix, not the silent picture) and proposes per-scene music/sfx levels, ducking music under dialogue, and music fades at scene boundaries. Apply, then re-run Final Assembly to hear it — no audio is regenerated." />
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <AudioMixingPlanPanel parentType="story" parentId={project.story.id} hasSelectedFinalVideo={hasSelectedFinalVideo} />
+        </CardContent>
+      </Card>
+
+      <TranslationsPanel
+        parentType="story"
+        parentId={project.story.id}
+        projectId={id}
+        primaryLanguage={story.language}
+        initialScenes={initialScenes}
+        initialCharacters={characters}
+        initialNarratorVoicesByLanguage={project.narratorVoicesByLanguage}
+        initialFinalVideos={finalVideos}
       />
     </div>
   );

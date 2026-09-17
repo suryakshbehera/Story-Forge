@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "pnpm --filter web dev",
+    "dev:mobile": "pnpm --filter mobile start",
     "build": "pnpm --filter web build",
     "db:migrate": "pnpm --filter db exec prisma migrate dev",
     "db:generate": "pnpm --filter db exec prisma generate",

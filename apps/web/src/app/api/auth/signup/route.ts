@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { hashPassword, createSession, setSessionCookie } from "@/lib/auth";
+import { checkAuthRateLimit } from "@/lib/rate-limit";
 
 const signupSchema = z.object({
   email: z.string().email(),
@@ -17,6 +18,10 @@ const signupSchema = z.object({
 export async function POST(req: NextRequest) {
   const body = signupSchema.parse(await req.json());
   const email = body.email.toLowerCase();
+
+  if (!checkAuthRateLimit(req, email)) {
+    return NextResponse.json({ error: "Too many attempts" }, { status: 429 });
+  }
 
   if (await prisma.user.findUnique({ where: { email } })) {
     return NextResponse.json({ error: "An account with that email already exists." }, { status: 400 });
@@ -42,7 +47,7 @@ export async function POST(req: NextRequest) {
       return tx.user.create({ data: { email, passwordHash, role: "USER" } });
     });
 
-    const token = await createSession(user.id);
+    const { token } = await createSession(user.id);
     await setSessionCookie(token);
     return NextResponse.json({ ok: true });
   } catch (error) {

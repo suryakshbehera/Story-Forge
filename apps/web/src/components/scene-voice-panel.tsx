@@ -193,6 +193,54 @@ export function SceneVoicePanel({
   const [scriptModelId, setScriptModelId] = useState("");
   const [drafting, setDrafting] = useState(false);
 
+  // 2D mouth flap ("Talking Frames") — see lib/mouth-flap.ts. ILLUSTRATION only.
+  const [mouthStatus, setMouthStatus] = useState<{
+    eligible: boolean;
+    reason: string | null;
+    talkingShots: number;
+    ready: number;
+    renderBlockedReason: string | null;
+  } | null>(null);
+  const [mouthModelId, setMouthModelId] = useState("");
+  const [generatingMouthFrames, setGeneratingMouthFrames] = useState(false);
+
+  useEffect(() => {
+    if (sceneVisualMode !== "ILLUSTRATION") return;
+    let cancelled = false;
+    fetch(`/api/scenes/${sceneId}/mouth-frames`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((status) => {
+        if (!cancelled && status) setMouthStatus(status);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [sceneId, sceneVisualMode, dialogueLines.length]);
+
+  async function generateMouthFrames(force = false) {
+    setGeneratingMouthFrames(true);
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/mouth-frames/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageModelId: mouthModelId || undefined, force }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "Talking frame generation failed.");
+      setMouthStatus(data.status);
+      if (data.failed?.length > 0) {
+        toast.warning(`${data.generated} made, ${data.failed.length} failed — run it again to retry the rest.`);
+      } else {
+        toast.success(`Talking frames ready (${data.generated} new, ${data.skipped} already had one).`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Talking frame generation failed.");
+    } finally {
+      setGeneratingMouthFrames(false);
+    }
+  }
+
   async function saveNarration({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
     setSavingNarration(true);
     try {
@@ -539,6 +587,41 @@ export function SceneVoicePanel({
           </div>
         )}
       </div>
+
+      {sceneVisualMode === "ILLUSTRATION" && mouthStatus && (
+        <div className="flex flex-wrap items-end gap-2 rounded-md border border-dashed p-3">
+          <div className="min-w-[12rem] flex-1">
+            <Label className="text-xs text-muted-foreground">
+              Talking Frames — makes an open-mouth copy of each speaking shot&apos;s image so the character&apos;s mouth
+              moves with the voice in the final render
+            </Label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {mouthStatus.eligible
+                ? `${mouthStatus.ready} of ${mouthStatus.talkingShots} speaking shots ready.`
+                : mouthStatus.reason}
+            </p>
+            {mouthStatus.renderBlockedReason && (
+              <p className="mt-1 text-xs text-amber-600">
+                Won&apos;t animate in the render yet — {mouthStatus.renderBlockedReason}
+              </p>
+            )}
+          </div>
+          {mouthStatus.eligible && (
+            <>
+              <ModelSelect jobType="IMAGE_GENERATION" value={mouthModelId} onChange={setMouthModelId} />
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={generatingMouthFrames || mouthStatus.talkingShots === 0}
+                onClick={() => generateMouthFrames(false)}
+              >
+                <Wand2 className="size-3.5" />
+                {generatingMouthFrames ? "Generating…" : "Generate Talking Frames"}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

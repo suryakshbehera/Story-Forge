@@ -16,13 +16,23 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus } from "lucide-react";
+import { Plus, Receipt } from "lucide-react";
+
+interface EpisodeRender {
+  id: string;
+  url: string;
+  language: string | null;
+  fileName: string | null;
+}
 
 interface Episode {
   id: string;
   number: number;
   title: string | null;
   summary: string | null;
+  // The selected render per language (primary first) — see the query in
+  // seasons/page.tsx for why only selected takes are loaded here.
+  finalVideos: EpisodeRender[];
 }
 
 interface Season {
@@ -30,6 +40,34 @@ interface Season {
   number: number;
   title: string | null;
   episodes: Episode[];
+}
+
+// Per-episode rollup from /api/projects/[id]/spend — see that route for how
+// an event is walked back to its episode, and why `uncostedCalls` matters.
+interface EpisodeSpend {
+  episodeId: string;
+  usd: number;
+  calls: number;
+  uncostedCalls: number;
+  failedCalls: number;
+}
+
+// Sub-cent totals are real but round to $0.00, which reads as "this was
+// free" — show them as a floor instead.
+function formatUsd(usd: number): string {
+  if (usd <= 0) return "$0.00";
+  return usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
+}
+
+function spendTitle(rows: EpisodeSpend[]): string {
+  const calls = rows.reduce((a, r) => a + r.calls, 0);
+  const uncosted = rows.reduce((a, r) => a + r.uncostedCalls, 0);
+  const failed = rows.reduce((a, r) => a + r.failedCalls, 0);
+  return [
+    `${calls} generation call${calls === 1 ? "" : "s"}`,
+    `${uncosted} reported no price`,
+    `${failed} failed`,
+  ].join(" · ");
 }
 
 export function SeasonsManager({
@@ -40,6 +78,36 @@ export function SeasonsManager({
   initialSeasons: Season[];
 }) {
   const [seasons, setSeasons] = useState(initialSeasons);
+  // Spend is off by default and fetched on first reveal — it's an aggregate
+  // over every generation event for the project, not something this page
+  // should pay for on every load just to keep it hidden behind a toggle.
+  const [showSpend, setShowSpend] = useState(false);
+  const [spend, setSpend] = useState<Record<string, EpisodeSpend> | null>(null);
+  const [loadingSpend, setLoadingSpend] = useState(false);
+
+  async function toggleSpend() {
+    if (showSpend) {
+      setShowSpend(false);
+      return;
+    }
+    setShowSpend(true);
+    if (spend) return;
+    setLoadingSpend(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/spend`);
+      if (!res.ok) throw new Error();
+      const data: { episodes: EpisodeSpend[] } = await res.json();
+      setSpend(Object.fromEntries(data.episodes.map((e) => [e.episodeId, e])));
+    } catch {
+      toast.error("Couldn't load spend.");
+      setShowSpend(false);
+    } finally {
+      setLoadingSpend(false);
+    }
+  }
+
+  const spendFor = (episodeId: string): EpisodeSpend =>
+    spend?.[episodeId] ?? { episodeId, usd: 0, calls: 0, uncostedCalls: 0, failedCalls: 0 };
 
   async function addSeason(number: number, title: string) {
     const res = await fetch(`/api/projects/${projectId}/seasons`, {
@@ -70,7 +138,9 @@ export function SeasonsManager({
     setSeasons((prev) =>
       prev.map((s) =>
         s.id === seasonId
-          ? { ...s, episodes: [...s.episodes, episode].sort((a, b) => a.number - b.number) }
+          // finalVideos: the POST response is the bare Episode row, with no
+          // renders relation — a brand-new episode has none anyway.
+          ? { ...s, episodes: [...s.episodes, { ...episode, finalVideos: [] }].sort((a, b) => a.number - b.number) }
           : s
       )
     );
@@ -80,9 +150,20 @@ export function SeasonsManager({
   return (
     <div className="flex flex-col gap-4">
       {seasons.length > 0 && (
-        <div className="flex justify-end">
+        <div className="flex items-center justify-end gap-2">
+          <Button size="sm" variant="ghost" onClick={toggleSpend} disabled={loadingSpend}>
+            <Receipt className="size-4" />
+            {loadingSpend ? "Loading…" : showSpend ? "Hide spend" : "Show spend"}
+          </Button>
           <AddSeasonDialog nextNumber={seasons.length + 1} onAdd={addSeason} />
         </div>
+      )}
+
+      {showSpend && spend && (
+        <p className="text-right text-xs text-muted-foreground">
+          Recorded API cost only. Voice, music and sound-effect providers don&apos;t report a price, and local
+          renders are free — so real spend is higher than shown. Hover a figure for the call breakdown.
+        </p>
       )}
 
       {seasons.length === 0 ? (
@@ -96,9 +177,19 @@ export function SeasonsManager({
         seasons.map((season) => (
           <Card key={season.id}>
             <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle className="text-base">
-                Season {season.number}
-                {season.title ? ` — ${season.title}` : ""}
+              <CardTitle className="flex items-center gap-2 text-base">
+                <span>
+                  Season {season.number}
+                  {season.title ? ` — ${season.title}` : ""}
+                </span>
+                {showSpend && spend && (
+                  <span
+                    className="rounded-full border px-2 py-0.5 text-xs font-normal text-muted-foreground"
+                    title={spendTitle(season.episodes.map((ep) => spendFor(ep.id)))}
+                  >
+                    {formatUsd(season.episodes.reduce((sum, ep) => sum + spendFor(ep.id).usd, 0))} this season
+                  </span>
+                )}
               </CardTitle>
               {season.episodes.length > 0 && (
                 <AddEpisodeDialog
@@ -121,19 +212,43 @@ export function SeasonsManager({
               ) : (
                 <div className="flex flex-col divide-y">
                   {season.episodes.map((ep) => (
-                    <Link
-                      key={ep.id}
-                      href={`/projects/${projectId}/seasons/${season.id}/episodes/${ep.id}`}
-                      className="flex items-center justify-between py-2 text-sm hover:text-foreground"
-                    >
-                      <span>
-                        <span className="font-medium">E{ep.number}</span>
-                        {ep.title ? ` — ${ep.title}` : ""}
-                      </span>
-                      {ep.summary && (
-                        <span className="ml-4 truncate text-xs text-muted-foreground">{ep.summary}</span>
+                    <div key={ep.id} className="flex flex-col gap-2 py-2">
+                      {/* The players below sit outside this Link on purpose — a
+                          <video> inside it would navigate away on every click
+                          of play/scrub instead of playing. */}
+                      <Link
+                        href={`/projects/${projectId}/seasons/${season.id}/episodes/${ep.id}`}
+                        className="flex items-center justify-between text-sm hover:text-foreground"
+                      >
+                        <span className="shrink-0">
+                          <span className="font-medium">E{ep.number}</span>
+                          {ep.title ? ` — ${ep.title}` : ""}
+                        </span>
+                        {ep.summary && (
+                          <span className="ml-4 min-w-0 truncate text-xs text-muted-foreground">{ep.summary}</span>
+                        )}
+                        {showSpend && spend && (
+                          <span
+                            className="ml-3 shrink-0 rounded-full border px-2 py-0.5 text-xs text-muted-foreground"
+                            title={spendTitle([spendFor(ep.id)])}
+                          >
+                            {formatUsd(spendFor(ep.id).usd)}
+                          </span>
+                        )}
+                      </Link>
+                      {ep.finalVideos.length > 0 && (
+                        <div className="flex flex-wrap gap-3">
+                          {ep.finalVideos.map((video) => (
+                            <div key={video.id} className="flex flex-col gap-1">
+                              <video controls src={video.url} className="h-28 w-48 rounded border object-cover" />
+                              <span className="text-xs text-muted-foreground">
+                                {video.language ?? "Original"}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
                       )}
-                    </Link>
+                    </div>
                   ))}
                 </div>
               )}

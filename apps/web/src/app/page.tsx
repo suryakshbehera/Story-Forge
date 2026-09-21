@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { NewProjectDialog } from "@/components/new-project-dialog";
+import { DownloadAppButton } from "@/components/download-app-button";
 import { TryDemoProjectButton } from "@/components/try-demo-project-button";
 import { ProjectCardMenu } from "@/components/project-card-menu";
 import { ProjectCoverImage } from "@/components/project-cover-image";
@@ -28,7 +29,10 @@ export default async function HomePage() {
             Single videos and multi-season series, all built manually with AI assistance.
           </p>
         </div>
-        <NewProjectDialog />
+        <div className="flex items-center gap-2">
+          <DownloadAppButton />
+          <NewProjectDialog />
+        </div>
       </div>
 
       {projects.length === 0 ? (

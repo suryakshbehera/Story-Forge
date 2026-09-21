@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { Settings, Users } from "lucide-react";
+import { Download, Settings, Users } from "lucide-react";
 import { getCurrentUserDetail } from "@/lib/auth";
+import { APP_DOWNLOAD_URL } from "@/lib/app-download";
 import { LogoutButton } from "@/components/logout-button";
 import { JobTray } from "@/components/job-tray";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -17,6 +18,16 @@ export async function SiteHeader() {
         <div className="flex items-center gap-2 sm:gap-4">
           <JobTray />
           <ThemeToggle />
+          <a
+            href={APP_DOWNLOAD_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Download the app"
+            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <Download className="size-4" />
+            <span className="hidden sm:inline">Get the app</span>
+          </a>
           {user?.role === "ADMIN" && (
             <>
               <Link

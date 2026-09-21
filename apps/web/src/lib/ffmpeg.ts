@@ -115,6 +115,27 @@ export async function probeDuration(filePath: string): Promise<number> {
   }
 }
 
+// Decodes any audio file to raw mono 16-bit little-endian PCM at `sampleRate`
+// and returns the bytes — used by lib/mouth-flap.ts to read a take's loudness
+// envelope. Not run through runFfmpeg because that helper discards stdout.
+export async function decodeMonoPcm16(filePath: string, sampleRate: number): Promise<Buffer> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffmpeg",
+      ["-hide_banner", "-loglevel", "error", "-i", filePath, "-vn", "-ac", "1", "-ar", String(sampleRate), "-f", "s16le", "-"],
+      { encoding: "buffer", maxBuffer: MAX_BUFFER }
+    );
+    return stdout;
+  } catch (error) {
+    if (isMissingBinaryError(error)) {
+      throw new FfmpegError(
+        "ffmpeg isn't installed or isn't on PATH. Install ffmpeg and confirm `ffmpeg -version` works, then try again."
+      );
+    }
+    throw new FfmpegError(`ffmpeg audio decode failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 // A generated clip's native frame rate — used to decide whether a real
 // image-to-video clip needs true motion interpolation instead of plain frame
 // duplication when normalized to the assembly's target fps (see
@@ -141,5 +162,68 @@ export async function probeFps(filePath: string): Promise<number> {
       );
     }
     throw new FfmpegError(`ffprobe failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// A still's pixel dimensions — lib/mouth-flap.ts needs them to map a mouth
+// box found at analysis resolution back onto the full-size image.
+export async function probeImageSize(filePath: string): Promise<{ width: number; height: number }> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", filePath],
+      { maxBuffer: MAX_BUFFER }
+    );
+    const [width, height] = stdout.trim().split(",").map(Number);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+      throw new FfmpegError(`ffprobe returned invalid dimensions for ${filePath}: "${stdout.trim()}"`);
+    }
+    return { width, height };
+  } catch (error) {
+    if (error instanceof FfmpegError) throw error;
+    if (isMissingBinaryError(error)) {
+      throw new FfmpegError(
+        "ffprobe isn't installed or isn't on PATH. It normally ships alongside ffmpeg — reinstall ffmpeg and confirm `ffprobe -version` works."
+      );
+    }
+    throw new FfmpegError(`ffprobe failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Blurred absolute difference of two stills, as raw 8-bit gray at
+// `width`x`height` — the input to lib/mouth-flap.ts's mouth-box search. The
+// blur is what makes the search work: it merges the separately-drawn lip,
+// teeth and jaw changes into one blob while flattening the sparse 1px
+// redraw noise the image model sprinkles over the rest of the frame.
+// Not run through runFfmpeg because that helper discards stdout.
+export async function diffImagesGray(
+  basePath: string,
+  otherPath: string,
+  width: number,
+  height: number,
+  blurSigma: number
+): Promise<Buffer> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffmpeg",
+      [
+        "-hide_banner", "-loglevel", "error",
+        "-i", basePath,
+        "-i", otherPath,
+        "-filter_complex",
+        `[0:v]scale=${width}:${height}[a];[1:v]scale=${width}:${height}[b];` +
+          `[a][b]blend=all_mode=difference,format=gray,gblur=sigma=${blurSigma}`,
+        "-f", "rawvideo", "-pix_fmt", "gray", "-",
+      ],
+      { encoding: "buffer", maxBuffer: MAX_BUFFER }
+    );
+    return stdout;
+  } catch (error) {
+    if (isMissingBinaryError(error)) {
+      throw new FfmpegError(
+        "ffmpeg isn't installed or isn't on PATH. Install ffmpeg and confirm `ffmpeg -version` works, then try again."
+      );
+    }
+    throw new FfmpegError(`ffmpeg image diff failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

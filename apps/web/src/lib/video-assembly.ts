@@ -6,6 +6,17 @@ import { parentWhere, type ScenesParentType } from "@/lib/scenes";
 import { runFfmpeg, probeDuration, probeFps, hasAudioStream } from "@/lib/ffmpeg";
 import { storage, buildStorageKey } from "@/lib/storage";
 import { effectiveShotSeconds, MIN_SHOT_SECONDS } from "@/lib/illustration-timing";
+import {
+  analyzeMouthIntervals,
+  detectMouthBox,
+  flapRenderBlockedReason,
+  mapVoiceItemsToShots,
+  mouthCompositeFilter,
+  mouthOpenEnableExpression,
+  mouthOpenKey,
+  type MouthBox,
+  type MouthInterval,
+} from "@/lib/mouth-flap";
 import { STALE_MS } from "@/lib/generation-claims";
 import { recordGenerationEvent, resolveParentProjectId } from "@/lib/generation-events";
 
@@ -410,6 +421,78 @@ async function buildSceneVoiceTrack(scene: AssemblyScene, workDir: string, index
 // silence needed to reconcile picture and voice, they're the same number by
 // construction. null (no voice yet, e.g. generateSilentAssembly) keeps each
 // shot at its own natural, unscaled duration.
+// 2D mouth flap (see lib/mouth-flap.ts). Only when the scene's shots line up
+// one-to-one with its voice takes: each shot then lasts exactly as long as
+// its own take (instead of the authored/proportional shot length), and a
+// speaking shot that has an open-mouth twin swaps to it by that take's
+// loudness. Returns null — leaving the render on the existing proportional
+// timing, byte for byte — whenever the mapping isn't exact.
+interface MouthFlapPlan {
+  takeSeconds: number[];
+  flaps: (MouthFlap | null)[];
+}
+
+interface MouthFlap {
+  baseImagePath: string;
+  openImagePath: string;
+  // Only this region of the twin is composited back. See detectMouthBox —
+  // swapping the whole frame made the background twitch with the mouth,
+  // because the twin is a whole-frame regeneration rather than a mouth edit.
+  box: MouthBox;
+  intervals: MouthInterval[];
+}
+
+async function planMouthFlap(scene: AssemblyScene, workDir: string, index: number): Promise<MouthFlapPlan | null> {
+  const items = mapVoiceItemsToShots(scene);
+  if (!items) return null;
+  // Shared with the scene voice panel's readiness check, so the two can't
+  // disagree about whether this scene will actually flap.
+  if (flapRenderBlockedReason(scene, items)) return null;
+  const narrationExpected = items[0].kind === "narration";
+
+  // Cheapest gate first. Take-length shot timing exists only to line the
+  // picture up with the flap, so a scene with no twin anywhere must stay on
+  // its authored per-shot durations — otherwise merely having one shot per
+  // line would silently throw away the pacing the user set, in scenes that
+  // never opted into Talking Frames at all.
+  const hasTwin = await Promise.all(
+    items.map(async (item, i) =>
+      item.kind === "dialogue"
+        ? Boolean(await storage.stat(mouthOpenKey(scene.shots[i].id, scene.shots[i].images[0].id)))
+        : false
+    )
+  );
+  if (!hasTwin.some(Boolean)) return null;
+
+  const takes = [...(narrationExpected ? [scene.narrationAudio[0]] : []), ...scene.dialogueLines.map((line) => line.audio[0])];
+  const takePaths = await Promise.all(takes.map((take, i) => writeAssetToTemp(take, workDir, `scene${index}-flaptake${i}`)));
+  const takeSeconds = await Promise.all(takePaths.map((p) => probeDuration(p)));
+
+  const flaps = await Promise.all(
+    items.map(async (item, i) => {
+      if (!hasTwin[i]) return null;
+      const shot = scene.shots[i];
+      const openBytes = await storage.get(mouthOpenKey(shot.id, shot.images[0].id));
+      if (!openBytes) return null;
+      const intervals = await analyzeMouthIntervals(takePaths[i]);
+      if (intervals.length === 0) return null;
+      const openImagePath = path.join(workDir, `scene${index}-shot${i}-open.png`);
+      await fs.writeFile(openImagePath, openBytes);
+      const baseImagePath = await writeAssetToTemp(shot.images[0], workDir, `scene${index}-shot${i}-image`);
+      // No localized change means the twin isn't a mouth edit of this still
+      // (the model reframed or redrew it). Leaving the shot un-flapped keeps
+      // it a clean still rather than swapping in a picture that doesn't match.
+      const box = await detectMouthBox(baseImagePath, openImagePath);
+      if (!box) return null;
+      return { baseImagePath, openImagePath, box, intervals };
+    })
+  );
+  // Twins existed but none survived (no speech detected, or no localized
+  // change to composite) — same reasoning as the hasTwin gate above.
+  if (!flaps.some(Boolean)) return null;
+  return { takeSeconds, flaps };
+}
+
 async function buildIllustrationSegment(
   scene: AssemblyScene,
   workDir: string,
@@ -419,7 +502,10 @@ async function buildIllustrationSegment(
   scaleToSeconds: number | null
 ): Promise<string> {
   const shots = scene.shots;
-  const naturalDurations = shots.map((shot) => effectiveShotSeconds(shot.durationSeconds));
+  // Only planned when the picture is being fit to a real voice track — the
+  // silent assembly (scaleToSeconds null) has nothing to time or flap against.
+  const mouthPlan = scaleToSeconds != null ? await planMouthFlap(scene, workDir, index) : null;
+  const naturalDurations = mouthPlan ? mouthPlan.takeSeconds : shots.map((shot) => effectiveShotSeconds(shot.durationSeconds));
   const naturalTotal = naturalDurations.reduce((sum, d) => sum + d, 0);
   const scale = scaleToSeconds != null && naturalTotal > 0 ? scaleToSeconds / naturalTotal : 1;
 
@@ -427,17 +513,37 @@ async function buildIllustrationSegment(
   for (const [i, shot] of shots.entries()) {
     const shotDuration = Math.max(naturalDurations[i] * scale, MIN_SHOT_SECONDS);
     const shotPath = path.join(workDir, `scene${index}-shot${i}.mp4`);
-    const imagePath = await writeAssetToTemp(shot.images[0], workDir, `scene${index}-shot${i}-image`);
+    const flap = mouthPlan?.flaps[i] ?? null;
+    const imagePath = flap?.baseImagePath ?? (await writeAssetToTemp(shot.images[0], workDir, `scene${index}-shot${i}-image`));
     const frames = Math.max(Math.round(shotDuration * target.fps), 1);
-    await runFfmpeg([
-      "-loop", "1",
-      "-i", imagePath,
-      "-t", shotDuration.toFixed(3),
-      "-vf", buildCameraFilter(shot.cameraMovement, frames, target),
-      "-pix_fmt", "yuv420p",
-      "-an",
-      shotPath,
-    ]);
+    if (flap) {
+      const camera = buildCameraFilter(shot.cameraMovement, frames, target);
+      const enable = mouthOpenEnableExpression(flap.intervals, scale);
+      // Composite the mouth in source coordinates first, then move the
+      // camera over the finished picture — so the box stays valid whatever
+      // the framing, and the camera runs once instead of on both copies.
+      await runFfmpeg([
+        "-loop", "1",
+        "-i", imagePath,
+        "-loop", "1",
+        "-i", flap.openImagePath,
+        "-t", shotDuration.toFixed(3),
+        "-filter_complex", `${mouthCompositeFilter(flap.box, enable, "flapped")};[flapped]${camera},format=yuv420p[v]`,
+        "-map", "[v]",
+        "-an",
+        shotPath,
+      ]);
+    } else {
+      await runFfmpeg([
+        "-loop", "1",
+        "-i", imagePath,
+        "-t", shotDuration.toFixed(3),
+        "-vf", buildCameraFilter(shot.cameraMovement, frames, target),
+        "-pix_fmt", "yuv420p",
+        "-an",
+        shotPath,
+      ]);
+    }
     shotPaths.push(shotPath);
   }
 

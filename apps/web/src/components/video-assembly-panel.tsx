@@ -60,10 +60,18 @@ export function VideoAssemblyPanel({
   const [generating, setGenerating] = useState(() =>
     isGenerationActive(initialFinalVideoGenerationStartedAt, "finalAssembly")
   );
-  // Dubbing — this panel only ever shows/manages the primary-language
-  // render history; dub renders (Asset.language set) are TranslationsPanel's
-  // concern, reading the same finalVideos array below with its own filter.
+  // Dubbing — this panel only ever *manages* (assembles/selects/deletes) the
+  // primary-language render history; dub renders (Asset.language set) stay
+  // TranslationsPanel's concern, which reads the same finalVideos array with
+  // its own filter. They are still listed read-only below ("Other language
+  // renders"): a finished dub is a finished render of this episode, and
+  // Final Assembly is where anyone looks for one — hiding it entirely behind
+  // a language dropdown in another panel meant finished dubs looked missing.
   const [finalVideos, setFinalVideos] = useState(initialFinalVideos.filter((v) => !v.language));
+  // Read-only, and deliberately not kept in sync with a dub rendered later in
+  // TranslationsPanel (a page refresh picks those up) — a second writable
+  // copy of that panel's state is exactly the duplication this avoids.
+  const dubVideos = initialFinalVideos.filter((v) => v.language);
   const [lastError, setLastError] = useState<GenerationErrorInfo | null>(initialError ?? null);
   // Off by default — matches the pre-existing behavior of always discarding
   // a video clip's own baked-in audio (e.g. Veo3 Lite's generated sound) in
@@ -240,6 +248,33 @@ export function VideoAssemblyPanel({
                   >
                     <Trash2 className="size-3.5" />
                   </Button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {dubVideos.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-xs text-muted-foreground">
+                Other language renders — manage these in Translations &amp; Dubbing below.
+              </p>
+              {dubVideos.map((video) => (
+                <div
+                  key={video.id}
+                  className={`flex flex-wrap items-center gap-2 rounded-md border p-1.5 ${video.isSelected ? "border-foreground" : ""}`}
+                >
+                  <video controls src={video.url} className="h-24 w-40 rounded object-cover" />
+                  <span className="text-sm font-medium">{video.language}</span>
+                  {video.isSelected && <span className="text-xs text-muted-foreground">Selected</span>}
+                  <a
+                    href={video.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-auto text-muted-foreground hover:text-foreground"
+                    aria-label={`Download the ${video.language} render`}
+                  >
+                    <Download className="size-3.5" />
+                  </a>
                 </div>
               ))}
             </div>
